@@ -1,3 +1,8 @@
+jest.mock('../../audit/audit.service', () => ({
+  recordAuditEvent: jest.fn().mockResolvedValue(null),
+  listAuditEvents: jest.fn().mockResolvedValue([]),
+}));
+
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const authRouter = require('../../../routes/auth');
@@ -17,12 +22,21 @@ function createTestServer() {
 
 describe('credential security', () => {
   let server;
+  let previousSnapshot;
+  let hadPreviousSnapshot;
 
   beforeAll(() => {
+    hadPreviousSnapshot = Object.prototype.hasOwnProperty.call(global, '__workspaceSnapshot');
+    previousSnapshot = global.__workspaceSnapshot;
+    global.__workspaceSnapshot = JSON.parse(JSON.stringify(loadSchoolData()));
     server = createTestServer();
   });
 
-  afterAll(() => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))));
+  afterAll(async () => {
+    await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    if (hadPreviousSnapshot) global.__workspaceSnapshot = previousSnapshot;
+    else delete global.__workspaceSnapshot;
+  });
 
   test('issues signed tokens and blocks temporary-password users from protected routes', async () => {
     const port = server.address().port;

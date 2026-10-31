@@ -151,6 +151,38 @@ describe('backend audit logging', () => {
     expect(response.status).toBe(403);
   });
 
+  test('school authority can read teacher activity without message contents or request metadata', async () => {
+    const port = apiServer.address().port;
+    const teacherToken = token({ userId: 'globy-school:T001', tenantId: 'globy-school', roles: ['teacher'] });
+    const authorityToken = token({ userId: 'globy-school:authority@globyedu.test', tenantId: 'globy-school', roles: ['school_authority'] });
+    const sent = await fetch(`http://127.0.0.1:${port}/api/v1/schools/globy-school/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: ['Bearer', teacherToken].join(' '),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ recipientId: 'STU001', subject: 'Class notice', body: 'Private message content.' }),
+    });
+    expect(sent.status).toBe(201);
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/v1/schools/globy-school/activity`, {
+      headers: { Authorization: ['Bearer', authorityToken].join(' ') },
+    });
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'teacher.message.sent', actorId: 'globy-school:T001' }),
+    ]));
+    expect(JSON.stringify(body)).not.toContain('Private message content.');
+    expect(JSON.stringify(body)).not.toContain('userAgent');
+    expect(JSON.stringify(body)).not.toContain('resourceId');
+
+    const teacherResponse = await fetch(`http://127.0.0.1:${port}/api/v1/schools/globy-school/activity`, {
+      headers: { Authorization: ['Bearer', teacherToken].join(' ') },
+    });
+    expect(teacherResponse.status).toBe(403);
+  });
+
   test('only Super Admin can read audit logs and records never contain secrets', async () => {
     await recordAuditEvent({
       actorId: 'actor-1',

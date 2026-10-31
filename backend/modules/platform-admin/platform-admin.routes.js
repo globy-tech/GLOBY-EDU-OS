@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const authMiddleware = require('../auth/middleware/auth.middleware');
 const { roleGuard } = require('../auth/middleware/role.middleware');
+const firebaseCore = require('../../firebase.core');
 const platformAdminService = require('./platform-admin.service');
 const { recordAuditEvent } = require('../audit/audit.service');
 
@@ -34,6 +35,28 @@ function platformAdminGuard(req, res, next) {
 
 // Only active platform super admins may manage other platform administrators.
 router.use(authMiddleware, roleGuard(['super_admin']), platformAdminGuard);
+
+router.get('/maintenance', async (req, res) => {
+  try {
+    const maintenanceMode = await firebaseCore.getMaintenanceMode();
+    return res.json({ status: 'ok', maintenanceMode });
+  } catch {
+    return res.status(503).json({ status: 'error', message: 'Unable to load maintenance settings.' });
+  }
+});
+
+router.put('/maintenance', async (req, res) => {
+  try {
+    if (typeof req.body?.maintenanceMode !== 'boolean') {
+      return res.status(400).json({ status: 'error', message: 'A boolean maintenanceMode value is required.' });
+    }
+    const settings = await firebaseCore.setMaintenanceMode(req.body.maintenanceMode, req.user.userId);
+    await auditPlatformAdminAction(req, 'platform.maintenance_mode_updated', 'global');
+    return res.json({ status: 'ok', maintenanceMode: settings.maintenanceMode });
+  } catch {
+    return res.status(503).json({ status: 'error', message: 'Unable to update maintenance settings.' });
+  }
+});
 
 router.get('/', async (req, res) => {
   try {

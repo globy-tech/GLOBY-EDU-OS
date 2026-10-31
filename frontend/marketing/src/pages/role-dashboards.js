@@ -238,7 +238,7 @@ function renderAttendanceModule() {
   return `
     <div class="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm">
       <h2 class="text-2xl font-semibold text-slate-900">Attendance Management</h2>
-      <p class="mt-2 text-sm text-slate-600">Record and track attendance for all students and staff</p>
+      <p class="mt-2 text-sm text-slate-600">Attendance records are submitted by authorized teachers</p>
       <div class="mt-6 grid gap-4 sm:grid-cols-3">
         <div class="rounded-lg bg-sky-50 p-4">
           <p class="text-sm text-slate-600">Today's Present</p>
@@ -253,7 +253,6 @@ function renderAttendanceModule() {
           <p class="mt-2 text-2xl font-bold text-emerald-700">—%</p>
         </div>
       </div>
-      <button data-school-section-action="record-attendance" class="mt-6 rounded-full bg-sky-600 px-5 py-2 text-sm font-semibold text-white">Record Attendance</button>
     </div>
   `;
 }

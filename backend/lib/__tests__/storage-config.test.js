@@ -33,6 +33,26 @@ describe('Cloudflare R2 configuration', () => {
 
     process.env.CLOUDFLARE_R2_BUCKET = 'school-files';
     expect(storage.isR2Configured()).toBe(true);
+    expect(storage.getR2ConfigurationStatus()).toEqual({
+      configured: true,
+      missingVariables: [],
+      invalidVariables: [],
+    });
+  });
+
+  it('reports incomplete configuration by variable name without exposing values', () => {
+    process.env.CLOUDFLARE_R2_ACCOUNT_ID = 'account-test';
+    process.env.CLOUDFLARE_R2_ENDPOINT = 'https://wrong-account.r2.cloudflarestorage.com';
+
+    expect(storage.getR2ConfigurationStatus()).toEqual({
+      configured: false,
+      missingVariables: [
+        'CLOUDFLARE_R2_ACCESS_KEY_ID',
+        'CLOUDFLARE_R2_SECRET_ACCESS_KEY',
+        'CLOUDFLARE_R2_BUCKET',
+      ],
+      invalidVariables: ['CLOUDFLARE_R2_ENDPOINT'],
+    });
   });
 
   it('rejects placeholder public URLs and builds tenant-path URLs only from a configured base', () => {

@@ -15,11 +15,19 @@ const {
 async function tenantMiddleware(req, res, next) {
   try {
     const user = req.user;
-    const requestedSchoolId = req.params.schoolId || req.body.schoolId;
+    if (!user) return res.status(401).json({ status: 'error', message: 'Authentication required' });
+
+    let requestedSchoolId = req.params.schoolId || req.body?.schoolId || user.schoolId || '';
+    if (!requestedSchoolId && user.tenantId) {
+      if (firebaseData.isFirebaseDataConfigured() || prisma?.__stub) {
+        requestedSchoolId = user.tenantId;
+      } else {
+        const userTenant = await prisma.tenant.findUnique({ where: { id: user.tenantId } }).catch(() => null);
+        requestedSchoolId = userTenant?.schoolId || '';
+      }
+    }
     const fallbackSchools = process.env.NODE_ENV !== 'production' && prisma?.__stub ? loadSchoolData() : [];
     const hostMatch = resolveTenantFromHostname(req.headers?.host || req.hostname || '', fallbackSchools);
-
-    if (!user) return res.status(401).json({ status: 'error', message: 'Authentication required' });
 
     if (user.status && ['suspended', 'inactive', 'blocked', 'disabled'].includes(String(user.status).trim().toLowerCase())) {
       return res.status(403).json({ status: 'error', code: 'ACCOUNT_SUSPENDED', message: 'Your account has been suspended. Please contact your school administrator.' });
@@ -51,7 +59,7 @@ async function tenantMiddleware(req, res, next) {
       return res.status(400).json({ status: 'error', message: 'School ID is required' });
     }
 
-    const resolvedSchoolId = req.params.schoolId || req.body.schoolId || hostMatch?.schoolId;
+    const resolvedSchoolId = req.params.schoolId || req.body?.schoolId || requestedSchoolId || hostMatch?.schoolId;
 
     if (firebaseData.isFirebaseDataConfigured()) {
       const tenant = await firebaseCore.getSchoolAggregate(resolvedSchoolId).catch(() => null);

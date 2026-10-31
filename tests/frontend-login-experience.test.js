@@ -42,8 +42,8 @@ describe('login experience', () => {
     expect(mainSource).toContain("localStorage.removeItem('globyedu_accessToken');");
     expect(mainSource).toContain("localStorage.removeItem('globyedu_userRole');");
     expect(mainSource).toContain("profile.email = localStorage.getItem('globyedu_userEmail') || profile.email || '';");
-    expect(serviceWorkerSource).toContain("const CACHE_NAME = 'globyedu-pwa-v10';");
-    expect(serviceWorkerSource).toContain('/src/main.js?v=20260926-teacher-student-fix');
+    expect(serviceWorkerSource).toContain("const CACHE_NAME = 'globyedu-pwa-v17';");
+    expect(serviceWorkerSource).toContain('/src/main.js?v=20261022-neutral-upload-copy');
     expect(serviceWorkerSource).toContain('/src/assets/images/ui/globyedu-icon-512.png');
     expect(serviceWorkerSource).not.toContain('20260923-pricing-fix');
     expect(serviceWorkerSource).toContain("if (/\\.(?:css|js)$/.test(requestUrl.pathname))");
@@ -63,9 +63,10 @@ describe('login experience', () => {
   it('serializes student profile uploads to the school record instead of only local storage', () => {
     const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
 
-    expect(mainSource).toContain("localStorage.setItem('globyedu_profilePhoto', remoteUrl);");
+    expect(mainSource).not.toContain("localStorage.setItem('globyedu_profilePhoto', uploadedPhoto.url);");
     expect(mainSource).toContain('updateSchoolEntity(token, schoolId, \'students\', studentId, {');
-    expect(mainSource).toContain('profilePhoto: remoteUrl');
+    expect(mainSource).toContain('profilePhoto: uploadedPhoto.url');
+    expect(mainSource).toContain('profilePhotoPath: uploadedPhoto.path');
   });
 
   it('blocks protected cross-role and school/admin hash routes when a different authenticated role is active', () => {
@@ -97,6 +98,16 @@ describe('login experience', () => {
     expect(routeSource).toContain('location.pathname.replace');
     expect(routeSource).toContain("current === 'admin/login'");
     expect(routeSource).not.toContain('roleFromResponse');
+  });
+
+  it('shows trial expiry separately from operational suspension and provides support contact options', () => {
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
+
+    expect(mainSource).toContain("details.code === 'SUBSCRIPTION_EXPIRED'");
+    expect(mainSource).toContain('This school trial or subscription has expired');
+    expect(mainSource).toContain('mailto:support@globyedu.com');
+    expect(mainSource).toContain('href="#/contact">Contact us</a>');
+    expect(mainSource).toContain("renderSuspendedSchoolPage(event.detail || {});");
   });
 });
 

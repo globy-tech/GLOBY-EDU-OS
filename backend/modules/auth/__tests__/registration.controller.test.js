@@ -87,6 +87,28 @@ describe('public registration controller diagnostics', () => {
     return { response, body: await response.json() };
   }
 
+  test('new registrations receive a 14-day trial from the trial start date', async () => {
+    const email = `trial-duration-${Date.now()}@example.test`;
+    schoolService.createSchool.mockResolvedValue({
+      schoolId: 'GLB-2026-TRIAL',
+      trialEndsAt: new Date(),
+      headAccount: { username: email, password: 'ValidPassword!1' },
+    });
+    authService.login.mockResolvedValue({
+      accessToken: 'test-access-token',
+      refreshToken: 'test-refresh-token',
+      user: { id: 'trial-user', email, roles: ['school_head'] },
+    });
+
+    const result = await postRegistration(createRegistrationPayload(email));
+    const schoolPayload = schoolService.createSchool.mock.calls[0][0];
+
+    expect(result.response.status).toBe(200);
+    expect(schoolPayload.subscriptionPlan).toBe('14-Day Trial');
+    expect(schoolPayload.trialStatus).toBe('14-Day Trial');
+    expect(new Date(schoolPayload.trialEndsAt).getTime() - new Date(schoolPayload.trialStartedAt).getTime()).toBe(14 * 24 * 60 * 60 * 1000);
+  });
+
   test('missing APP_URL prevents Firebase registration before creating the school', async () => {
     const email = `app-url-${Date.now()}@example.test`;
     firebaseData.isFirebaseDataConfigured.mockReturnValue(true);

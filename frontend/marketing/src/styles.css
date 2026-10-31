@@ -235,6 +235,11 @@ main > section { padding-top: 0; }
   [data-admin-page] textarea {
     max-width: 100%;
   }
+
+    [data-school-student-action],
+    [data-school-teacher-action] {
+      min-height: 44px;
+    }
 }
 
 /* Simple visually-hidden helper */

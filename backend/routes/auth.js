@@ -10,10 +10,12 @@ const crypto = require('crypto');
 const config = require('../config/auth.config');
 const { getAppUrl } = require('../config/app-url.config');
 const { signAccessToken } = require('../modules/auth/utils/token');
+const { revokeAccessToken } = require('../modules/auth/utils/access-token-revocation');
 const authService = require('../modules/auth/auth.service');
 const firebaseData = require('../firebase.data');
 const firebaseCore = require('../firebase.core');
 const schoolService = require('../modules/school/school.service');
+const { DEFAULT_TRIAL_LABEL, createTrialEndDate } = require('../modules/school/trial-period');
 const { sendEmail, resetTemplate, welcomeTemplate } = require('../modules/auth/utils/email');
 const {
   loadSchoolData,
@@ -56,7 +58,9 @@ const DEV_SUPER_ADMINS = [
   { username: 'hellogloby@gmail.com', fullName: 'Benjamin' },
   { username: 'benjaminataeta@gmail.com', fullName: 'Benjamin' },
 ];
-const RESET_TOKEN_FILE = path.join(__dirname, '../data/password-reset-tokens.json');
+const RESET_TOKEN_FILE = process.env.GLOBY_PASSWORD_RESET_TOKENS_FILE
+  ? path.resolve(process.env.GLOBY_PASSWORD_RESET_TOKENS_FILE)
+  : path.join(__dirname, '../data/password-reset-tokens.json');
 function isStrongPassword(password) {
   return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/.test(String(password || ''));
 }
@@ -149,7 +153,7 @@ function markResetTokenUsed(rawToken) {
 }
 
 async function ensureDevelopmentAccounts() {
-  if (!DEVELOPMENT_MODE) {
+  if (!DEVELOPMENT_MODE || String(process.env.GLOBY_QA_MODE || '').trim().toLowerCase() === 'true') {
     return;
   }
 
@@ -230,6 +234,21 @@ router.get('/schools', async (req, res) => {
   }
 });
 
+if (useFallbackAuth) {
+  router.post('/logout', authMiddleware, (req, res) => {
+    const token = String(req.headers.authorization || '').slice('Bearer '.length);
+    revokeAccessToken(token, req.user?.exp);
+    res.clearCookie('globyedu_refresh_token', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production' || Boolean(String(process.env.RENDER_SERVICE_ID || '').trim()),
+      sameSite: process.env.NODE_ENV === 'production' || Boolean(String(process.env.RENDER_SERVICE_ID || '').trim()) ? 'strict' : 'lax',
+      path: '/api/v1/auth',
+      ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}),
+    });
+    return res.json({ status: 'ok' });
+  });
+}
+
   // Endpoint: POST /api/v1/auth/register
   // Create a new school account for marketing signup.
   router.post('/register', async (req, res) => {
@@ -251,7 +270,8 @@ router.get('/schools', async (req, res) => {
     const headEmail = String(head.email || payload.email || '').trim().toLowerCase();
     const headPassword = head.password || payload.password || '';
     const passwordHash = await bcrypt.hash(headPassword, config.bcrypt.saltRounds);
-    const trialEndsAt = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+    const trialStartedAt = new Date().toISOString();
+    const trialEndsAt = createTrialEndDate(trialStartedAt).toISOString();
     const newSchool = {
       schoolId,
       tenantId: schoolId,
@@ -265,11 +285,13 @@ router.get('/schools', async (req, res) => {
       address: payload.address || null,
       phone: payload.phone || null,
       email: payload.email || null,
-      subscriptionPlan: '5-Day Trial',
+      subscriptionPlan: DEFAULT_TRIAL_LABEL,
       subscriptionStatus: 'trial',
-      trialStatus: '5-Day Trial',
+      trialStatus: DEFAULT_TRIAL_LABEL,
       schoolStatus: 'active',
+      trialStartedAt,
       trialEndsAt,
+      createdAt: trialStartedAt,
       settings: {
         theme: 'default',
         notifications: { emailEnabled: true, smsEnabled: false },
@@ -299,7 +321,7 @@ router.get('/schools', async (req, res) => {
       schoolId,
       tenantId: schoolId,
       trialEndsAt,
-      trialStatus: '5-Day Trial',
+      trialStatus: DEFAULT_TRIAL_LABEL,
       accountStatus: 'trial',
       schoolName,
       headAccount: { email: headEmail },
@@ -464,10 +486,11 @@ router.get('/schools', async (req, res) => {
 
     const token = signAccessToken({
       userId: `${school?.schoolId || DEV_TENANT_ID}:${user.username || username}`,
-      tenantId: school?.schoolId || DEV_TENANT_ID,
+      tenantId: platformAdminMode === true ? null : school?.schoolId || DEV_TENANT_ID,
       roles: [user.role],
       platformAdmin: platformAdminMode === true,
       passwordNeedsReset: user.passwordNeedsReset === true,
+      jti: crypto.randomBytes(16).toString('hex'),
     });
     const response = {
       token,
@@ -676,6 +699,22 @@ router.get('/schools', async (req, res) => {
         return res.status(400).json({ status: 'error', message: 'Email is required.' });
       }
 
+      if (firebaseData.isFirebaseDataConfigured()) {
+        try {
+          await authService.forgotPassword(email, {
+            loginType,
+            deliverResetToken: async (token) => {
+              const appUrl = getAppUrl();
+              const delivery = await sendEmail(email, 'Reset your GlobyEdu password', resetTemplate(token, appUrl));
+              if (delivery?.ok !== true) throw new Error('Password reset email delivery failed.');
+            },
+          });
+        } catch {
+          // Keep account existence and mail-provider failures indistinguishable to callers.
+        }
+        return res.json({ status: 'ok' });
+      }
+
       const schools = loadSchoolData();
       let exists = false;
       let targetSchool = null;
@@ -710,6 +749,12 @@ router.get('/schools', async (req, res) => {
         return res.status(400).json({ status: 'error', message: 'New password must be at least 8 characters and include uppercase, lowercase, number, and symbol.' });
       }
 
+      if (firebaseData.isFirebaseDataConfigured()) {
+        await authService.resetPassword(token, password);
+        await recordAuditEvent({ req, action: 'auth.password_reset', resourceType: 'user', metadata: { initiatedBy: 'recovery_token' } });
+        return res.json({ status: 'ok' });
+      }
+
       const record = validateResetToken(token);
       if (!record) {
         return res.status(400).json({ status: 'error', message: 'Invalid or expired reset token.' });
@@ -738,7 +783,11 @@ router.get('/schools', async (req, res) => {
       await recordAuditEvent({ req, tenantId: schools.find((school) => (school.users || []).some((entry) => String(entry.username || '').toLowerCase() === record.email.toLowerCase()))?.schoolId || null, action: 'auth.password_reset', resourceType: 'user', metadata: { initiatedBy: 'recovery_token' } });
       return res.json({ status: 'ok' });
     } catch (error) {
-      return res.status(500).json({ status: 'error', message: 'Unable to reset password.' });
+      const invalidToken = error.message === 'Invalid or expired token';
+      return res.status(invalidToken ? 400 : 500).json({
+        status: 'error',
+        message: invalidToken ? 'Invalid or expired reset token.' : 'Unable to reset password.',
+      });
     }
   });
 
@@ -750,6 +799,13 @@ router.get('/schools', async (req, res) => {
       }
       if (!isStrongPassword(newPassword)) {
         return res.status(400).json({ status: 'error', message: 'New password must be at least 8 characters and include uppercase, lowercase, number, and symbol.' });
+      }
+
+      if (firebaseData.isFirebaseDataConfigured()) {
+        const session = await authService.changePassword(req.user.userId, oldPassword, newPassword);
+        setRefreshCookie(res, session.refreshToken);
+        await recordAuditEvent({ req, actorId: req.user.userId, actorRole: req.user.roles?.[0], tenantId: req.user.tenantId, action: 'auth.password_changed', resourceType: 'user', resourceId: req.user.userId });
+        return res.json({ status: 'ok', accessToken: session.accessToken, token: session.accessToken, passwordNeedsReset: false });
       }
 
       const match = findFallbackUserFromRequest(req);
@@ -769,11 +825,15 @@ router.get('/schools', async (req, res) => {
         roles: req.user.roles,
         platformAdmin: req.user.platformAdmin === true,
         passwordNeedsReset: false,
+        jti: crypto.randomBytes(16).toString('hex'),
       });
       await recordAuditEvent({ req, actorId: req.user.userId, actorRole: req.user.roles?.[0], tenantId: req.user.tenantId, action: 'auth.password_changed', resourceType: 'user', resourceId: req.user.userId });
       return res.json({ status: 'ok', accessToken, token: accessToken, passwordNeedsReset: false });
     } catch (error) {
       await recordAuditEvent({ req, actorId: req.user?.userId, actorRole: req.user?.roles?.[0], tenantId: req.user?.tenantId, action: 'auth.password_change_failed', resourceType: 'user', resourceId: req.user?.userId, success: false });
+      if (error.message === 'Invalid current password') {
+        return res.status(400).json({ status: 'error', message: 'Invalid current password.' });
+      }
       return res.status(500).json({ status: 'error', message: 'Unable to change password.' });
     }
   });

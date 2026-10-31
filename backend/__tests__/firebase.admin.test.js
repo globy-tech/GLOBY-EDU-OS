@@ -24,6 +24,7 @@ describe('firebase admin ADC configuration', () => {
     delete process.env.FIREBASE_PRIVATE_KEY;
     delete process.env.RENDER_SERVICE_ID;
     delete process.env.DATA_STORE_MODE;
+    delete process.env.GLOBY_QA_MODE;
     process.env.FIREBASE_PROJECT_ID = 'demo-project';
     jest.clearAllMocks();
   });
@@ -35,8 +36,20 @@ describe('firebase admin ADC configuration', () => {
     delete process.env.FIREBASE_CLIENT_EMAIL;
     delete process.env.FIREBASE_PRIVATE_KEY;
     delete process.env.RENDER_SERVICE_ID;
+    delete process.env.GLOBY_QA_MODE;
     jest.clearAllMocks();
   });
+
+  test('disables Firebase Admin configuration and token verification in isolated QA mode', async () => {
+    process.env.GLOBY_QA_MODE = 'true';
+    const firebaseAdmin = require('../firebase.admin');
+    const adminLib = require('firebase-admin/app');
+
+    expect(firebaseAdmin.isFirebaseConfigured()).toBe(false);
+    await expect(firebaseAdmin.verifyIdToken('qa-token')).rejects.toThrow(/disabled in isolated QA mode/);
+    expect(adminLib.__mockInitializeApp).not.toHaveBeenCalled();
+  });
+
   test('uses Application Default Credentials when service account env vars are absent', () => {
     const firebaseAdmin = require('../firebase.admin');
     const adminLib = require('firebase-admin/app');

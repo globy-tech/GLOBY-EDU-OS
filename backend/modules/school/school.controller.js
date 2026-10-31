@@ -7,7 +7,7 @@ const schoolService = require('./school.service');
 const authMiddleware = require('../auth/middleware/auth.middleware');
 const { roleGuard } = require('../auth/middleware/role.middleware');
 const tenantMiddleware = require('./middleware/tenant.middleware');
-const { recordAuditEvent } = require('../audit/audit.service');
+const { listAuditEvents, recordAuditEvent } = require('../audit/audit.service');
 
 async function auditSchoolAction(req, event) {
   await recordAuditEvent({
@@ -165,9 +165,41 @@ router.get('/:schoolId/assignments', authMiddleware, tenantMiddleware, roleGuard
   }
 });
 
+router.get('/:schoolId/activity', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority']), async (req, res) => {
+  try {
+    const activity = await listAuditEvents({
+      tenantId: req.params.schoolId,
+      actorRole: 'teacher',
+      limit: req.query.limit || 100,
+    });
+    const activityEntries = activity
+      .filter((entry) => entry.action?.startsWith('teacher.') || ['student.created', 'student.updated', 'student.archived'].includes(entry.action))
+      .map((entry) => ({
+        id: entry.id,
+        action: entry.action,
+        actorId: entry.actorId,
+        createdAt: entry.createdAt,
+        metadata: Object.fromEntries(['title', 'className', 'subject', 'recordCount', 'date', 'recipientCount']
+          .filter((key) => entry.metadata?.[key] !== undefined)
+          .map((key) => [key, entry.metadata[key]])),
+      }));
+    return res.json({ status: 'ok', activity: activityEntries });
+  } catch (err) {
+    return res.status(500).json({ status: 'error', message: 'Unable to load teacher activity.' });
+  }
+});
+
 router.post('/:schoolId/assignments', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'teacher', 'super_admin']), async (req, res) => {
   try {
     const assignment = await schoolService.createAssignment(req.params.schoolId, req.body || {}, req.user);
+    if (req.user?.roles?.includes('teacher')) {
+      await auditSchoolAction(req, {
+        action: 'teacher.assignment.created',
+        resourceType: 'assignment',
+        resourceId: assignment.id,
+        metadata: { title: assignment.title, className: assignment.className, subject: assignment.subject },
+      });
+    }
     return res.status(201).json({ status: 'ok', assignment });
   } catch (err) {
     return res.status(400).json({ status: 'error', message: err.message });
@@ -198,6 +230,14 @@ router.get('/:schoolId/lessons', authMiddleware, tenantMiddleware, roleGuard(['s
 router.post('/:schoolId/lessons', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'teacher', 'super_admin']), async (req, res) => {
   try {
     const lesson = await schoolService.createLesson(req.params.schoolId, req.body || {}, req.user);
+    if (req.user?.roles?.includes('teacher')) {
+      await auditSchoolAction(req, {
+        action: 'teacher.lesson.created',
+        resourceType: 'lesson',
+        resourceId: lesson.id,
+        metadata: { title: lesson.title, className: lesson.className, subject: lesson.subject },
+      });
+    }
     return res.status(201).json({ status: 'ok', lesson });
   } catch (err) {
     return res.status(400).json({ status: 'error', message: err.message });
@@ -210,7 +250,12 @@ router.post('/:schoolId/messages', authMiddleware, tenantMiddleware, roleGuard([
     const { schoolId } = req.params;
     const payload = req.body || {};
     const message = await schoolService.createWorkspaceMessage(schoolId, payload, req.user);
-    await auditSchoolAction(req, { action: 'message.sent', resourceType: 'message', resourceId: message.id });
+    await auditSchoolAction(req, {
+      action: req.user?.roles?.includes('teacher') ? 'teacher.message.sent' : 'message.sent',
+      resourceType: 'message',
+      resourceId: message.id,
+      ...(req.user?.roles?.includes('teacher') ? { metadata: { recipientCount: Array.isArray(payload.recipientIds) ? payload.recipientIds.length : 1 } } : {}),
+    });
     return res.status(201).json({ status: 'ok', message });
   } catch (err) {
     return res.status(400).json({ status: 'error', message: err.message });
@@ -222,6 +267,9 @@ router.put('/:schoolId/messages/:messageId', authMiddleware, tenantMiddleware, r
   try {
     const { schoolId, messageId } = req.params;
     const message = await schoolService.updateWorkspaceMessage(schoolId, messageId, req.body || {}, req.user);
+    if (req.user?.roles?.includes('teacher')) {
+      await auditSchoolAction(req, { action: 'teacher.message.updated', resourceType: 'message', resourceId: messageId });
+    }
     return res.json({ status: 'ok', message });
   } catch (err) {
     return res.status(400).json({ status: 'error', message: err.message });
@@ -233,6 +281,9 @@ router.delete('/:schoolId/messages/:messageId', authMiddleware, tenantMiddleware
   try {
     const { schoolId, messageId } = req.params;
     const message = await schoolService.deleteWorkspaceMessage(schoolId, messageId, req.user);
+    if (req.user?.roles?.includes('teacher')) {
+      await auditSchoolAction(req, { action: 'teacher.message.deleted', resourceType: 'message', resourceId: messageId });
+    }
     return res.json({ status: 'ok', message });
   } catch (err) {
     return res.status(400).json({ status: 'error', message: err.message });
@@ -318,6 +369,14 @@ router.put('/:schoolId', authMiddleware, tenantMiddleware, roleGuard(['school_he
     const schoolId = req.params.schoolId;
     const payload = req.body || {};
     const roles = Array.isArray(req.user?.roles) ? req.user.roles : [];
+    if (['payments', 'receipts'].some((field) => Object.prototype.hasOwnProperty.call(payload, field))) {
+      return res.status(403).json({ status: 'error', message: 'Payments and receipts must be recorded through the fee-payment endpoint.' });
+    }
+    const subscriptionFields = new Set(['subscriptionPlan', 'subscriptionStatus', 'expiresAt', 'trialEndsAt', 'trialStatus', 'billingPeriod', 'studentLimit']);
+    if (!(req.user?.platformAdmin === true && roles.includes('super_admin')) &&
+        Object.keys(payload).some((field) => subscriptionFields.has(field))) {
+      return res.status(403).json({ status: 'error', message: 'Subscription changes require verified payment or platform-admin authorization.' });
+    }
     if (roles.some((role) => ['school_authority', 'school_head'].includes(String(role).toLowerCase())) &&
         Object.prototype.hasOwnProperty.call(payload, 'attendanceRecords')) {
       return res.status(403).json({ status: 'error', message: 'Attendance can only be recorded by authorized teachers.' });
@@ -337,6 +396,25 @@ router.put('/:schoolId', authMiddleware, tenantMiddleware, roleGuard(['school_he
         users: updatedTeacherWorkspace.users,
         recentActivities: school.recentActivities,
       });
+      if (Object.prototype.hasOwnProperty.call(payload, 'attendanceRecords')) {
+        const records = Array.isArray(payload.attendanceRecords) ? payload.attendanceRecords : [];
+        await auditSchoolAction(req, {
+          action: 'teacher.attendance.updated',
+          resourceType: 'attendance',
+          metadata: { recordCount: records.length, date: records[0]?.date || null },
+        });
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'examResults')) {
+        const records = Array.isArray(payload.examResults) ? payload.examResults : [];
+        await auditSchoolAction(req, {
+          action: 'teacher.marks.updated',
+          resourceType: 'examResults',
+          metadata: { recordCount: records.length },
+        });
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'teacherProfile')) {
+        await auditSchoolAction(req, { action: 'teacher.profile.updated', resourceType: 'teacherProfile' });
+      }
       return res.json({ status: 'ok', school: schoolService.getTeacherSchoolView(persisted, req.user) });
     }
     const updated = await schoolService.updateSchool(school.id, payload);
@@ -384,7 +462,7 @@ router.get('/:schoolId/entities/:entityType', authMiddleware, tenantMiddleware, 
       page: req.query.page || 1,
       pageSize: req.query.pageSize || 20,
     };
-    const response = await schoolService.getEntities(schoolId, entityType, query);
+    const response = await schoolService.getEntities(schoolId, entityType, query, req.user);
     return res.json({ status: 'ok', entityType, ...response });
   } catch (err) {
     return res.status(500).json({ status: 'error', message: err.message });

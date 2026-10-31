@@ -11,6 +11,11 @@ const CORE_COLLECTIONS = Object.freeze({
   payments: 'payments',
   subscriptions: 'subscriptions',
   refundRequests: 'refundRequests',
+  assignments: 'assignments',
+  lessons: 'lessons',
+  messages: 'messages',
+  platformSettings: 'platformSettings',
+  schoolIdReservations: 'schoolIdReservations',
 });
 
 function isFirebaseCoreMode() {
@@ -70,6 +75,7 @@ async function createTenantRegistration(schoolId, registration) {
   const id = assertSchoolId(schoolId);
   const firestore = firebaseData.getFirestore();
   const tenantDocument = tenantRef(id);
+  const reservationDocument = collectionRef(CORE_COLLECTIONS.schoolIdReservations).doc(id);
   const headEmail = String(registration.user.email || '').trim().toLowerCase();
   const userDocument = collectionRef(CORE_COLLECTIONS.users).doc(`${id}:${headEmail}`);
   const roleDocument = collectionRef(CORE_COLLECTIONS.roles).doc(`${id}:school_head`);
@@ -77,14 +83,20 @@ async function createTenantRegistration(schoolId, registration) {
   const enrollmentDocument = collectionRef(CORE_COLLECTIONS.enrollments).doc(`${id}:${headEmail}`);
 
   await firestore.runTransaction(async (transaction) => {
-    const [tenantSnapshot, ownerSnapshot, userSnapshot] = await Promise.all([
+    const [tenantSnapshot, reservationSnapshot, ownerSnapshot, userSnapshot] = await Promise.all([
       transaction.get(tenantDocument),
+      transaction.get(reservationDocument),
       transaction.get(collectionRef(CORE_COLLECTIONS.tenants).where('headEmail', '==', headEmail).limit(1)),
       transaction.get(collectionRef(CORE_COLLECTIONS.users).where('email', '==', headEmail).limit(1)),
     ]);
     if (tenantSnapshot.exists) {
       const error = new Error('A school with that ID already exists');
       error.code = 'SCHOOL_ID_EXISTS';
+      throw error;
+    }
+    if (reservationSnapshot.exists) {
+      const error = new Error('A school with that ID has already existed and cannot be reused.');
+      error.code = 'SCHOOL_ID_RESERVED';
       throw error;
     }
     if (!ownerSnapshot.empty || !userSnapshot.empty) {
@@ -137,12 +149,28 @@ async function saveTenant(schoolId, data, merge = true) {
   return { id, ...payload };
 }
 
+async function updateTenantInTransaction(schoolId, update) {
+  const id = assertSchoolId(schoolId);
+  const document = tenantRef(id);
+  return firebaseData.getFirestore().runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(document);
+    if (!snapshot.exists) throw new Error('School not found');
+
+    const tenant = { id: snapshot.id, ...snapshot.data() };
+    const { updates = {}, result } = update(tenant);
+    const payload = { ...updates, schoolId: id, updatedAt: new Date().toISOString() };
+    transaction.set(document, payload, { merge: true });
+    return { tenant: { ...tenant, ...payload }, result };
+  });
+}
+
 async function deleteArchivedTenantIfEmpty(schoolId) {
   const id = assertSchoolId(schoolId);
   const firestore = firebaseData.getFirestore();
   const tenantDocument = tenantRef(id);
   const schoolScopedCollections = [
     CORE_COLLECTIONS.users,
+    CORE_COLLECTIONS.roles,
     CORE_COLLECTIONS.teachers,
     CORE_COLLECTIONS.students,
     CORE_COLLECTIONS.classes,
@@ -150,10 +178,15 @@ async function deleteArchivedTenantIfEmpty(schoolId) {
     CORE_COLLECTIONS.payments,
     CORE_COLLECTIONS.subscriptions,
     CORE_COLLECTIONS.refundRequests,
+    CORE_COLLECTIONS.assignments,
+    CORE_COLLECTIONS.lessons,
+    CORE_COLLECTIONS.messages,
   ];
+  const reservationDocument = collectionRef(CORE_COLLECTIONS.schoolIdReservations).doc(id);
 
   return firestore.runTransaction(async (transaction) => {
     const tenantSnapshot = await transaction.get(tenantDocument);
+    const reservationSnapshot = await transaction.get(reservationDocument);
     if (!tenantSnapshot.exists) {
       const error = new Error('School not found');
       error.code = 'SCHOOL_NOT_FOUND';
@@ -183,6 +216,9 @@ async function deleteArchivedTenantIfEmpty(schoolId) {
       throw error;
     }
 
+    if (!reservationSnapshot.exists) {
+      transaction.create(reservationDocument, { schoolId: id, reservedAt: new Date().toISOString() });
+    }
     transaction.delete(tenantDocument);
     return { schoolId: id, name: tenant.name || null, archivedAt: tenant.archivedAt };
   });
@@ -208,6 +244,20 @@ async function saveById(collectionName, id, data, merge = true) {
 
 async function deleteById(collectionName, id) {
   await collectionRef(collectionName).doc(String(id)).delete();
+}
+
+async function getMaintenanceMode() {
+  if (!isFirebaseCoreMode()) return false;
+  const settings = await getById('platformSettings', 'global');
+  return settings?.maintenanceMode === true;
+}
+
+async function setMaintenanceMode(enabled, updatedBy = null) {
+  if (!isFirebaseCoreMode()) throw new Error('Firebase platform settings are unavailable.');
+  return saveById('platformSettings', 'global', {
+    maintenanceMode: enabled === true,
+    updatedBy: updatedBy ? String(updatedBy) : null,
+  });
 }
 
 async function getSchoolAggregate(schoolId) {
@@ -240,10 +290,13 @@ module.exports = {
   createTenantRegistration,
   deletePendingTenantRegistration,
   saveTenant,
+  updateTenantInTransaction,
   deleteArchivedTenantIfEmpty,
   listBySchool,
   getById,
   saveById,
   deleteById,
+  getMaintenanceMode,
+  setMaintenanceMode,
   getSchoolAggregate,
 };

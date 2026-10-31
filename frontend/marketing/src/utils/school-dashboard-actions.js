@@ -176,6 +176,13 @@ function buildChangedFieldsPayload(currentData = {}, updatedData = {}) {
   return changes;
 }
 
+function normalizeAttendanceStatus(status) {
+  const value = String(status || '').trim().toLowerCase();
+  if (value === 'present' || value === 'late') return 'present';
+  if (value === 'absent' || value === 'excused') return 'absent';
+  return '';
+}
+
 function buildAttendanceRoster(students = [], records = [], date = '', className = '', classRecord = null) {
   const selectedClassId = String(classRecord?.classId || classRecord?.id || '').trim().toLowerCase();
   const selectedClassName = String(classRecord?.name || classRecord?.className || className || '').trim().toLowerCase();
@@ -195,21 +202,28 @@ function buildAttendanceRoster(students = [], records = [], date = '', className
     })
     .map((student) => {
       const studentId = student.studentId || student.id || student.email || '';
-      const existing = (Array.isArray(records) ? records : []).find((record) => String(record.date) === String(date) && String(record.className || '').trim() === String(className).trim() && String(record.studentId || '').trim() === String(studentId).trim());
-      return { student, studentId, status: String(existing?.status || '').toLowerCase() || 'present' };
+      const existing = (Array.isArray(records) ? records : []).find((record) => String(record.date || '').slice(0, 10) === String(date).slice(0, 10) && String(record.className || '').trim() === String(className).trim() && String(record.studentId || '').trim() === String(studentId).trim());
+      return { student, studentId, status: normalizeAttendanceStatus(existing?.status) };
     });
 }
 
 function replaceAttendanceSession(records = [], roster = [], date = '', className = '', schoolId = '') {
-  const keys = new Set(roster.map((entry) => `${date}|${className}|${entry.studentId}`));
-  const retained = (Array.isArray(records) ? records : []).filter((record) => !keys.has(`${record.date}|${record.className || ''}|${record.studentId || ''}`));
-  return [...retained, ...roster.map((entry) => ({
+  const normalizedDate = String(date).slice(0, 10);
+  const keys = new Set(roster.map((entry) => `${normalizedDate}|${className}|${entry.studentId}`));
+  const retained = (Array.isArray(records) ? records : [])
+    .filter((record) => !keys.has(`${String(record.date || '').slice(0, 10)}|${record.className || ''}|${record.studentId || ''}`))
+    .map((record) => ({
+      ...record,
+      date: String(record.date || '').slice(0, 10),
+      status: normalizeAttendanceStatus(record.status) || record.status,
+    }));
+  return [...retained, ...roster.filter((entry) => normalizeAttendanceStatus(entry.status)).map((entry) => ({
     schoolId,
-    date,
+    date: normalizedDate,
     className,
     studentId: entry.studentId,
     studentName: entry.student?.fullName || entry.student?.name || 'Student',
-    status: entry.status,
+    status: normalizeAttendanceStatus(entry.status),
     recordedAt: new Date().toISOString(),
   }))];
 }
@@ -218,6 +232,7 @@ export {
   buildSchoolEntityPayload,
   buildSchoolCollectionPayload,
   buildChangedFieldsPayload,
+  normalizeAttendanceStatus,
   buildAttendanceRoster,
   replaceAttendanceSession,
 };

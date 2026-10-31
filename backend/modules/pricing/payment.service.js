@@ -7,6 +7,12 @@ const memoryPayments = new Map();
 const memorySubscriptions = new Map();
 const memoryRefunds = new Map();
 
+function assertPaymentsAllowed() {
+  if (String(process.env.GLOBY_QA_MODE || '').trim().toLowerCase() === 'true') {
+    throw new Error('Payment operations are disabled in isolated QA mode.');
+  }
+}
+
 function isProductionStore() {
   return firebaseData.isFirebaseDataConfigured();
 }
@@ -61,6 +67,7 @@ function calculateExpiry(paymentDate, billingPeriod) {
 }
 
 async function initializeCheckout({ schoolId, email, planSlug, billingPeriod, callbackUrl, acceptance }) {
+  assertPaymentsAllowed();
   if (!schoolId) throw new Error('Authenticated school is required.');
   const plan = await pricingService.getPricingPlan(planSlug, billingPeriod);
   const policyAcceptance = assertPolicyAcceptance(acceptance);
@@ -126,9 +133,11 @@ function validateTransaction(payment, transaction) {
 }
 
 async function activateVerifiedPayment(payment, transaction) {
-  if (payment.status === 'verified' || payment.status === 'activated') return payment;
+  const alreadyActivated = payment.status === 'verified' || payment.status === 'activated';
   const paidAt = transaction.paid_at || transaction.paidAt || new Date().toISOString();
-  const updatedPayment = await savePayment({ ...payment, status: 'activated', paidAt, verifiedAt: new Date().toISOString(), receiptNumber: payment.reference });
+  const updatedPayment = alreadyActivated
+    ? payment
+    : await savePayment({ ...payment, status: 'activated', paidAt, verifiedAt: new Date().toISOString(), receiptNumber: payment.reference });
   await saveSubscription({
     schoolId: payment.schoolId,
     planSlug: payment.planSlug,
@@ -151,6 +160,7 @@ async function activateVerifiedPayment(payment, transaction) {
 }
 
 async function verifyPayment(reference, expectedSchoolId = null) {
+  assertPaymentsAllowed();
   const payment = await getPayment(reference);
   if (!payment) throw new Error('Payment reference was not found.');
   if (expectedSchoolId && payment.schoolId !== expectedSchoolId) throw new Error('Tenant mismatch.');
@@ -184,6 +194,7 @@ function verifyWebhookSignature(rawBody, signature) {
 }
 
 async function processWebhook(rawBody, signature, event) {
+  assertPaymentsAllowed();
   if (!verifyWebhookSignature(rawBody, signature)) throw new Error('Invalid Paystack webhook signature.');
   if (!event || event.event !== 'charge.success') return { ignored: true };
   const reference = event.data?.reference;
@@ -196,6 +207,7 @@ async function processWebhook(rawBody, signature, event) {
 }
 
 async function requestRefund({ schoolId, reference, reason }) {
+  assertPaymentsAllowed();
   const payment = await getPayment(reference);
   if (!payment || payment.schoolId !== schoolId) throw new Error('Payment was not found for this school.');
   const paidAt = new Date(payment.paidAt || payment.createdAt || Date.now());

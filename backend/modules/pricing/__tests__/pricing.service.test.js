@@ -120,6 +120,99 @@ describe('authoritative pricing service', () => {
     }
   });
 
+  it.each(['pending', 'failed'])('does not activate a %s Paystack transaction', async (transactionStatus) => {
+    const originalFetch = global.fetch;
+    const originalSecret = process.env.PAYSTACK_SECRET_KEY;
+    const firebaseData = require('../../../firebase.data');
+    const firebaseMode = jest.spyOn(firebaseData, 'isFirebaseDataConfigured').mockReturnValue(false);
+    process.env.PAYSTACK_SECRET_KEY = 'server-only-test-secret';
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ status: true, data: { authorization_url: 'https://checkout.test/pending', access_code: 'test-access-code' } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ status: true, data: { status: transactionStatus } }),
+      });
+
+    try {
+      const checkout = await paymentService.initializeCheckout({
+        schoolId: `school-${transactionStatus}-payment`,
+        email: `${transactionStatus}@example.test`,
+        planSlug: 'starter',
+        billingPeriod: 'monthly',
+        callbackUrl: 'https://example.test/checkout',
+        acceptance: { terms: true, privacy: true, paymentRefund: true },
+      });
+
+      await expect(paymentService.verifyPayment(checkout.reference, `school-${transactionStatus}-payment`))
+        .rejects.toThrow('Paystack transaction was not successful.');
+      await expect(paymentService.getPayment(checkout.reference)).resolves.toMatchObject({ status: 'initialized' });
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+    } finally {
+      global.fetch = originalFetch;
+      if (originalSecret === undefined) delete process.env.PAYSTACK_SECRET_KEY;
+      else process.env.PAYSTACK_SECRET_KEY = originalSecret;
+      firebaseMode.mockRestore();
+    }
+  });
+
+  it('rejects unknown and cross-school references before accepting a verified renewal', async () => {
+    const originalFetch = global.fetch;
+    const originalSecret = process.env.PAYSTACK_SECRET_KEY;
+    const firebaseData = require('../../../firebase.data');
+    const firebaseMode = jest.spyOn(firebaseData, 'isFirebaseDataConfigured').mockReturnValue(false);
+    let payment;
+    process.env.PAYSTACK_SECRET_KEY = 'server-only-test-secret';
+    global.fetch = jest.fn().mockImplementation(async (url) => {
+      if (String(url).includes('/transaction/verify/')) {
+        return {
+          ok: true,
+          json: async () => ({
+            status: true,
+            data: {
+              reference: payment.reference,
+              amount: payment.amountMinor,
+              currency: payment.currency,
+              status: 'success',
+              metadata: { schoolId: payment.schoolId, planSlug: payment.planSlug, billingPeriod: payment.billingPeriod },
+              paid_at: new Date().toISOString(),
+            },
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({ status: true, data: { authorization_url: 'https://checkout.test/verify' } }) };
+    });
+
+    try {
+      const checkout = await paymentService.initializeCheckout({
+        schoolId: 'school-verify-owner',
+        email: 'verify@example.test',
+        planSlug: 'starter',
+        billingPeriod: 'monthly',
+        callbackUrl: 'https://example.test/checkout',
+        acceptance: { terms: true, privacy: true, paymentRefund: true },
+      });
+      payment = await paymentService.getPayment(checkout.reference);
+
+      await expect(paymentService.verifyPayment('unknown-payment-reference', 'school-verify-owner'))
+        .rejects.toThrow('Payment reference was not found.');
+      await expect(paymentService.verifyPayment(checkout.reference, 'other-school'))
+        .rejects.toThrow('Tenant mismatch.');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+
+      await expect(paymentService.verifyPayment(checkout.reference, 'school-verify-owner'))
+        .resolves.toMatchObject({ status: 'activated', schoolId: 'school-verify-owner' });
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+    } finally {
+      global.fetch = originalFetch;
+      if (originalSecret === undefined) delete process.env.PAYSTACK_SECRET_KEY;
+      else process.env.PAYSTACK_SECRET_KEY = originalSecret;
+      firebaseMode.mockRestore();
+    }
+  });
+
   it('records out-of-window refund requests without throwing and preserves the decision trail', async () => {
     const originalFetch = global.fetch;
     global.fetch = jest.fn().mockResolvedValue({
@@ -204,6 +297,85 @@ describe('authoritative pricing service', () => {
       else process.env.PAYSTACK_SECRET_KEY = originalSecret;
       if (originalWebhookSecret === undefined) delete process.env.PAYSTACK_WEBHOOK_SECRET;
       else process.env.PAYSTACK_WEBHOOK_SECRET = originalWebhookSecret;
+    }
+  });
+
+  it('retries entitlement writes when a signed webhook previously failed partway through activation', async () => {
+    const originalFetch = global.fetch;
+    const originalSecret = process.env.PAYSTACK_SECRET_KEY;
+    const originalWebhookSecret = process.env.PAYSTACK_WEBHOOK_SECRET;
+    const records = new Map();
+    let subscriptionWriteFailed = false;
+    let tenant = { schoolId: 'school-webhook-retry', schoolStatus: 'active', subscriptionStatus: 'expired' };
+    const firebaseData = require('../../../firebase.data');
+    const firebaseCore = require('../../../firebase.core');
+    const firebaseMode = jest.spyOn(firebaseData, 'isFirebaseDataConfigured').mockReturnValue(true);
+    const saveById = jest.spyOn(firebaseCore, 'saveById').mockImplementation(async (collection, id, value) => {
+      if (collection === 'subscriptions' && !subscriptionWriteFailed) {
+        subscriptionWriteFailed = true;
+        throw new Error('fixture subscription write failure');
+      }
+      records.set(`${collection}:${id}`, value);
+      return value;
+    });
+    const getById = jest.spyOn(firebaseCore, 'getById').mockImplementation(async (collection, id) => records.get(`${collection}:${id}`) || null);
+    const getTenant = jest.spyOn(firebaseCore, 'getTenant').mockImplementation(async () => tenant);
+    const saveTenant = jest.spyOn(firebaseCore, 'saveTenant').mockImplementation(async (schoolId, patch) => {
+      tenant = { ...tenant, ...patch, schoolId };
+      return tenant;
+    });
+    const getPricingPlan = jest.spyOn(pricingService, 'getPricingPlan').mockResolvedValue({
+      slug: 'starter', name: 'Starter', studentLimit: 100, billingPeriod: 'monthly', amount: 150, currency: 'GHS',
+    });
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: true, data: { authorization_url: 'https://checkout.test/retry' } }),
+    });
+    process.env.PAYSTACK_SECRET_KEY = 'server-only-test-secret';
+    process.env.PAYSTACK_WEBHOOK_SECRET = 'server-only-test-webhook-secret';
+
+    try {
+      const checkout = await paymentService.initializeCheckout({
+        schoolId: tenant.schoolId,
+        email: 'retry@example.test',
+        planSlug: 'starter',
+        billingPeriod: 'monthly',
+        callbackUrl: 'https://example.test/checkout',
+        acceptance: { terms: true, privacy: true, paymentRefund: true },
+      });
+      const payment = await paymentService.getPayment(checkout.reference);
+      const event = {
+        event: 'charge.success',
+        data: {
+          reference: checkout.reference,
+          amount: payment.amountMinor,
+          currency: payment.currency,
+          status: 'success',
+          metadata: { schoolId: payment.schoolId, planSlug: payment.planSlug, billingPeriod: payment.billingPeriod },
+          paid_at: new Date().toISOString(),
+        },
+      };
+      const rawBody = JSON.stringify(event);
+      const signature = require('crypto').createHmac('sha512', process.env.PAYSTACK_WEBHOOK_SECRET).update(rawBody).digest('hex');
+
+      await expect(paymentService.processWebhook(rawBody, signature, event)).rejects.toThrow('fixture subscription write failure');
+      await expect(paymentService.processWebhook(rawBody, signature, event)).resolves.toMatchObject({ processed: true });
+
+      expect(tenant.subscriptionStatus).toBe('active');
+      expect(tenant.expiresAt).toBeTruthy();
+      expect(records.get(`payments:${checkout.reference}`).status).toBe('activated');
+    } finally {
+      global.fetch = originalFetch;
+      if (originalSecret === undefined) delete process.env.PAYSTACK_SECRET_KEY;
+      else process.env.PAYSTACK_SECRET_KEY = originalSecret;
+      if (originalWebhookSecret === undefined) delete process.env.PAYSTACK_WEBHOOK_SECRET;
+      else process.env.PAYSTACK_WEBHOOK_SECRET = originalWebhookSecret;
+      firebaseMode.mockRestore();
+      saveById.mockRestore();
+      getById.mockRestore();
+      getTenant.mockRestore();
+      saveTenant.mockRestore();
+      getPricingPlan.mockRestore();
     }
   });
 

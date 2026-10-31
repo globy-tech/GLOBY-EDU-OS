@@ -54,7 +54,18 @@ function assertFirebaseConfiguration() {
   }
 }
 
+function isIsolatedQaMode() {
+  return String(process.env.GLOBY_QA_MODE || '').trim().toLowerCase() === 'true';
+}
+
+function assertFirebaseAdminEnabled() {
+  if (isIsolatedQaMode()) {
+    throw new Error('Firebase Admin is disabled in isolated QA mode.');
+  }
+}
+
 function isFirebaseConfigured() {
+  if (isIsolatedQaMode()) return false;
   const status = getFirebaseConfigurationStatus();
   return status.projectIdConfigured;
 }
@@ -74,6 +85,7 @@ function getFirebaseCredential() {
 }
 
 function initializeFirebaseAdmin() {
+  assertFirebaseAdminEnabled();
   const apps = getApps();
   if (apps.length > 0) return apps[0];
 
@@ -95,9 +107,9 @@ function getFirebaseAdmin() {
   };
 }
 
-async function verifyIdToken(idToken) {
+async function verifyIdToken(idToken, checkRevoked = false) {
   const app = getFirebaseAdmin();
-  return app.auth().verifyIdToken(idToken);
+  return app.auth().verifyIdToken(idToken, checkRevoked);
 }
 
 async function getUser(uid) {
@@ -108,6 +120,16 @@ async function getUser(uid) {
 async function getUserByEmail(email) {
   const app = getFirebaseAdmin();
   return app.auth().getUserByEmail(email);
+}
+
+async function updateUser(uid, updates) {
+  const app = getFirebaseAdmin();
+  return app.auth().updateUser(uid, updates);
+}
+
+async function revokeRefreshTokens(uid) {
+  const app = getFirebaseAdmin();
+  return app.auth().revokeRefreshTokens(uid);
 }
 
 async function setCustomUserClaims(uid, claims) {
@@ -145,6 +167,8 @@ module.exports = {
   verifyIdToken,
   getUser,
   getUserByEmail,
+  updateUser,
+  revokeRefreshTokens,
   setCustomUserClaims,
   createUser,
   deleteUser,

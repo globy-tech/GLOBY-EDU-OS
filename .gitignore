@@ -62,6 +62,7 @@ generate-test-hashes.js
 generate-hash.js
 test-auth-direct.js
 test-auth-test123.js
+test.md
 git-status-output.txt
 jest-communication-output.json
 jest-results.json

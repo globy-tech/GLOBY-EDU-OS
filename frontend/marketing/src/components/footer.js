@@ -16,7 +16,7 @@ export function Footer(cms = {}) {
   return `
     <footer class="mt-12 border-t bg-white" role="contentinfo" aria-label="Footer">
       <div class="mx-auto max-w-7xl px-6 py-12">
-        <div class="grid gap-8 md:grid-cols-4">
+        <div class="grid grid-cols-1 gap-8 md:grid-cols-4">
           <div>
             <div class="flex items-center gap-3">
               ${logoUrl ? `<img src="${logoUrl}" alt="${companyName} logo" class="h-10 w-10 rounded-full border border-slate-200 bg-white object-contain p-1" />` : '<div class="flex h-10 w-10 items-center justify-center rounded-full bg-sky-600 font-bold text-white">G</div>'}

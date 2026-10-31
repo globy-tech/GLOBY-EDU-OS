@@ -5,8 +5,9 @@
 
 import { appendAuditLog, encryptSecret, getAdminState, maskAuditValue, recordNotification, saveAdminState, setSessionActivity } from './admin-state.js';
 import { activateAdminSchool, archiveAdminSchool, deleteAdminSchool, fetchArchivedAdminSchools, fetchMessageRecipients, createWorkspaceMessage, fetchSchoolDetails, permanentlyDeleteArchivedSchool, restoreAdminSchool } from '../api/school.js';
-import { updatePricingPlan } from '../api/pricing.js';
+import { fetchMaintenanceMode, updateMaintenanceMode, updatePricingPlan } from '../api/pricing.js';
 import { getAdminSchoolStatus, getAdminSchoolSubscriptionStatus, getAdminSchoolStatuses } from '../utils/school-management-filters.mjs';
+import { validateImageUpload } from '../utils/file-upload-validation.js';
 
 const WEBSITE_CMS_STORAGE_KEY = 'globyedu_websiteCms';
 const SUPER_ADMIN_ONLY_SECTIONS = new Set(['pricing', 'payments', 'features', 'website-cms', 'ai-settings', 'analytics', 'reports', 'messages', 'announcements', 'support', 'plugins', 'audit-logs', 'system-settings', 'settings', 'backups', 'security', 'subscriptions', 'archived-schools']);
@@ -14,9 +15,8 @@ const ADMIN_NAV_ITEMS = [
   { id: 'overview', label: 'Dashboard', icon: 'chart-square-bar' },
   { id: 'schools', label: 'Schools', icon: 'office-building' },
   { id: 'users', label: 'Users', icon: 'users' },
-  { id: 'subscriptions', label: 'Subscriptions', icon: 'sparkles' },
   { id: 'payments', label: 'Payments', icon: 'credit-card' },
-  { id: 'pricing', label: 'Pricing', icon: 'cash' },
+  { id: 'pricing', label: 'Plans & subscriptions', icon: 'cash' },
   { id: 'features', label: 'Feature Manager', icon: 'adjustable' },
   { id: 'website-cms', label: 'Website CMS', icon: 'globe-alt' },
   { id: 'ai-settings', label: 'AI Settings', icon: 'cpu-chip' },
@@ -33,7 +33,7 @@ const ADMIN_NAV_ITEMS = [
   { id: 'security', label: 'Security', icon: 'shield-check' },
 ];
 
-export function AdminPage(activeSection = 'overview', userFullName = 'Benjamin', summary = {}, schools = [], pricingPlans = [], auditLogs = []) {
+export function AdminPage(activeSection = 'overview', userFullName = 'Benjamin', summary = {}, schools = [], pricingPlans = [], auditLogs = [], maintenanceMode = null) {
   return `
     <div data-admin-page class="min-w-0 space-y-6">
       <div class="rounded-[2rem] border border-slate-200 bg-white/90 p-6 shadow-sm backdrop-blur-xl">
@@ -43,7 +43,7 @@ export function AdminPage(activeSection = 'overview', userFullName = 'Benjamin',
       </div>
       <main class="space-y-6">
         ${renderBreadcrumb(activeSection)}
-        ${renderSectionContent(activeSection, userFullName, summary, schools, pricingPlans, auditLogs)}
+        ${renderSectionContent(activeSection, userFullName, summary, schools, pricingPlans, auditLogs, maintenanceMode)}
       </main>
     </div>
   `;
@@ -54,7 +54,8 @@ function renderTopbarTitle(section) {
     overview: 'Platform Overview',
     schools: 'School Management',
     'archived-schools': 'Archived Schools',
-    subscriptions: 'Subscription Analytics',
+    subscriptions: 'Plans & Subscriptions',
+    pricing: 'Plans & Subscriptions',
     users: 'User Directory',
     payments: 'Payments',
     'website-cms': 'Website CMS',
@@ -76,7 +77,11 @@ function renderTopbarTitle(section) {
 }
 
 function renderBreadcrumb(activeSection) {
-  const crumb = activeSection === 'overview' ? 'Overview' : activeSection.replace('-', ' ').replace(/\b\w/g, (l) => l.toUpperCase());
+  const crumb = activeSection === 'overview'
+    ? 'Overview'
+    : ['pricing', 'subscriptions'].includes(activeSection)
+      ? 'Plans & Subscriptions'
+      : activeSection.replace('-', ' ').replace(/\b\w/g, (l) => l.toUpperCase());
   const dashboardActions = activeSection === 'overview' ? `
     <div class="flex flex-wrap items-center gap-3">
       <button type="button" data-admin-nav="schools" class="rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-200">Quick action</button>
@@ -216,7 +221,7 @@ function renderSchoolRecipientOptions(selected = [], loadedSchools = []) {
   return `<option value="all-schools">All Schools</option>${schoolOptions}`;
 }
 
-function renderSectionContent(activeSection, userFullName, summary = {}, schools = [], pricingPlans = [], auditLogs = []) {
+function renderSectionContent(activeSection, userFullName, summary = {}, schools = [], pricingPlans = [], auditLogs = [], maintenanceMode = null) {
   const normalizedSection = String(activeSection || 'overview').toLowerCase();
   if (isSectionRestricted(normalizedSection) && getCurrentAdminRole() !== 'super_admin') {
     return renderRestrictedAccessNotice(normalizedSection);
@@ -229,8 +234,9 @@ function renderSectionContent(activeSection, userFullName, summary = {}, schools
   if (normalizedSection === 'ai-settings') return renderAISettings();
   if (normalizedSection === 'features') return renderFeatureManager();
   if (normalizedSection === 'payments') return renderPayments();
-  if (normalizedSection === 'pricing') return renderPricingManagement(pricingPlans);
-  if (normalizedSection === 'subscriptions') return renderSubscriptions(summary, schools);
+  if (normalizedSection === 'pricing' || normalizedSection === 'subscriptions') {
+    return `${renderSubscriptions(summary, schools)}${renderPricingManagement(pricingPlans)}`;
+  }
   if (normalizedSection === 'analytics') return renderAnalytics(summary, schools);
   if (normalizedSection === 'users') return renderUsers(schools);
   if (normalizedSection === 'reports') return renderReports(summary, schools);
@@ -239,8 +245,8 @@ function renderSectionContent(activeSection, userFullName, summary = {}, schools
   if (normalizedSection === 'support') return renderSupport(schools);
   if (normalizedSection === 'plugins') return renderPlugins();
   if (normalizedSection === 'audit-logs') return renderAuditLogs(auditLogs);
-  if (normalizedSection === 'system-settings') return renderSystemSettings();
-  if (normalizedSection === 'settings') return renderPlatformSettings();
+  if (normalizedSection === 'system-settings') return renderSystemSettings(maintenanceMode);
+  if (normalizedSection === 'settings') return renderPlatformSettings(maintenanceMode);
   if (normalizedSection === 'backups') return renderBackups();
   if (normalizedSection === 'security') return renderSecurity();
   if (normalizedSection === 'overview') return renderDashboardOverview(userFullName, summary);
@@ -937,8 +943,11 @@ export function attachWebsiteCMSHandlers() {
   const cancelButton = document.getElementById('cancel-website-cms');
   const status = document.getElementById('website-cms-status');
   const form = document.getElementById('website-cms-form');
+  let uploadedLogoPath = '';
 
   async function uploadBrandingAsset(file) {
+    const validationError = validateImageUpload(file);
+    if (validationError) throw new Error(validationError);
     const token = typeof getAccessToken === 'function' ? getAccessToken() : localStorage.getItem('globyedu_accessToken');
     if (!token) {
       throw new Error('You must sign in before uploading branding assets to the cloud.');
@@ -960,6 +969,7 @@ export function attachWebsiteCMSHandlers() {
     if (!uploadResponse.ok || uploadData?.status !== 'ok') {
       throw new Error(uploadData?.message || 'Unable to upload the branding image to storage.');
     }
+    if (!uploadData.path) throw new Error('The uploaded branding image path could not be saved.');
 
     const signedUrlResponse = await fetch(`/api/v1/files/${encodeURIComponent(storagePath)}?expiresIn=86400`, {
       method: 'GET',
@@ -970,13 +980,30 @@ export function attachWebsiteCMSHandlers() {
     if (!signedUrlResponse.ok || signedUrlData?.status !== 'ok' || !signedUrlData.url) {
       throw new Error(signedUrlData?.message || 'The uploaded branding image could not be published.');
     }
-    return signedUrlData.url;
+    return { url: signedUrlData.url, path: uploadData.path };
   }
 
   if (form) {
     const logoFileInput = form.querySelector('[data-cms-logo-file]');
     const logoUrlInput = form.querySelector('[data-cms-field="logoUrl"]');
     const logoPreview = form.querySelector('[data-cms-logo-preview]');
+    const storedSettings = getWebsiteCMSSettings();
+    if (storedSettings.logoPath && logoUrlInput) {
+      const token = typeof getAccessToken === 'function' ? getAccessToken() : localStorage.getItem('globyedu_accessToken');
+      const encodedPath = String(storedSettings.logoPath).split('/').map(encodeURIComponent).join('/');
+      if (token) {
+        fetch(`/api/v1/files/${encodedPath}?expiresIn=3600`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${token}` },
+          cache: 'no-store',
+        }).then(async (response) => {
+          const data = await response.json().catch(() => null);
+          if (!response.ok || data?.status !== 'ok' || !data.url) throw new Error(data?.message || 'Unable to refresh the website logo URL.');
+          logoUrlInput.value = data.url;
+          if (logoPreview) logoPreview.src = data.url;
+        }).catch((error) => console.warn('Unable to refresh saved CMS logo URL.', error));
+      }
+    }
     logoFileInput?.addEventListener('change', async () => {
       const file = logoFileInput.files?.[0];
       if (!file) return;
@@ -988,21 +1015,23 @@ export function attachWebsiteCMSHandlers() {
         }
         return;
       }
-      if (file.size > 2 * 1024 * 1024) {
+      const validationError = validateImageUpload(file);
+      if (validationError) {
         logoFileInput.value = '';
         if (status) {
-          status.textContent = 'Logo uploads must be 2MB or smaller for the best performance.';
+          status.textContent = validationError;
           status.className = 'mb-4 rounded-3xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800';
         }
         return;
       }
       try {
-        const remoteUrl = await uploadBrandingAsset(file);
-        if (logoUrlInput) logoUrlInput.value = remoteUrl;
-        if (logoPreview) logoPreview.src = remoteUrl;
+        const uploadedAsset = await uploadBrandingAsset(file);
+        uploadedLogoPath = uploadedAsset.path;
+        if (logoUrlInput) logoUrlInput.value = uploadedAsset.url;
+        if (logoPreview) logoPreview.src = uploadedAsset.url;
         if (status) {
-          status.textContent = 'Logo uploaded successfully. Save changes to publish it live.';
-          status.className = 'mb-4 rounded-3xl border border-emerald-100 bg-emerald-50 p-4 text-sm text-emerald-800';
+          status.textContent = 'Logo uploaded to private storage. It is not publicly published; no platform CMS API is available.';
+          status.className = 'mb-4 rounded-3xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900';
         }
       } catch (error) {
         if (status) {
@@ -1032,10 +1061,11 @@ export function attachWebsiteCMSHandlers() {
         }
         return;
       }
+      values.logoPath = uploadedLogoPath || getWebsiteCMSSettings().logoPath || '';
       saveWebsiteCMSSettings(values);
       if (status) {
-        status.textContent = 'Website content saved successfully.';
-        status.className = 'mb-4 rounded-3xl border border-emerald-100 bg-emerald-50 p-4 text-sm text-emerald-800';
+        status.textContent = 'Website draft saved in this browser only. It has not been published because no platform CMS API is available.';
+        status.className = 'mb-4 rounded-3xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900';
       }
       window.dispatchEvent(new CustomEvent('globyedu-cms-updated', { detail: values }));
     });
@@ -1043,6 +1073,7 @@ export function attachWebsiteCMSHandlers() {
     if (cancelButton) {
       cancelButton.addEventListener('click', () => {
         const settings = getWebsiteCMSSettings();
+        uploadedLogoPath = settings.logoPath || '';
         document.querySelectorAll('[data-cms-field]').forEach((input) => {
           const fieldName = input.getAttribute('data-cms-field');
           if (fieldName && settings[fieldName] !== undefined) {
@@ -1074,6 +1105,7 @@ function renderWebsiteCMS() {
           <div>
             <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Website CMS</p>
             <h2 class="mt-2 text-2xl font-semibold text-slate-900">Manage homepage content and branding</h2>
+            <p class="mt-3 text-sm text-amber-800">CMS changes are currently browser-only and are not published across devices.</p>
             <p class="mt-3 text-slate-600">These values update the public marketing site immediately in the current session and persist in local storage.</p>
           </div>
           <div class="flex flex-wrap gap-3">
@@ -1151,7 +1183,7 @@ export function attachAdminSectionHandlers(section) {
         appendAuditLog('Updated AI provider', provider.name);
         const status = form.querySelector('[data-ai-status]');
         if (status) {
-          status.textContent = 'Provider saved.';
+          status.textContent = 'Provider draft saved in this browser only; server-side provider configuration is unavailable.';
           status.classList.remove('hidden');
           setTimeout(() => status.classList.add('hidden'), 3000);
         }
@@ -1434,7 +1466,7 @@ export function attachAdminSectionHandlers(section) {
         appendAuditLog('Updated feature toggles', 'Module availability settings changed.');
 
         if (statusDiv) {
-          statusDiv.textContent = '✓ Feature settings saved successfully.';
+          statusDiv.textContent = 'Feature preferences saved in this browser only; they are not applied to platform tenants.';
           statusDiv.classList.remove('hidden');
           setTimeout(() => statusDiv.classList.add('hidden'), 3000);
         }
@@ -1473,7 +1505,7 @@ export function attachAdminSectionHandlers(section) {
           });
 
           if (statusDiv) {
-            statusDiv.textContent = '✓ Features reset to default configuration.';
+            statusDiv.textContent = 'Browser-only feature preferences were reset; platform tenant access was not changed.';
             statusDiv.classList.remove('hidden');
             setTimeout(() => statusDiv.classList.add('hidden'), 3000);
           }
@@ -1512,7 +1544,7 @@ export function attachAdminSectionHandlers(section) {
         appendAuditLog('Updated plugin toggles', 'Plugin marketplace settings changed.');
         const status = document.getElementById('plugin-status');
         if (status) {
-          status.textContent = 'Plugin preferences saved.';
+          status.textContent = 'Plugin preferences saved in this browser only; no platform plugin API is available.';
           status.classList.remove('hidden');
         }
       });
@@ -1596,7 +1628,10 @@ export function attachAdminSectionHandlers(section) {
         appendAuditLog('Published announcement', item.title, { status: item.status, priority: item.priority, visibility: item.visibility });
         const status = form.querySelector('[data-announcement-status]');
         if (status) {
-          status.textContent = item.status === 'published' ? 'Announcement published to all schools.' : 'Announcement saved as draft.';
+          status.textContent = item.status === 'published'
+            ? 'Announcement saved in this browser only; it was not published because no global announcements API is available.'
+            : 'Announcement draft saved in this browser only.';
+          status.className = 'rounded-3xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900';
           status.classList.remove('hidden');
         }
         form.reset();
@@ -1642,7 +1677,8 @@ export function attachAdminSectionHandlers(section) {
         appendAuditLog('Created support ticket', `${ticket.schoolName}: ${ticket.subject}`, { schoolId, schoolName: ticket.schoolName, priority: ticket.priority, status: ticket.status });
         const status = form.querySelector('[data-support-status]');
         if (status) {
-          status.textContent = 'Support ticket created and monitored.';
+          status.textContent = 'Support ticket saved in this browser only; no platform-wide support API is available.';
+          status.className = 'rounded-3xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900';
           status.classList.remove('hidden');
         }
         form.reset();
@@ -1653,9 +1689,11 @@ export function attachAdminSectionHandlers(section) {
   if (normalizedSection === 'settings' || normalizedSection === 'system-settings') {
     const form = document.getElementById('platform-settings-form') || document.getElementById('system-settings-form');
     if (form) {
-      form.addEventListener('submit', (event) => {
+      form.addEventListener('submit', async (event) => {
         event.preventDefault();
         const state = getAdminState();
+        const previousMaintenanceMode = getPlatformSettingsState().maintenanceMode === true;
+        const maintenanceInput = form.querySelector('[name="maintenanceMode"]');
         const data = new FormData(form);
         state.settings = {
           ...state.settings,
@@ -1665,16 +1703,32 @@ export function attachAdminSectionHandlers(section) {
           defaultCurrency: data.get('defaultCurrency')?.toString().trim() || state.settings.defaultCurrency || 'USD',
           supportUrl: data.get('supportUrl')?.toString().trim() || state.settings.supportUrl || 'https://support.globyedu.com',
           defaultLanguage: data.get('defaultLanguage')?.toString().trim() || state.settings.defaultLanguage || 'English',
-          maintenanceMode: data.get('maintenanceMode') === 'on',
+          maintenanceMode: maintenanceInput ? maintenanceInput.checked : previousMaintenanceMode,
           registrationEnabled: data.get('registrationEnabled') === 'on',
           loginEnabled: data.get('loginEnabled') === 'on',
           schoolAccountsEnabled: data.get('schoolAccountsEnabled') === 'on',
         };
+        const maintenanceResult = await updateMaintenanceMode(state.settings.maintenanceMode);
+        if (!maintenanceResult.ok || maintenanceResult.data?.status !== 'ok') {
+          state.settings.maintenanceMode = previousMaintenanceMode;
+          saveAdminState(state);
+          const status = document.getElementById('platform-settings-status') || document.getElementById('system-settings-status');
+          if (status) {
+            status.textContent = maintenanceResult.data?.message || 'Unable to update maintenance mode. Other settings were saved locally.';
+            status.className = 'rounded-3xl border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-800';
+            status.classList.remove('hidden');
+          }
+          if (maintenanceInput) maintenanceInput.checked = previousMaintenanceMode;
+          return;
+        }
+        state.settings.maintenanceMode = maintenanceResult.data.maintenanceMode === true;
         saveAdminState(state);
+        savePlatformSettingsState(state.settings);
         appendAuditLog('Updated platform settings', 'Global settings changed.');
         const status = document.getElementById('platform-settings-status') || document.getElementById('system-settings-status');
         if (status) {
-          status.textContent = 'Settings saved.';
+          status.textContent = 'Maintenance mode was updated on the server. Other platform settings are browser-only and do not affect the platform.';
+          status.className = 'rounded-3xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900';
           status.classList.remove('hidden');
         }
       });
@@ -1733,8 +1787,18 @@ export function attachAdminSectionHandlers(section) {
 
     const loginProtectionButton = document.getElementById('refresh-login-protection');
     if (loginProtectionButton) {
-      loginProtectionButton.addEventListener('click', () => {
+      loginProtectionButton.addEventListener('click', async () => {
         const settings = getPlatformSettingsState();
+        const maintenanceResult = await updateMaintenanceMode(false);
+        if (!maintenanceResult.ok || maintenanceResult.data?.status !== 'ok') {
+          const status = document.getElementById('backup-status');
+          if (status) {
+            status.textContent = maintenanceResult.data?.message || 'Unable to disable maintenance mode.';
+            status.className = 'mt-4 rounded-3xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800';
+            status.classList.remove('hidden');
+          }
+          return;
+        }
         const next = { ...settings, loginEnabled: true, registrationEnabled: true, maintenanceMode: false };
         savePlatformSettingsState(next);
         appendAuditLog('Updated security configuration', 'Platform login protection restored while keeping Super Admin emergency access intact.', { target: 'platform', actorRole: 'super_admin', resultStatus: 'success', securityConfig: { loginEnabled: true, registrationEnabled: true, maintenanceMode: false } });
@@ -2129,13 +2193,19 @@ function attachArchivedSchoolHandlers(token) {
 function attachSchoolCreateForm(token, onSuccess) {
   const form = document.getElementById('school-create-form');
   if (!form) return;
+  let isSubmitting = false;
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const submitBtn = form.querySelector('button[type="submit"]');
     const statusDiv = document.getElementById('school-create-status');
 
-    if (submitBtn) submitBtn.disabled = true;
+    if (isSubmitting) return;
+    isSubmitting = true;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.setAttribute('aria-busy', 'true');
+    }
 
     try {
       const formData = new FormData(form);
@@ -2192,9 +2262,13 @@ function attachSchoolCreateForm(token, onSuccess) {
         statusDiv.classList.remove('bg-emerald-50', 'border-emerald-100', 'text-emerald-800');
         statusDiv.classList.add('bg-rose-50', 'border-rose-100', 'text-rose-800');
       }
+    } finally {
+      isSubmitting = false;
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.removeAttribute('aria-busy');
+      }
     }
-
-    if (submitBtn) submitBtn.disabled = false;
   });
 }
 
@@ -2202,13 +2276,19 @@ function attachSchoolCreateForm(token, onSuccess) {
 function attachSchoolEditForm(token, schoolId, onSuccess) {
   const form = document.getElementById('school-edit-form');
   if (!form) return;
+  let isSubmitting = false;
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const submitBtn = form.querySelector('button[type="submit"]');
     const statusDiv = document.getElementById('school-edit-status');
 
-    if (submitBtn) submitBtn.disabled = true;
+    if (isSubmitting) return;
+    isSubmitting = true;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.setAttribute('aria-busy', 'true');
+    }
 
     try {
       const formData = new FormData(form);
@@ -2266,16 +2346,23 @@ function attachSchoolEditForm(token, schoolId, onSuccess) {
         statusDiv.classList.remove('bg-emerald-50', 'border-emerald-100', 'text-emerald-800');
         statusDiv.classList.add('bg-rose-50', 'border-rose-100', 'text-rose-800');
       }
+    } finally {
+      isSubmitting = false;
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.removeAttribute('aria-busy');
+      }
     }
-
-    if (submitBtn) submitBtn.disabled = false;
   });
 
   const resetButton = document.getElementById('school-credential-reset');
   const credentialStatus = document.getElementById('school-credential-status');
   if (resetButton) {
     resetButton.addEventListener('click', async () => {
+      if (resetButton.dataset.busy === 'true') return;
+      resetButton.dataset.busy = 'true';
       resetButton.disabled = true;
+      resetButton.setAttribute('aria-busy', 'true');
       try {
         const response = await fetch(`/api/v1/schools/${encodeURIComponent(schoolId)}/credentials`, {
           method: 'POST',
@@ -2291,7 +2378,9 @@ function attachSchoolEditForm(token, schoolId, onSuccess) {
         credentialStatus.textContent = error.message;
         credentialStatus.classList.remove('hidden');
       } finally {
+        resetButton.dataset.busy = 'false';
         resetButton.disabled = false;
+        resetButton.removeAttribute('aria-busy');
       }
     });
   }
@@ -2654,14 +2743,15 @@ function renderAnnouncements() {
     <section class="space-y-6">
       <div class="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm">
         <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Announcements</p>
-        <h2 class="mt-2 text-2xl font-semibold text-slate-900">Share published updates across the platform</h2>
+        <h2 class="mt-2 text-2xl font-semibold text-slate-900">Draft platform announcements</h2>
+        <p class="mt-3 text-sm text-amber-800">Announcements and published status are stored in this browser only; no global announcements API is available.</p>
         <form id="announcement-composer" class="mt-6 space-y-4">
           <input type="text" name="title" placeholder="Announcement title" class="w-full rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" required />
           <textarea name="content" rows="4" placeholder="Add the details" class="w-full rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm" required></textarea>
           <div class="flex flex-wrap items-center gap-3">
             <select name="status" class="rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
               <option value="draft">Draft</option>
-              <option value="published">Published</option>
+              <option value="published">Published (local label only)</option>
             </select>
             <select name="priority" class="rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
               <option value="normal">Normal</option>
@@ -2702,7 +2792,8 @@ function renderSupport(loadedSchools = []) {
     <section class="space-y-6">
       <div class="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm">
         <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Support</p>
-        <h2 class="mt-2 text-2xl font-semibold text-slate-900">Handle school support requests and responses</h2>
+        <h2 class="mt-2 text-2xl font-semibold text-slate-900">Local support-ticket drafts</h2>
+        <p class="mt-3 text-sm text-amber-800">These records remain in this browser and are not sent to schools; a platform-wide support API is not available.</p>
         <form id="support-ticket-form" class="mt-6 space-y-4">
           <div class="grid gap-4 md:grid-cols-2">
             <select name="schoolId" class="rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
@@ -3198,7 +3289,7 @@ function renderSecurity(loadedSchools = []) {
 
 function renderPayments() {
   const state = getAdminState();
-  const providers = (state.payments || [])
+  const providers = (state.payments || []).filter((provider) => provider.id === 'paystack')
     .sort((a, b) => (a.displayOrder || 0) - (b.displayOrder || 0))
     .map((provider) => `
       <form class="rounded-[1.75rem] border border-slate-200 bg-white p-5 shadow-sm" data-payment-form="${provider.id}">
@@ -3494,15 +3585,18 @@ function renderAISettings() {
   `;
 }
 
-function renderPlatformSettings() {
-  const settings = getPlatformSettingsState();
+function renderPlatformSettings(maintenanceMode = null) {
+  const settings = {
+    ...getPlatformSettingsState(),
+    ...(typeof maintenanceMode === 'boolean' ? { maintenanceMode } : {}),
+  };
   return `
     <section class="space-y-6">
       <div class="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm">
         <div class="mb-6">
           <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Global platform settings</p>
           <h2 class="mt-2 text-2xl font-semibold text-slate-900">Prepare your platform configuration</h2>
-          <p class="mt-3 text-slate-600">These settings persist in the application state and are applied to future schools by default while preserving each school’s own explicit currency.</p>
+          <p class="mt-3 text-sm text-amber-800">Maintenance mode is saved through the backend API. Other settings remain in this browser and do not change platform behavior.</p>
         </div>
         <form id="platform-settings-form" class="grid gap-6 lg:grid-cols-2">
           ${renderSettingInput('Platform name', settings.platformName || 'GlobyEdu OS', 'platformName')}
@@ -3537,9 +3631,12 @@ function renderPlatformSettings() {
   `;
 }
 
-function renderSystemSettings() {
+function renderSystemSettings(maintenanceMode = null) {
   const state = getAdminState();
-  const settings = state.settings || {};
+  const settings = {
+    ...(state.settings || {}),
+    ...(typeof maintenanceMode === 'boolean' ? { maintenanceMode } : {}),
+  };
   return `
     <section class="space-y-6">
       <div class="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm">

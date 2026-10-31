@@ -1,24 +1,13 @@
 // auth.middleware.js
 // Express middleware to protect routes using JWT access tokens.
 
-const fs = require('fs');
-const path = require('path');
 const { verifyAccessToken } = require('../utils/token');
+const { isAccessTokenRevoked } = require('../utils/access-token-revocation');
 const firebaseAdmin = require('../../../firebase.admin');
 const firebaseData = require('../../../firebase.data');
+const firebaseCore = require('../../../firebase.core');
 const prisma = require('../../../config/prisma.client');
-
-function loadSchoolData() {
-  const filePath = path.join(__dirname, '../../../data/schools.json');
-  if (!fs.existsSync(filePath)) return [];
-  try {
-    const raw = fs.readFileSync(filePath, 'utf-8');
-    const json = JSON.parse(raw);
-    return json.schools || [];
-  } catch (err) {
-    return [];
-  }
-}
+const { findFallbackUser, findFallbackUserByPayload } = require('./fallback-user');
 
 function parseMockToken(token) {
   if (!token || !token.startsWith('mock-jwt-')) return null;
@@ -36,32 +25,6 @@ function isFallbackLocalToken(payload) {
   if (!payload || typeof payload.userId !== 'string') return false;
   if (!payload.tenantId) return false;
   return payload.userId.includes(':') && payload.roles && Array.isArray(payload.roles);
-}
-
-function findFallbackUser(schoolId, username) {
-  const schools = loadSchoolData();
-  const school = schools.find((entry) => entry.schoolId === schoolId);
-  if (!school || !Array.isArray(school.users)) return null;
-  const normalizedUsername = username.toLowerCase();
-  const user = school.users.find((entry) => [entry.username, entry.email, entry.teacherId, entry.studentId]
-    .some((identifier) => String(identifier || '').toLowerCase() === normalizedUsername));
-  if (!user) return null;
-  return {
-    userId: `${schoolId}:${user.username}`,
-    tenantId: schoolId,
-    roles: [user.role],
-    platformAdmin: user.platformAdmin === true,
-    passwordNeedsReset: user.passwordNeedsReset === true,
-    status: user.status || 'active',
-  };
-}
-
-function findFallbackUserByPayload(payload) {
-  if (!payload || typeof payload.userId !== 'string' || !payload.userId.includes(':')) return null;
-  const separator = payload.userId.indexOf(':');
-  const schoolId = payload.userId.slice(0, separator);
-  const username = payload.userId.slice(separator + 1);
-  return findFallbackUser(schoolId, username);
 }
 
 function enforceAccountStatus(req, res, user) {
@@ -85,6 +48,36 @@ function enforcePasswordChange(req, res, user) {
     status: 'error',
     code: 'PASSWORD_CHANGE_REQUIRED',
     message: 'You must change your temporary password before continuing.',
+  });
+  return true;
+}
+
+async function enforceMaintenanceMode(req, res, user) {
+  const roles = Array.isArray(user?.roles) ? user.roles : [];
+  const isPlatformAdmin = roles.some((role) => String(role).trim().toLowerCase() === 'super_admin') &&
+    user.platformAdmin === true && !user.tenantId && !user.schoolId;
+  if (isPlatformAdmin) return false;
+
+  const isAuthRoute = String(req.baseUrl || '').endsWith('/auth');
+  if (isAuthRoute && ['/logout', '/change-password'].includes(req.path)) return false;
+
+  let maintenanceMode;
+  try {
+    maintenanceMode = await firebaseCore.getMaintenanceMode();
+  } catch {
+    res.status(503).json({
+      status: 'error',
+      code: 'MAINTENANCE_MODE',
+      message: 'Platform access is temporarily unavailable while maintenance status is checked.',
+    });
+    return true;
+  }
+  if (!maintenanceMode) return false;
+
+  res.status(503).json({
+    status: 'error',
+    code: 'MAINTENANCE_MODE',
+    message: 'GlobyEdu is temporarily unavailable while scheduled maintenance is in progress.',
   });
   return true;
 }
@@ -161,6 +154,9 @@ async function authMiddleware(req, res, next) {
   const token = authHeader.split(' ')[1];
   try {
     const payload = verifyAccessToken(token);
+    if (isAccessTokenRevoked(token)) {
+      return res.status(401).json({ status: 'error', message: 'Invalid or expired token.' });
+    }
     const fallbackLocalToken = isFallbackLocalToken(payload);
 
     if (firebaseData.isFirebaseDataConfigured()) {
@@ -219,6 +215,7 @@ async function authMiddleware(req, res, next) {
         passwordNeedsReset: user.passwordNeedsReset === true,
         status: user.status,
       };
+      if (await enforceMaintenanceMode(req, res, req.user)) return;
       if (enforcePasswordChange(req, res, req.user)) return;
       return next();
     }
@@ -236,6 +233,7 @@ async function authMiddleware(req, res, next) {
     }
 
     req.user = payload; // minimal payload: { userId, roles, tenantId, passwordNeedsReset }
+    if (await enforceMaintenanceMode(req, res, req.user)) return;
     const fallbackUser = process.env.NODE_ENV !== 'production' && prisma?.__stub
       ? findFallbackUserByPayload(payload)
       : null;
@@ -258,6 +256,7 @@ async function authMiddleware(req, res, next) {
       }
 
       req.user = fallbackUser;
+      if (await enforceMaintenanceMode(req, res, req.user)) return;
       if (enforceAccountStatus(req, res, req.user)) return;
       if (enforcePasswordChange(req, res, req.user)) return;
       return next();
@@ -278,6 +277,7 @@ async function authMiddleware(req, res, next) {
         return res.status(401).json({ status: 'error', message: 'Invalid or expired token.' });
       }
       req.user = firebaseUser;
+      if (await enforceMaintenanceMode(req, res, req.user)) return;
       if (enforceAccountStatus(req, res, req.user)) return;
       if (enforcePasswordChange(req, res, req.user)) return;
       return next();

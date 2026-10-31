@@ -20,12 +20,13 @@ import { matchesAdminSchoolFilter } from './utils/school-management-filters.mjs'
 import { getAdminState } from './pages/admin-state.js';
 import { PlatformAdminPage } from './pages/platform-admin.js';
 import { SchoolDashboardPage, SchoolAuthorityDashboard, TeacherDashboard, StudentDashboard } from './pages/school-dashboard.js';
-import { fetchSchoolSummary, fetchSchoolDetails, updateSchoolDetails, createFeePayment, searchSchoolData, fetchSchoolEntities, createSchoolEntity, updateSchoolEntity, deleteSchoolEntity, fetchAdminDashboardSummary, fetchPlatformAuditLogs, fetchAdminSchoolList, fetchArchivedAdminSchools, createAdminSchool, updateAdminSchool, deleteAdminSchool, activateAdminSchool, fetchWorkspaceMessages, fetchMessageRecipients, createWorkspaceMessage, updateWorkspaceMessage, deleteWorkspaceMessage, fetchSupportTickets, createSupportTicket, updateSupportTicket, deleteSupportTicket, fetchAssignments, fetchLessons, createAssignment, createLesson, submitAssignment } from './api/school.js';
+import { fetchSchoolSummary, fetchSchoolDetails, updateSchoolDetails, createFeePayment, searchSchoolData, fetchSchoolEntities, createSchoolEntity, updateSchoolEntity, deleteSchoolEntity, fetchAdminDashboardSummary, fetchPlatformAuditLogs, fetchSchoolActivity, fetchAdminSchoolList, fetchArchivedAdminSchools, createAdminSchool, updateAdminSchool, deleteAdminSchool, activateAdminSchool, fetchWorkspaceMessages, fetchMessageRecipients, createWorkspaceMessage, updateWorkspaceMessage, deleteWorkspaceMessage, fetchSupportTickets, createSupportTicket, updateSupportTicket, deleteSupportTicket, fetchAssignments, fetchLessons, createAssignment, createLesson, submitAssignment } from './api/school.js';
 import { studentLogin, teacherLogin, schoolAuthorityLogin, schoolLogin as apiLogin, firebaseLogin as apiFirebaseLogin, linkFirebaseIdentity, platformAdminLogin, logout as apiLogout, forgotPassword as apiForgot, register as apiRegister, confirmFirebasePasswordReset, changePassword as apiChangePassword } from './api/auth.js';
-import { isFirebaseConfigured, firebaseSignInWithGoogle, firebaseLinkGoogle, firebaseSendPasswordResetEmail, firebaseApplyActionCode, firebaseConfirmPasswordReset as firebaseConfirmPasswordResetClient } from './firebase/firebase-client.js';
-import { buildChangedFieldsPayload, buildSchoolCollectionPayload, buildSchoolEntityPayload, buildAttendanceRoster, replaceAttendanceSession } from './utils/school-dashboard-actions.js?v=20260718';
+import { isFirebaseConfigured, firebaseSignInWithGoogle, firebaseLinkGoogle, firebaseApplyActionCode } from './firebase/firebase-client.js';
+import { buildChangedFieldsPayload, buildSchoolCollectionPayload, buildSchoolEntityPayload, normalizeAttendanceStatus, buildAttendanceRoster, replaceAttendanceSession } from './utils/school-dashboard-actions.js?v=20261022-attendance-history';
 import { showGlobalPwaNotice } from './utils/pwa-notifications.js';
-import { fetchPublicPricing, fetchAdminPricing, initializeSubscriptionCheckout, verifySubscriptionPayment } from './api/pricing.js';
+import { MAX_FILE_UPLOAD_BYTES, validateImageUpload } from './utils/file-upload-validation.js';
+import { fetchPublicPricing, fetchAdminPricing, fetchMaintenanceMode, initializeSubscriptionCheckout, verifySubscriptionPayment } from './api/pricing.js';
 import { setPwaUpdateAvailable, getPwaUpdateAvailable, clearPwaUpdateAvailable } from './utils/pwa-utils.js';
 import { testimonialImage1, testimonialImage2, testimonialImage3, screenshotAuthorityImage, screenshotTeacherImage, screenshotStudentImage, screenshotAuthorityPlaceholder, screenshotTeacherPlaceholder, screenshotStudentPlaceholder } from './assets/asset-paths.js';
 
@@ -35,29 +36,63 @@ const WEBSITE_CMS_STORAGE_KEY = 'globyedu_websiteCms';
 const SESSION_LIMIT = 2;
 const PWA_STATUS_ID = 'globyedu-pwa-status';
 
+function dispatchMaintenanceResponse(response, data) {
+  if (response.status === 503 && data?.code === 'MAINTENANCE_MODE') {
+    document.dispatchEvent(new CustomEvent('globyedu-maintenance-mode', { detail: data }));
+  }
+}
+
 document.addEventListener('globyedu-auth-expired', () => {
   clearAuthenticationState();
   if (location.hash !== '#/login') location.hash = '#/login';
 });
 
-document.addEventListener('globyedu-school-suspended', () => {
+document.addEventListener('globyedu-school-suspended', (event) => {
   clearAuthenticationState();
   if (location.hash !== '#/login') {
-    renderSuspendedSchoolPage();
+    renderSuspendedSchoolPage(event.detail || {});
   }
 });
 
-function renderSuspendedSchoolPage() {
+document.addEventListener('globyedu-maintenance-mode', (event) => {
+  routeGeneration += 1;
+  renderMaintenancePage(event.detail || {});
+});
+
+function renderMaintenancePage(details = {}) {
+  if (!root) return;
+  root.innerHTML = `
+    <main class="mx-auto flex min-h-screen max-w-3xl items-center px-6 py-16">
+      <section class="w-full rounded-3xl border border-amber-200 bg-white p-8 shadow-xl sm:p-12" role="status" aria-live="polite">
+        <p class="text-sm font-semibold uppercase text-amber-700">Platform maintenance</p>
+        <h1 class="mt-4 text-3xl font-semibold text-slate-900">We’ll be back shortly</h1>
+        <p data-maintenance-message class="mt-4 text-slate-600"></p>
+        <button type="button" data-maintenance-retry class="mt-8 rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white">Try again</button>
+      </section>
+    </main>
+  `;
+  const message = root.querySelector('[data-maintenance-message]');
+  if (message) message.textContent = details.message || 'GlobyEdu is temporarily unavailable while maintenance is in progress.';
+  root.querySelector('[data-maintenance-retry]')?.addEventListener('click', () => window.location.reload());
+}
+
+function renderSuspendedSchoolPage(details = {}) {
   const appRoot = root;
   if (!appRoot) return;
+  const subscriptionExpired = details.code === 'SUBSCRIPTION_EXPIRED';
 
   appRoot.innerHTML = `
     <main class="mx-auto max-w-3xl px-6 py-20">
       <div class="rounded-4xl border border-amber-200 bg-amber-50 p-8 text-center shadow-xl shadow-amber-100/60">
         <p class="text-sm uppercase tracking-[0.3em] text-amber-700">Access restricted</p>
-        <h1 class="mt-6 text-4xl font-semibold text-slate-900">This school account has been suspended</h1>
-        <p class="mt-4 text-lg text-slate-700">Your school authority, teacher, or student access has been restricted until the issue is resolved.</p>
-        <p class="mt-4 text-slate-600">Please contact the platform administrator for support or try again once the school has been reactivated.</p>
+        <h1 class="mt-6 text-4xl font-semibold text-slate-900">${subscriptionExpired ? 'This school trial or subscription has expired' : 'This school account has been suspended'}</h1>
+        <p class="mt-4 text-lg text-slate-700">${subscriptionExpired ? 'School access is paused until the subscription is renewed or support helps resolve the issue.' : 'Your school authority, teacher, or student access has been restricted until the issue is resolved.'}</p>
+        <p class="mt-4 text-slate-600">Contact GlobyEdu support or visit our contact page for help.</p>
+        <p class="mt-4 text-slate-600">
+          <a class="font-semibold text-sky-700 underline" href="mailto:support@globyedu.com">support@globyedu.com</a>
+          <span class="mx-2">or</span>
+          <a class="font-semibold text-sky-700 underline" href="#/contact">Contact us</a>
+        </p>
         <button id="school-suspended-back-to-login" type="button" class="mt-8 inline-flex items-center justify-center rounded-full bg-slate-900 px-6 py-3 text-sm font-semibold text-white transition hover:bg-slate-800">Return to sign in</button>
       </div>
     </main>
@@ -112,9 +147,10 @@ async function ensureSchoolAccessIsActive() {
   try {
     const result = await fetchSchoolDetails(token, schoolId);
     const school = result.ok && result.data?.status === 'ok' ? result.data.school || {} : {};
-    const schoolStatus = String(school.schoolStatus || school.status || school.subscriptionStatus || 'active').trim().toLowerCase();
-    if (['suspended', 'inactive', 'blocked', 'disabled', 'expired'].includes(schoolStatus)) {
-      renderSuspendedSchoolPage();
+    const schoolStatus = String(school.schoolStatus || school.status || 'active').trim().toLowerCase();
+    const subscriptionStatus = String(school.subscriptionStatus || '').trim().toLowerCase();
+    if (['suspended', 'inactive', 'blocked', 'disabled'].includes(schoolStatus) || ['expired', 'suspended', 'inactive', 'blocked', 'disabled'].includes(subscriptionStatus)) {
+      renderSuspendedSchoolPage({ code: subscriptionStatus === 'expired' ? 'SUBSCRIPTION_EXPIRED' : 'SCHOOL_SUSPENDED' });
       return true;
     }
     return false;
@@ -709,7 +745,7 @@ async function renderCheckoutPage(planSlug = '', billingPeriod = 'monthly', refe
     <dl class="mt-8 grid gap-3 border-y border-slate-200 py-6 text-sm sm:grid-cols-2"><div><dt class="text-slate-500">School</dt><dd class="font-semibold text-slate-900">${localStorage.getItem('globyedu_schoolName') || localStorage.getItem('globyedu_schoolId') || ''}</dd></div><div><dt class="text-slate-500">Student limit</dt><dd class="font-semibold text-slate-900">${Number(plan.studentLimit).toLocaleString()}</dd></div><div><dt class="text-slate-500">Amount</dt><dd id="checkout-amount" class="font-semibold text-slate-900">${plan.currency} ${Number(billingPeriod === 'yearly' ? plan.yearlyAmount : plan.monthlyAmount).toLocaleString()}</dd></div><div><dt class="text-slate-500">Payment provider</dt><dd class="font-semibold text-slate-900">Paystack</dd></div></dl>
     <p class="text-sm leading-6 text-slate-600">Review the <a class="font-semibold text-sky-700" href="#/legal/payments">Payment & Refund Policy</a>, <a class="font-semibold text-sky-700" href="#/legal/terms">Terms of Service</a>, and <a class="font-semibold text-sky-700" href="#/legal/privacy">Privacy Policy</a>.</p>
     <label class="mt-6 flex items-start gap-3 text-sm text-slate-700"><input id="checkout-terms" type="checkbox" class="mt-1" /> <span>I have reviewed and accept the linked policies.</span></label>
-    <div id="checkout-message" class="mt-4 min-h-6 text-sm"></div><button id="checkout-submit" class="mt-6 rounded-full bg-sky-600 px-6 py-3 text-sm font-semibold text-white">Continue to Paystack</button>
+    <div id="checkout-message" class="mt-4 min-h-6 text-sm" role="status" aria-live="polite"></div><button id="checkout-submit" class="mt-6 rounded-full bg-sky-600 px-6 py-3 text-sm font-semibold text-white">Continue to Paystack</button>
   </div></main>${Footer()}`;
 
   const planSelect = document.getElementById('checkout-plan');
@@ -718,12 +754,32 @@ async function renderCheckoutPage(planSlug = '', billingPeriod = 'monthly', refe
   const updateAmount = () => { const selected = plans.find((entry) => entry.slug === planSelect.value) || plan; amountElement.textContent = `${selected.currency} ${Number(periodSelect.value === 'yearly' ? selected.yearlyAmount : selected.monthlyAmount).toLocaleString()}`; };
   planSelect.addEventListener('change', updateAmount);
   periodSelect.addEventListener('change', updateAmount);
-  document.getElementById('checkout-submit').addEventListener('click', async () => {
+  const checkoutButton = document.getElementById('checkout-submit');
+  let checkoutPending = false;
+  checkoutButton.addEventListener('click', async () => {
+    if (checkoutPending) return;
     const message = document.getElementById('checkout-message');
     if (!document.getElementById('checkout-terms').checked) { message.textContent = 'Please accept the linked policies before continuing.'; return; }
-    const result = await initializeSubscriptionCheckout({ planSlug: planSelect.value, billingPeriod: periodSelect.value, email: localStorage.getItem('globyedu_userEmail'), callbackUrl: `${location.origin}/#/checkout?plan=${encodeURIComponent(planSelect.value)}&period=${encodeURIComponent(periodSelect.value)}`, acceptance: { terms: true, privacy: true, paymentRefund: true, version: '2026-09-18' } });
-    if (!result.ok) { message.textContent = result.data?.message || 'Unable to initialize payment.'; return; }
-    location.assign(result.data.checkout.authorizationUrl);
+    checkoutPending = true;
+    checkoutButton.disabled = true;
+    checkoutButton.setAttribute('aria-busy', 'true');
+    let redirecting = false;
+    try {
+      const result = await initializeSubscriptionCheckout({ planSlug: planSelect.value, billingPeriod: periodSelect.value, email: localStorage.getItem('globyedu_userEmail'), callbackUrl: `${location.origin}/#/checkout?plan=${encodeURIComponent(planSelect.value)}&period=${encodeURIComponent(periodSelect.value)}`, acceptance: { terms: true, privacy: true, paymentRefund: true, version: '2026-09-18' } });
+      if (!result.ok) throw new Error(result.data?.message || 'Unable to initialize payment. Please try again.');
+      const authorizationUrl = result.data?.checkout?.authorizationUrl;
+      if (!authorizationUrl) throw new Error('Unable to initialize payment. Please try again.');
+      location.assign(authorizationUrl);
+      redirecting = true;
+    } catch (error) {
+      message.textContent = error.message || 'Unable to initialize payment. Please try again.';
+    } finally {
+      if (!redirecting) {
+        checkoutPending = false;
+        checkoutButton.disabled = false;
+        checkoutButton.removeAttribute('aria-busy');
+      }
+    }
   });
   if (reference) {
     const result = await verifySubscriptionPayment(reference);
@@ -1317,6 +1373,7 @@ function getAppNavItems(role) {
       { id: 'teachers', label: 'Teachers', path: '#/school/teachers', icon: '🧑‍🏫' },
       { id: 'classes', label: 'Class Management', path: '#/school/classes', icon: '🏫' },
       { id: 'attendance', label: 'Attendance', path: '#/school/attendance', icon: '✓' },
+      { id: 'activity', label: 'Teacher Activity', path: '#/school/activity', icon: '◷' },
       { id: 'finance', label: 'Finance & Billing', path: '#/school/finance', icon: '💳' },
       { id: 'exams', label: 'Examination & Grading', path: '#/school/exams', icon: '📝' },
       { id: 'announcements', label: 'Announcements', path: '#/school/announcements', icon: '📣' },
@@ -1479,6 +1536,8 @@ function getAuthenticatedModuleContent(section, role, userName) {
 function attachAuthenticatedShellHandlers(role, section) {
   const sidebar = document.getElementById('app-sidebar');
   const backdrop = document.getElementById('app-sidebar-backdrop');
+  const sidebarTrigger = document.querySelector('[data-app-sidebar-toggle]');
+  const sidebarClose = sidebar?.querySelector('[data-app-sidebar-close]');
   const accountMenu = document.querySelector('[data-account-menu]');
   const accountMenuToggle = accountMenu?.querySelector('[data-account-menu-toggle]');
   const accountMenuPanel = accountMenu?.querySelector('[data-account-menu-panel]');
@@ -1529,21 +1588,26 @@ function attachAuthenticatedShellHandlers(role, section) {
     });
   }
 
-  const setSidebarOpen = (open) => {
+  const setSidebarOpen = (open, restoreFocus = false) => {
     if (!sidebar) return;
     const isMobile = window.innerWidth < 1024;
-    sidebar.classList.toggle('-translate-x-full', !open);
-    sidebar.classList.toggle('translate-x-0', open);
-    backdrop?.classList.toggle('hidden', !open);
-    document.body.classList.toggle('overflow-hidden', isMobile && open);
+    const mobileOpen = isMobile && open;
+    sidebar.classList.toggle('-translate-x-full', isMobile && !open);
+    sidebar.classList.toggle('translate-x-0', mobileOpen);
+    sidebar.inert = isMobile && !open;
+    sidebar.setAttribute('aria-hidden', String(isMobile && !open));
+    backdrop?.classList.toggle('hidden', !mobileOpen);
+    document.body.classList.toggle('overflow-hidden', mobileOpen);
     document.querySelectorAll('[data-app-sidebar-toggle]').forEach((button) => {
-      button.setAttribute('aria-expanded', String(isMobile && open));
+      button.setAttribute('aria-expanded', String(mobileOpen));
     });
     if (!isMobile) {
       sidebar.classList.remove('-translate-x-full', 'translate-x-0');
       backdrop?.classList.add('hidden');
       document.body.classList.remove('overflow-hidden');
     }
+    if (mobileOpen) sidebarClose?.focus();
+    else if (isMobile && restoreFocus) sidebarTrigger?.focus();
   };
 
   document.querySelectorAll('[data-app-sidebar-toggle]').forEach((button) => {
@@ -1551,11 +1615,31 @@ function attachAuthenticatedShellHandlers(role, section) {
   });
 
   document.querySelectorAll('[data-app-sidebar-close]').forEach((button) => {
-    button.addEventListener('click', () => setSidebarOpen(false));
+    button.addEventListener('click', () => setSidebarOpen(false, true));
   });
 
-  backdrop?.addEventListener('click', () => setSidebarOpen(false));
+  backdrop?.addEventListener('click', () => setSidebarOpen(false, true));
   window.addEventListener('resize', () => setSidebarOpen(window.innerWidth >= 1024));
+  setSidebarOpen(window.innerWidth >= 1024);
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && backdrop && !backdrop.classList.contains('hidden')) {
+      setSidebarOpen(false, true);
+      return;
+    }
+    if (event.key !== 'Tab' || window.innerWidth >= 1024 || !backdrop || backdrop.classList.contains('hidden')) return;
+    const focusable = sidebar.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])');
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !sidebar.contains(document.activeElement))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !sidebar.contains(document.activeElement))) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
 
   document.querySelectorAll('[data-app-action]').forEach((button) => {
     button.addEventListener('click', async () => {
@@ -1640,42 +1724,10 @@ function attachAuthenticatedShellHandlers(role, section) {
   document.querySelectorAll('[data-app-nav]').forEach((link) => {
     link.addEventListener('click', (event) => {
       event.preventDefault();
-      const id = link.getAttribute('data-app-nav');
-      if (role === 'school_authority') {
-        if (id === 'overview') {
-          location.hash = '#/school/overview';
-        } else if (id === 'profile') {
-          location.hash = '#/school/profile';
-        } else if (id === 'students') {
-          location.hash = '#/school/students';
-        } else if (id === 'teachers') {
-          location.hash = '#/school/teachers';
-        } else if (id === 'classes') {
-          location.hash = '#/school/classes';
-        } else if (id === 'attendance') {
-          location.hash = '#/school/attendance';
-        } else if (id === 'finance') {
-          location.hash = '#/school/finance';
-        } else if (id === 'exams') {
-          location.hash = '#/school/exams';
-        } else if (id === 'announcements') {
-          location.hash = '#/school/announcements';
-        } else if (id === 'messages') {
-          location.hash = '#/school/messages';
-        } else if (id === 'messaging') {
-          location.hash = '#/school/messages';
-        } else if (id === 'reports') {
-          location.hash = '#/school/reports';
-        } else if (id === 'settings') {
-          location.hash = '#/school/settings';
-        }
-      } else if (role === 'teacher') {
-        location.hash = `#/role/teacher/${id}`;
-      } else if (role === 'student') {
-        location.hash = `#/role/student/${id}`;
-      } else {
-        location.hash = `#/admin/${id}`;
-      }
+      const destination = link.getAttribute('href');
+      if (!destination || !destination.startsWith('#/')) return;
+      location.hash = destination;
+      if (window.innerWidth < 1024) setSidebarOpen(false, true);
     });
   });
 }
@@ -1705,14 +1757,16 @@ async function renderAdminPage(section = 'overview', navigationId = routeGenerat
   let schools = [];
   let pricingPlans = [];
   let auditLogs = [];
+  let maintenanceMode = null;
   const token = getAccessToken();
 
   if (token) {
-    const [summaryResult, schoolListResult, pricingResult, auditResult] = await Promise.all([
+    const [summaryResult, schoolListResult, pricingResult, auditResult, maintenanceResult] = await Promise.all([
       fetchAdminDashboardSummary(token, days),
       section === 'archived-schools' ? fetchArchivedAdminSchools(token) : fetchAdminSchoolList(token),
       fetchAdminPricing(),
       fetchPlatformAuditLogs(token, { limit: section === 'audit-logs' ? 100 : 4 }),
+      fetchMaintenanceMode(),
     ]);
 
     if (summaryResult.ok && summaryResult.data?.status === 'ok') {
@@ -1729,11 +1783,14 @@ async function renderAdminPage(section = 'overview', navigationId = routeGenerat
       auditLogs = auditResult.data.auditLogs || [];
       summary.latestActivity = auditLogs.slice(0, 4);
     }
+    if (maintenanceResult.ok && maintenanceResult.data?.status === 'ok') {
+      maintenanceMode = maintenanceResult.data.maintenanceMode === true;
+    }
   }
 
   if (navigationId !== routeGeneration) return;
 
-  renderAuthenticatedAppShell(section, 'super_admin', AdminPage(section, userFullName, summary, schools, pricingPlans, auditLogs));
+  renderAuthenticatedAppShell(section, 'super_admin', AdminPage(section, userFullName, summary, schools, pricingPlans, auditLogs, maintenanceMode));
   attachAdminHandlers();
   attachWebsiteCMSHandlers();
   attachAdminSectionHandlers(section);
@@ -1776,13 +1833,24 @@ async function renderRolePage(role = 'super_admin', section = 'overview', naviga
   let teacherData = null;
   let assignments = [];
   let lessons = [];
-  let schoolData = { schoolName, schoolId, announcements: [], messages: [], students: [], teachers: [], classes: [] };
+  let schoolData = {
+    schoolName,
+    schoolId,
+    announcements: [],
+    messages: [],
+    students: [],
+    teachers: [],
+    classes: [],
+    attendanceViewDate: sessionStorage.getItem(`globyedu_attendance_view_date:${schoolId}`) || new Date().toISOString().slice(0, 10),
+  };
   const token = getAccessToken();
   if (token && schoolId) {
     const result = await fetchSchoolDetails(token, schoolId);
     if (navigationId !== routeGeneration) return;
     if (result.ok && result.data?.status === 'ok') {
       const school = result.data.school || {};
+      await refreshStoredSchoolAssets(school, token);
+      await refreshStoredProfilePhotos([school.student || school.profile], token);
       const audience = role === 'teacher' ? 'teachers' : role === 'student' ? 'students' : 'all';
       const visible = (entry) => {
         const target = String(entry.audience || entry.recipientType || entry.recipient || 'all').toLowerCase();
@@ -1791,6 +1859,8 @@ async function renderRolePage(role = 'super_admin', section = 'overview', naviga
       schoolData = {
         ...schoolData,
         schoolName: school.name || schoolName,
+        student: school.student || null,
+        profile: school.profile || null,
         announcements: (Array.isArray(school.announcements) ? school.announcements : []).filter(visible),
         messages: (Array.isArray(school.messages) ? school.messages : []).filter(visible),
         students: Array.isArray(school.students) ? school.students : [],
@@ -1800,6 +1870,8 @@ async function renderRolePage(role = 'super_admin', section = 'overview', naviga
         examRecords: Array.isArray(school.examRecords) ? school.examRecords : [],
         examResults: Array.isArray(school.examResults) ? school.examResults : [],
       };
+      await refreshStoredProfilePhotos(schoolData.teachers, token);
+      await refreshStoredProfilePhotos(schoolData.students, token);
     } else {
       schoolDataLoadError = result.data?.message || `Unable to load school data (HTTP ${result.status || 'network error'}).`;
     }
@@ -1910,6 +1982,7 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
   };
   let sectionData = {
     school: { name: schoolName, schoolId, status: 'active' },
+    profile: getWorkspaceProfile(),
     students: [],
     teachers: [],
     classes: [],
@@ -1922,19 +1995,29 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
     refunds: [],
     messages: [],
     reports: [],
+    attendanceViewDate: sessionStorage.getItem(`globyedu_attendance_view_date:${schoolId}`) || new Date().toISOString().slice(0, 10),
     examRecords: [],
     examResults: [],
     gradeEntries: [],
     reportCards: [],
     academicRecords: [],
+    teacherActivity: [],
+    teacherActivityLoadError: '',
   };
 
   const token = getAccessToken();
   if (schoolId && token) {
-    const [summaryResult, schoolResult] = await Promise.all([
+    const [summaryResult, schoolResult, activityResult] = await Promise.all([
       fetchSchoolSummary(token, schoolId),
       fetchSchoolDetails(token, schoolId),
+      normalizedSection === 'activity' ? fetchSchoolActivity(token, schoolId) : Promise.resolve(null),
     ]);
+    if (activityResult) {
+      sectionData.teacherActivity = Array.isArray(activityResult.data?.activity) ? activityResult.data.activity : [];
+      sectionData.teacherActivityLoadError = !activityResult.ok || activityResult.data?.status !== 'ok'
+        ? activityResult.data?.message || `Unable to load teacher activity (HTTP ${activityResult.status || 'network error'}).`
+        : '';
+    }
 
     if (summaryResult.ok && summaryResult.data?.status === 'ok') {
       summary = summaryResult.data.summary || summary;
@@ -1942,8 +2025,11 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
 
     if (schoolResult.ok && schoolResult.data?.status === 'ok') {
       const school = schoolResult.data.school || {};
+      await refreshStoredSchoolAssets(school, token);
       const students = Array.isArray(school.students) ? school.students : [];
       const teachers = Array.isArray(school.teachers) ? school.teachers : [];
+      await refreshStoredProfilePhotos(students, token);
+      await refreshStoredProfilePhotos(teachers, token);
       const classes = Array.isArray(school.classes) ? school.classes : [];
       const attendanceRecords = Array.isArray(school.attendanceRecords) ? school.attendanceRecords : [];
       const announcements = Array.isArray(school.announcements) ? school.announcements : [];
@@ -1970,6 +2056,7 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
 
       sectionData = {
         school,
+        profile: getWorkspaceProfile(),
         students,
         teachers,
         classes,
@@ -1982,11 +2069,16 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
         refunds,
         messages,
         reports,
+        attendanceViewDate: sessionStorage.getItem(`globyedu_attendance_view_date:${schoolId}`) || new Date().toISOString().slice(0, 10),
         examRecords: Array.isArray(school.examRecords) ? school.examRecords : [],
         examResults: Array.isArray(school.examResults) ? school.examResults : [],
         gradeEntries: Array.isArray(school.gradeEntries) ? school.gradeEntries : [],
         reportCards: Array.isArray(school.reportCards) ? school.reportCards : [],
         academicRecords,
+        teacherActivity: Array.isArray(activityResult?.data?.activity) ? activityResult.data.activity : [],
+        teacherActivityLoadError: activityResult && (!activityResult.ok || activityResult.data?.status !== 'ok')
+          ? activityResult.data?.message || `Unable to load teacher activity (HTTP ${activityResult.status || 'network error'}).`
+          : '',
       };
 
       summary = {
@@ -2051,12 +2143,8 @@ async function loadSchoolSummary() {
 
 async function readFileAsDataUrl(file) {
   if (!file) return '';
-  if (!file.type.startsWith('image/')) {
-    throw new Error('Please choose an image file.');
-  }
-  if (file.size > 2 * 1024 * 1024) {
-    throw new Error('Image files must be smaller than 2MB.');
-  }
+  const validationError = validateImageUpload(file);
+  if (validationError) throw new Error(validationError);
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result || ''));
@@ -2074,13 +2162,8 @@ function renderImagePreview(previewElement, src, fallbackText) {
   previewElement.innerHTML = `<div class="flex h-24 items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">${escapeHtml(fallbackText)}</div>`;
 }
 
-const MAX_SCHOOL_IMAGE_BYTES = 2 * 1024 * 1024;
-
 function validateSchoolImage(file) {
-  if (!file) return 'Please select an image.';
-  if (!file.type.startsWith('image/')) return 'Only image files are allowed.';
-  if (file.size > MAX_SCHOOL_IMAGE_BYTES) return 'Images must be 2 MB or smaller.';
-  return '';
+  return validateImageUpload(file);
 }
 
 function sanitizeStorageFileName(fileName, prefix = 'assets') {
@@ -2094,14 +2177,22 @@ function sanitizeStorageFileName(fileName, prefix = 'assets') {
   return `${prefix}/${Date.now()}-${baseName}`;
 }
 
-async function uploadTenantAsset(file, prefix = 'assets') {
+async function uploadTenantAsset(file, prefix = 'assets', includePath = false, owner = null) {
+  if (!file) throw new Error('Please select a file to upload.');
+  if (file.size > MAX_FILE_UPLOAD_BYTES) throw new Error('This file is too large to upload. Choose a smaller file.');
   const token = getAccessToken();
   if (!token) {
     throw new Error('Your session has expired. Please sign in again.');
   }
 
   const storagePath = sanitizeStorageFileName(file.name || `${prefix}.png`, prefix);
-  const uploadResponse = await fetch(`/api/v1/files/upload?filename=${encodeURIComponent(storagePath)}`, {
+  const uploadQuery = new URLSearchParams({ filename: storagePath });
+  if (owner) {
+    uploadQuery.set('ownerType', owner.type);
+    uploadQuery.set('ownerId', owner.id);
+    uploadQuery.set('ownerField', owner.field);
+  }
+  const uploadResponse = await fetch(`/api/v1/files/upload?${uploadQuery.toString()}`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -2111,6 +2202,7 @@ async function uploadTenantAsset(file, prefix = 'assets') {
   });
 
   const uploadData = await uploadResponse.json().catch(() => null);
+  dispatchMaintenanceResponse(uploadResponse, uploadData);
   if (!uploadResponse.ok || uploadData?.status !== 'ok') {
     throw new Error(uploadData?.message || 'Unable to upload the selected image to cloud storage.');
   }
@@ -2121,14 +2213,95 @@ async function uploadTenantAsset(file, prefix = 'assets') {
   });
 
   const signedUrlData = await signedUrlResponse.json().catch(() => null);
+  dispatchMaintenanceResponse(signedUrlResponse, signedUrlData);
   if (!signedUrlResponse.ok || signedUrlData?.status !== 'ok' || !signedUrlData.url) {
     throw new Error(signedUrlData?.message || 'Image upload succeeded, but the signed URL could not be generated.');
   }
 
-  return signedUrlData.url;
+  if (includePath && !uploadData.path) {
+    throw new Error('Image upload succeeded, but the storage path could not be saved.');
+  }
+  return includePath ? { url: signedUrlData.url, path: uploadData.path } : signedUrlData.url;
 }
 
-async function handleImageUpload(fileInput, hiddenInput, previewElement, fallbackText) {
+async function uploadCreatedEntityProfilePhoto(file, entityType, entity, token, schoolId) {
+  if (!file || typeof file.arrayBuffer !== 'function') return;
+  const isStudent = entityType === 'students';
+  const ownerType = isStudent ? 'student' : 'teacher';
+  const identifier = entity?.[isStudent ? 'studentId' : 'teacherId'] || entity?.id || entity?.username || entity?.email;
+  if (!identifier) throw new Error('The new record was created without an identifier, so its photo cannot be safely attached.');
+  const uploadedPhoto = await uploadTenantAsset(file, isStudent ? 'student-profile' : 'teacher-profile', true, {
+    type: ownerType,
+    id: identifier,
+    field: 'profilePhotoPath',
+  });
+  const result = await updateSchoolEntity(token, schoolId, entityType, identifier, {
+    profilePhoto: uploadedPhoto.url,
+    profilePhotoPath: uploadedPhoto.path,
+  });
+  if (!result.ok || result.data?.status !== 'ok') {
+    throw new Error(result.data?.message || 'The record was created, but its profile photo could not be saved.');
+  }
+}
+
+async function refreshStoredProfilePhotos(records, token) {
+  await Promise.all((Array.isArray(records) ? records : [])
+    .filter((record) => record && record.profilePhotoPath)
+    .map(async (record) => {
+      const encodedPath = String(record.profilePhotoPath).split('/').map(encodeURIComponent).join('/');
+      try {
+        const response = await fetch(`/api/v1/files/${encodedPath}?expiresIn=3600`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${token}` },
+          cache: 'no-store',
+        });
+        const data = await response.json().catch(() => null);
+        if (!response.ok || data?.status !== 'ok' || !data.url) {
+          console.warn('Unable to refresh stored profile photo URL.', data || response);
+          record.profilePhoto = '';
+          return;
+        }
+        record.profilePhoto = data.url;
+      } catch (error) {
+        console.warn('Unable to refresh stored profile photo URL.', error);
+        record.profilePhoto = '';
+      }
+    }));
+}
+
+async function refreshStoredSchoolAssets(school, token) {
+  if (!school || typeof school !== 'object') return;
+  const assets = [
+    ['logoPath', 'logo'],
+    ['coverImagePath', 'coverImage'],
+    ['stampPath', 'stamp'],
+    ['principalSignaturePath', 'principalSignature'],
+  ];
+  await Promise.all(assets.map(async ([pathField, urlField]) => {
+    const storagePath = school[pathField];
+    if (!storagePath) return;
+    const encodedPath = String(storagePath).split('/').map(encodeURIComponent).join('/');
+    try {
+      const response = await fetch(`/api/v1/files/${encodedPath}?expiresIn=3600`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+        cache: 'no-store',
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || data?.status !== 'ok' || !data.url) {
+        console.warn(`Unable to refresh stored ${urlField} URL.`, data || response);
+        school[urlField] = '';
+        return;
+      }
+      school[urlField] = data.url;
+    } catch (error) {
+      console.warn(`Unable to refresh stored ${urlField} URL.`, error);
+      school[urlField] = '';
+    }
+  }));
+}
+
+async function handleImageUpload(fileInput, hiddenInput, previewElement, fallbackText, owner) {
   if (!fileInput || !hiddenInput || !previewElement) return;
   const file = fileInput.files && fileInput.files[0];
   if (!file) return;
@@ -2139,9 +2312,10 @@ async function handleImageUpload(fileInput, hiddenInput, previewElement, fallbac
     return;
   }
   try {
-    const remoteUrl = await uploadTenantAsset(file, 'school-assets');
-    hiddenInput.value = remoteUrl;
-    renderImagePreview(previewElement, remoteUrl, fallbackText);
+    const uploadedAsset = await uploadTenantAsset(file, 'school-assets', true, owner);
+    hiddenInput.value = uploadedAsset.url;
+    hiddenInput.dataset.storagePath = uploadedAsset.path;
+    renderImagePreview(previewElement, uploadedAsset.url, fallbackText);
   } catch (error) {
     alert(error.message || 'Unable to upload selected image.');
   }
@@ -2186,11 +2360,18 @@ async function handleQuickAction(action) {
       fullName: formData.fullName || '',
       classId: formData.classId || null,
       className: classOptions.find((option) => option.value === formData.classId)?.label || null,
-      profilePhoto: formData.profilePhoto || null,
+      profilePhoto: null,
+      profilePhotoPath: null,
       status: 'active',
     }));
     if (!result.ok || result.data?.status !== 'ok') {
       alert(result.data?.message || 'Unable to create student record.');
+      return;
+    }
+    try {
+      await uploadCreatedEntityProfilePhoto(formData.profilePhoto, 'students', result.data.entity, token, schoolId);
+    } catch (error) {
+      alert(error.message || 'Student created, but the profile photo could not be saved.');
       return;
     }
     alert('Student record created successfully.');
@@ -2244,11 +2425,18 @@ async function handleQuickAction(action) {
       assignedSubjects: formData.assignedSubjects || null,
       teacherId: formData.teacherId || null,
       employeeNumber: formData.employeeNumber || null,
-      profilePhoto: formData.profilePhoto || null,
+      profilePhoto: null,
+      profilePhotoPath: null,
       status: 'active',
     }));
     if (!result.ok || result.data?.status !== 'ok') {
       alert(result.data?.message || 'Unable to create teacher record.');
+      return;
+    }
+    try {
+      await uploadCreatedEntityProfilePhoto(formData.profilePhoto, 'teachers', result.data.entity, token, schoolId);
+    } catch (error) {
+      alert(error.message || 'Teacher created, but the profile photo could not be saved.');
       return;
     }
     alert('Teacher record created successfully.');
@@ -2278,21 +2466,23 @@ async function handleQuickAction(action) {
   }
 
   if (action === 'record-payment') {
+    const currentResult = await fetchSchoolDetails(token, schoolId);
+    const currentSchool = currentResult.ok && currentResult.data?.status === 'ok' ? currentResult.data.school || {} : {};
+    const studentOptions = (Array.isArray(currentSchool.students) ? currentSchool.students : [])
+      .filter((student) => String(student.status || 'active').toLowerCase() !== 'archived')
+      .map((student) => ({ label: `${student.fullName || student.name || student.email} (${student.studentId || student.id || student.email})`, value: student.studentId || student.id || student.email }))
+      .filter((option) => option.value);
     const formData = await showAdminForm('Record payment', [
       { name: 'amount', label: 'Amount', placeholder: '250.00', required: true },
-      { name: 'student', label: 'Student', placeholder: 'Student name' },
+      { name: 'studentId', label: 'Student', type: 'select', options: studentOptions, required: true },
       { name: 'method', label: 'Payment method', placeholder: 'Cash / Mobile / Bank' },
+      { name: 'reference', label: 'External reference (optional)' },
       { name: 'note', label: 'Note', placeholder: 'Optional note' },
     ]);
     if (!formData) return;
-    const result = await appendSchoolCollectionData(token, schoolId, 'payments', {
-      amount: formData.amount || '',
-      student: formData.student || '',
-      method: formData.method || '',
-      note: formData.note || '',
-    }, 'Payment recorded', 'A payment entry was added to the school records.');
+    const result = await createFeePayment(token, schoolId, { ...formData, status: 'received' });
     if (!result.ok || result.data?.status !== 'ok') {
-      alert(result.data?.message || 'Unable to record payment.');
+      alert(result.data?.message || 'Unable to record payment and receipt.');
       return;
     }
     alert('Payment recorded successfully.');
@@ -2495,10 +2685,12 @@ function attachWorkspaceModuleHandlers() {
       if (result.ok && Array.isArray(result.data?.tickets)) {
         tickets = result.data.tickets;
       } else {
-        tickets = readWorkspaceStorage(WORKSPACE_STORAGE_KEYS.supportTickets, []);
+        supportList.innerHTML = '<div class="rounded-2xl border border-rose-200 bg-rose-50 p-6 text-sm text-rose-800">Unable to load support tickets. Browser-stored tickets are not authoritative.</div>';
+        return;
       }
     } else {
-      tickets = readWorkspaceStorage(WORKSPACE_STORAGE_KEYS.supportTickets, []);
+      supportList.innerHTML = '<div class="rounded-2xl border border-rose-200 bg-rose-50 p-6 text-sm text-rose-800">Sign in to load support tickets. Browser-stored tickets are not authoritative.</div>';
+      return;
     }
 
     supportList.innerHTML = tickets.length
@@ -2598,40 +2790,39 @@ function attachWorkspaceModuleHandlers() {
       const id = messageButton.getAttribute('data-message-id');
       const schoolId = localStorage.getItem('globyedu_schoolId');
       const token = getAccessToken();
+      if (!schoolId || !token) {
+        alert('Sign in to update messages. Browser-stored messages are not sent to the server.');
+        return;
+      }
       if (messageButton.getAttribute('data-message-action') === 'delete') {
-        if (schoolId && token) {
-          await deleteWorkspaceMessage(token, schoolId, id);
-        } else {
-          const messages = readWorkspaceStorage(WORKSPACE_STORAGE_KEYS.messages, []);
-          writeWorkspaceStorage(WORKSPACE_STORAGE_KEYS.messages, messages.filter((item) => item.id !== id));
+        const result = await deleteWorkspaceMessage(token, schoolId, id);
+        if (!result.ok || result.data?.status !== 'ok') {
+          alert(result.data?.message || 'Unable to delete message.');
+          return;
         }
         recordWorkspaceActivity('Message deleted', 'A workspace message was removed.', 'message');
       } else if (messageButton.getAttribute('data-message-action') === 'read') {
-        if (schoolId && token) {
-          const result = await updateWorkspaceMessage(token, schoolId, id, { unread: false });
-          if (!result.ok) {
-            alert(result.data?.message || 'Unable to mark message as read.');
-            return;
-          }
+        const result = await updateWorkspaceMessage(token, schoolId, id, { unread: false });
+        if (!result.ok || result.data?.status !== 'ok') {
+          alert(result.data?.message || 'Unable to mark message as read.');
+          return;
         }
         recordWorkspaceActivity('Message read', 'A workspace message was marked as read.', 'message');
       } else {
-        if (schoolId && token) {
-          const target = await fetchWorkspaceMessages(token, schoolId, { folder: 'inbox' }).then((result) => (result.ok && Array.isArray(result.data?.messages) ? result.data.messages.find((entry) => entry.id === id) : null));
-          const reply = prompt(`Reply to ${target?.subject || 'message'}`, `Re: ${target?.subject || ''}`);
-          if (reply) {
-            await createWorkspaceMessage(token, schoolId, { folder: 'sent', from: 'School Head', to: target?.from || 'Recipient', subject: `Re: ${target?.subject || ''}`, body: reply, unread: false, attachments: [] });
-            recordWorkspaceActivity('Message sent', 'A message was sent from the workspace.', 'message');
+        const messagesResult = await fetchWorkspaceMessages(token, schoolId, { folder: 'inbox' });
+        if (!messagesResult.ok || !Array.isArray(messagesResult.data?.messages)) {
+          alert(messagesResult.data?.message || 'Unable to load the message for a reply.');
+          return;
+        }
+        const target = messagesResult.data.messages.find((entry) => entry.id === id);
+        const reply = prompt(`Reply to ${target?.subject || 'message'}`, `Re: ${target?.subject || ''}`);
+        if (reply) {
+          const result = await createWorkspaceMessage(token, schoolId, { folder: 'sent', from: 'School Head', to: target?.from || 'Recipient', subject: `Re: ${target?.subject || ''}`, body: reply, unread: false, attachments: [] });
+          if (!result.ok || result.data?.status !== 'ok') {
+            alert(result.data?.message || 'Unable to send reply.');
+            return;
           }
-        } else {
-          const messages = readWorkspaceStorage(WORKSPACE_STORAGE_KEYS.messages, []);
-          const target = messages.find((item) => item.id === id);
-          const reply = prompt(`Reply to ${target?.subject || 'message'}`, `Re: ${target?.subject || ''}`);
-          if (reply) {
-            const draft = { id: `m-${Date.now()}`, folder: 'sent', from: 'You', to: target?.from || 'Recipient', subject: `Re: ${target?.subject || ''}`, body: reply, unread: false, createdAt: new Date().toISOString(), attachments: [] };
-            writeWorkspaceStorage(WORKSPACE_STORAGE_KEYS.messages, [draft, ...messages]);
-            recordWorkspaceActivity('Message sent', 'A message was sent from the workspace.', 'message');
-          }
+          recordWorkspaceActivity('Message sent', 'A message was sent from the workspace.', 'message');
         }
       }
       refreshMessages(activeMessageFolder);
@@ -2642,32 +2833,30 @@ function attachWorkspaceModuleHandlers() {
       const id = supportButton.getAttribute('data-ticket-id');
       const schoolId = localStorage.getItem('globyedu_schoolId');
       const token = getAccessToken();
+      if (!schoolId || !token) {
+        alert('Sign in to update support tickets. Browser-stored tickets are not sent to the server.');
+        return;
+      }
       if (supportButton.getAttribute('data-support-action') === 'close') {
-        if (schoolId && token) {
-          await updateSupportTicket(token, schoolId, id, { status: 'resolved' });
-        } else {
-          const tickets = readWorkspaceStorage(WORKSPACE_STORAGE_KEYS.supportTickets, []);
-          const target = tickets.find((item) => item.id === id);
-          if (target) {
-            target.status = 'resolved';
-            writeWorkspaceStorage(WORKSPACE_STORAGE_KEYS.supportTickets, tickets);
-          }
+        const result = await updateSupportTicket(token, schoolId, id, { status: 'resolved' });
+        if (!result.ok || result.data?.status !== 'ok') {
+          alert(result.data?.message || 'Unable to close support ticket.');
+          return;
         }
       } else {
-        if (schoolId && token) {
-          const target = await fetchSupportTickets(token, schoolId).then((result) => (result.ok && Array.isArray(result.data?.tickets) ? result.data.tickets.find((item) => item.id === id) : null));
-          const reply = prompt(`Reply to ${target?.title || 'ticket'}`, 'Thank you. We are reviewing your request.');
-          if (reply) {
-            const nextReplies = [...(target?.replies || []), { body: reply, createdAt: new Date().toISOString() }];
-            await updateSupportTicket(token, schoolId, id, { replies: nextReplies });
-          }
-        } else {
-          const tickets = readWorkspaceStorage(WORKSPACE_STORAGE_KEYS.supportTickets, []);
-          const target = tickets.find((item) => item.id === id);
-          const reply = prompt(`Reply to ${target?.title || 'ticket'}`, 'Thank you. We are reviewing your request.');
-          if (reply) {
-            target.replies = [...(target.replies || []), { body: reply, createdAt: new Date().toISOString() }];
-            writeWorkspaceStorage(WORKSPACE_STORAGE_KEYS.supportTickets, tickets);
+        const ticketsResult = await fetchSupportTickets(token, schoolId);
+        if (!ticketsResult.ok || !Array.isArray(ticketsResult.data?.tickets)) {
+          alert(ticketsResult.data?.message || 'Unable to load support ticket for reply.');
+          return;
+        }
+        const target = ticketsResult.data.tickets.find((item) => item.id === id);
+        const reply = prompt(`Reply to ${target?.title || 'ticket'}`, 'Thank you. We are reviewing your request.');
+        if (reply && target) {
+          const nextReplies = [...(target.replies || []), { body: reply, createdAt: new Date().toISOString() }];
+          const result = await updateSupportTicket(token, schoolId, id, { replies: nextReplies });
+          if (!result.ok || result.data?.status !== 'ok') {
+            alert(result.data?.message || 'Unable to reply to support ticket.');
+            return;
           }
         }
       }
@@ -2682,39 +2871,17 @@ function attachWorkspaceModuleHandlers() {
       profile.fullName = document.getElementById('workspace-profile-fullname')?.value || profile.fullName;
       profile.email = document.getElementById('workspace-profile-email')?.value || profile.email;
       profile.phone = document.getElementById('workspace-profile-phone')?.value || profile.phone;
+      profile.localDraft = true;
       writeWorkspaceStorage(WORKSPACE_STORAGE_KEYS.profile, profile);
-      localStorage.setItem('globyedu_userFullName', profile.fullName);
-      localStorage.setItem('globyedu_userEmail', profile.email);
-      recordWorkspaceActivity('Profile updated', profile.fullName, 'profile');
-      alert('Profile updated successfully.');
+      recordWorkspaceActivity('Profile draft saved', profile.fullName, 'profile');
+      alert('Profile draft saved in this browser. Your account profile has not changed because a profile update service is unavailable.');
     });
   }
 
   const profileUploadButton = document.querySelector('[data-workspace-profile-upload]');
   if (profileUploadButton) {
     profileUploadButton.addEventListener('click', () => {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = 'image/*';
-      input.onchange = async () => {
-        const file = input.files && input.files[0];
-        if (!file) return;
-        if (!file.type.startsWith('image/')) {
-          alert('Please choose a valid image file.');
-          return;
-        }
-        try {
-          const remoteUrl = await uploadTenantAsset(file, 'workspace-profile');
-          const profile = getWorkspaceProfile();
-          profile.avatar = remoteUrl;
-          writeWorkspaceStorage(WORKSPACE_STORAGE_KEYS.profile, profile);
-          recordWorkspaceActivity('Profile photo updated', 'A profile photo was uploaded.', 'profile');
-          alert('Profile photo updated.');
-        } catch (error) {
-          alert(error.message || 'Unable to upload the selected profile photo.');
-        }
-      };
-      input.click();
+      alert('Profile photo updates are unavailable for this account because no profile update service exists. No file was uploaded.');
     });
   }
 
@@ -2733,9 +2900,15 @@ function attachWorkspaceModuleHandlers() {
         return;
       }
       try {
-        const remoteUrl = await uploadTenantAsset(file, 'student-profile');
-        localStorage.setItem('globyedu_profilePhoto', remoteUrl);
-        const result = await updateSchoolEntity(token, schoolId, 'students', studentId, { profilePhoto: remoteUrl });
+        const uploadedPhoto = await uploadTenantAsset(file, 'student-profile', true, {
+          type: 'student',
+          id: studentId,
+          field: 'profilePhotoPath',
+        });
+        const result = await updateSchoolEntity(token, schoolId, 'students', studentId, {
+          profilePhoto: uploadedPhoto.url,
+          profilePhotoPath: uploadedPhoto.path,
+        });
         if (!result.ok || result.data?.status !== 'ok') {
           throw new Error(result.data?.message || 'The photo could not be saved to the student profile.');
         }
@@ -2750,11 +2923,7 @@ function attachWorkspaceModuleHandlers() {
   const profileTwoFactorButton = document.querySelector('[data-workspace-profile-2fa]');
   if (profileTwoFactorButton) {
     profileTwoFactorButton.addEventListener('click', () => {
-      const profile = getWorkspaceProfile();
-      profile.twoFactorEnabled = !profile.twoFactorEnabled;
-      writeWorkspaceStorage(WORKSPACE_STORAGE_KEYS.profile, profile);
-      recordWorkspaceActivity('2FA toggled', profile.twoFactorEnabled ? 'Two-factor authentication was enabled.' : 'Two-factor authentication was disabled.', 'security');
-      alert(profile.twoFactorEnabled ? 'Two-factor authentication enabled.' : 'Two-factor authentication disabled.');
+      alert('Two-factor authentication cannot be changed here because no 2FA service is configured. Your account security settings were not changed.');
     });
   }
 
@@ -2765,29 +2934,29 @@ function attachWorkspaceModuleHandlers() {
       settings.theme = document.getElementById('workspace-settings-theme')?.value || settings.theme;
       settings.language = document.getElementById('workspace-settings-language')?.value || settings.language;
       settings.timezone = document.getElementById('workspace-settings-timezone')?.value || settings.timezone;
-      settings.securityMode = document.getElementById('workspace-settings-security')?.value || settings.securityMode;
       writeWorkspaceStorage(WORKSPACE_STORAGE_KEYS.settings, settings);
       applyWorkspaceTheme();
-      recordWorkspaceActivity('Settings updated', 'Workspace settings were saved.', 'settings');
-      alert('Settings saved.');
+      recordWorkspaceActivity('Workspace preferences updated', 'Browser-only workspace preferences were saved.', 'settings');
+      alert('Workspace preferences saved in this browser only. Security settings were not changed.');
     });
   }
 
   const settingsResetButton = document.querySelector('[data-workspace-settings-reset]');
   if (settingsResetButton) {
     settingsResetButton.addEventListener('click', () => {
-      writeWorkspaceStorage(WORKSPACE_STORAGE_KEYS.settings, {
+      const settings = getWorkspaceSettings();
+      Object.assign(settings, {
         theme: 'midnight',
         notificationsEnabled: true,
         emailAlerts: true,
         smsAlerts: false,
         language: 'English',
         timezone: 'UTC',
-        securityMode: 'standard',
       });
+      writeWorkspaceStorage(WORKSPACE_STORAGE_KEYS.settings, settings);
       applyWorkspaceTheme();
-      recordWorkspaceActivity('Settings reset', 'Workspace settings were reset to defaults.', 'settings');
-      alert('Settings reset.');
+      recordWorkspaceActivity('Workspace preferences reset', 'Browser-only workspace preferences were reset.', 'settings');
+      alert('Workspace preferences reset in this browser only. Security settings were not changed.');
       location.reload();
     });
   }
@@ -2800,16 +2969,14 @@ function attachWorkspaceModuleHandlers() {
       if (!title || !message) return;
       const schoolId = localStorage.getItem('globyedu_schoolId');
       const token = getAccessToken();
-      if (schoolId && token) {
-        const result = await createSupportTicket(token, schoolId, { title, message, status: 'open', replies: [], priority: 'normal', category: 'workspace' });
-        if (!result.ok || result.data?.status !== 'ok') {
-          alert(result.data?.message || 'Unable to create support ticket.');
-          return;
-        }
-      } else {
-        const tickets = readWorkspaceStorage(WORKSPACE_STORAGE_KEYS.supportTickets, []);
-        tickets.unshift({ id: `ticket-${Date.now()}`, title, message, status: 'open', replies: [], createdAt: new Date().toISOString() });
-        writeWorkspaceStorage(WORKSPACE_STORAGE_KEYS.supportTickets, tickets);
+      if (!schoolId || !token) {
+        alert('Sign in to create a support ticket. Browser-stored tickets are not sent to the server.');
+        return;
+      }
+      const result = await createSupportTicket(token, schoolId, { title, message, status: 'open', replies: [], priority: 'normal', category: 'workspace' });
+      if (!result.ok || result.data?.status !== 'ok') {
+        alert(result.data?.message || 'Unable to create support ticket.');
+        return;
       }
       recordWorkspaceActivity('Support ticket created', title, 'support');
       refreshSupport();
@@ -2824,6 +2991,54 @@ function attachWorkspaceModuleHandlers() {
 
 function attachSchoolHandlers() {
   attachWorkspaceModuleHandlers();
+
+  document.querySelectorAll('[data-print-report-card]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const card = button.closest('[data-report-card]');
+      if (!card) {
+        alert('Unable to find this report card to print.');
+        return;
+      }
+      const printWindow = window.open('', '_blank');
+      if (!printWindow) {
+        alert('Your browser blocked the print window. Allow pop-ups for this site and try again.');
+        return;
+      }
+      const printableCard = card.cloneNode(true);
+      printableCard.querySelectorAll('[data-print-report-card]').forEach((printButton) => printButton.remove());
+      const studentName = card.querySelector('.report-card-header p')?.textContent?.trim() || 'Student report card';
+      printWindow.document.open();
+      printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(studentName)} report card</title><style>
+        @page{size:A4 landscape;margin:14mm}
+        *{box-sizing:border-box}
+        body{font-family:Arial,sans-serif;color:#172033;margin:0}
+        [data-report-card]{border:0!important;padding:0!important}
+        .report-card-header{display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #cbd5e1;padding-bottom:12px;margin-bottom:16px}
+        .report-card-header>div:first-child{display:flex;align-items:center;gap:14px}
+        .report-card-header p{margin:4px 0}
+        .report-card-header p:first-child{font-size:20px;font-weight:700}
+        .report-card-photo,.report-card-photo-fallback{width:84px;height:84px;flex:0 0 84px;border:1px solid #cbd5e1;border-radius:50%;object-fit:cover}
+        .report-card-photo-fallback{display:flex;align-items:center;justify-content:center;background:#eff6ff;font-size:28px;font-weight:700}
+        .report-card-table{width:100%;border-collapse:collapse;font-size:11pt}
+        .report-card-table th,.report-card-table td{border:1px solid #94a3b8;padding:8px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+        .report-card-table th{background:#f1f5f9!important;font-weight:700}
+        .report-card-table tr{break-inside:avoid}
+        @media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+      </style></head><body>${printableCard.outerHTML}</body></html>`);
+      printWindow.document.close();
+      printWindow.addEventListener('afterprint', () => printWindow.close(), { once: true });
+      const imagesReady = Array.from(printWindow.document.images).map((image) => image.complete
+        ? Promise.resolve()
+        : new Promise((resolve) => {
+          image.addEventListener('load', resolve, { once: true });
+          image.addEventListener('error', resolve, { once: true });
+        }));
+      Promise.all(imagesReady).then(() => {
+        printWindow.focus();
+        printWindow.print();
+      });
+    });
+  });
 
   // Attach sidebar navigation handlers
   attachSidebarHandlers(
@@ -3098,6 +3313,8 @@ function attachSchoolHandlers() {
         
         const studentData = {
           ...formData,
+          profilePhoto: null,
+          profilePhotoPath: null,
           className: classOptions.find((option) => option.value === formData.classId)?.label || null,
           status: 'active',
         };
@@ -3107,6 +3324,12 @@ function attachSchoolHandlers() {
           return;
         }
         const createdStudent = result.data?.entity || {};
+        try {
+          await uploadCreatedEntityProfilePhoto(formData.profilePhoto, 'students', createdStudent, token, schoolId);
+        } catch (error) {
+          alert(error.message || 'Student created, but the profile photo could not be saved.');
+          return;
+        }
         alert(`Student created successfully.\nAdmission Number: ${createdStudent.admissionNumber || 'Generated by the school data layer'}\nThe student must use the password reset flow before first login.`);
         renderSchoolDashboardPage('students', ++routeGeneration);
         return;
@@ -3198,6 +3421,8 @@ function attachSchoolHandlers() {
 
         const teacherData = {
           ...formData,
+          profilePhoto: null,
+          profilePhotoPath: null,
           assignedClasses: normalizedAssignedClasses,
           assignedSubjects: normalizedAssignedSubjects,
           classTeacher: formData.classTeacher === 'true',
@@ -3211,6 +3436,12 @@ function attachSchoolHandlers() {
           return;
         }
         const createdTeacher = result.data?.entity || {};
+        try {
+          await uploadCreatedEntityProfilePhoto(formData.profilePhoto, 'teachers', createdTeacher, token, schoolId);
+        } catch (error) {
+          alert(error.message || 'Teacher created, but the profile photo could not be saved.');
+          return;
+        }
         alert('Teacher created successfully. The teacher must use the password reset flow before first login.');
         renderSchoolDashboardPage('teachers');
         return;
@@ -3224,7 +3455,10 @@ function attachSchoolHandlers() {
           { name: 'className', label: 'Class / stream' },
           { name: 'teacher', label: 'Teacher / recorder' },
           { name: 'subject', label: 'Subject / activity' },
-          { name: 'status', label: 'Status', placeholder: 'Present / Absent / Late / Excused', required: true },
+          { name: 'status', label: 'Status', type: 'select', options: [
+            { label: 'Present', value: 'present' },
+            { label: 'Absent', value: 'absent' },
+          ], required: true },
           { name: 'note', label: 'Note', type: 'textarea' },
         ]);
         if (!formData) return;
@@ -3239,14 +3473,21 @@ function attachSchoolHandlers() {
       }
 
       if (action === 'record-payment') {
+        const currentResult = await fetchSchoolDetails(token, schoolId);
+        const currentSchool = currentResult.ok && currentResult.data?.status === 'ok' ? currentResult.data.school || {} : {};
+        const studentOptions = (Array.isArray(currentSchool.students) ? currentSchool.students : [])
+          .filter((student) => String(student.status || 'active').toLowerCase() !== 'archived')
+          .map((student) => ({ label: `${student.fullName || student.name || student.email} (${student.studentId || student.id || student.email})`, value: student.studentId || student.id || student.email }))
+          .filter((option) => option.value);
         const formData = await showAdminForm('Record payment', [
           { name: 'amount', label: 'Amount', required: true },
-          { name: 'student', label: 'Student' },
+          { name: 'studentId', label: 'Student', type: 'select', options: studentOptions, required: true },
           { name: 'method', label: 'Method' },
+          { name: 'reference', label: 'External reference (optional)' },
           { name: 'note', label: 'Note', type: 'textarea' },
         ]);
         if (!formData) return;
-        const result = await appendSchoolCollectionData(token, schoolId, 'payments', buildSchoolCollectionPayload('payments', formData), 'Payment recorded', 'A payment entry was added to the school records.');
+        const result = await createFeePayment(token, schoolId, { ...formData, status: 'received' });
         if (!result.ok || result.data?.status !== 'ok') {
           alert(result.data?.message || 'Unable to record payment.');
           return;
@@ -3492,7 +3733,7 @@ function attachSchoolHandlers() {
         const schoolId = localStorage.getItem('globyedu_schoolId');
         const token = getAccessToken();
         if (!schoolId || !token) return;
-        const result = await updateSchoolDetails(token, schoolId, { logo: null });
+        const result = await updateSchoolDetails(token, schoolId, { logo: null, logoPath: null });
         if (!result.ok || result.data?.status !== 'ok') {
           alert(result.data?.message || 'Unable to remove logo.');
           return;
@@ -3554,6 +3795,16 @@ function attachSchoolHandlers() {
   }
 
   function initializeAttendanceRoster() {
+    const viewDateInput = document.getElementById('school-attendance-view-date');
+    if (viewDateInput) {
+      viewDateInput.addEventListener('change', () => {
+        const schoolId = localStorage.getItem('globyedu_schoolId') || '';
+        if (!viewDateInput.value) return;
+        sessionStorage.setItem(`globyedu_attendance_view_date:${schoolId}`, viewDateInput.value);
+        renderSchoolDashboardPage('attendance');
+      });
+    }
+
     const loadButton = document.querySelector('[data-school-attendance-load]');
     const roster = document.getElementById('school-attendance-roster');
     const feedback = document.getElementById('school-attendance-feedback');
@@ -3577,14 +3828,14 @@ function attachSchoolHandlers() {
       const records = Array.isArray(school.attendanceRecords) ? school.attendanceRecords : [];
       const classRecord = (Array.isArray(school.classes) ? school.classes : []).find((entry) => [entry.classId, entry.id, entry.name, entry.className, entry.grade].filter(Boolean).some((value) => String(value).trim().toLowerCase() === String(className).trim().toLowerCase()));
       const rosterEntries = buildAttendanceRoster(students, records, date, className, classRecord);
-      const statusOptions = ['present', 'absent', 'late', 'excused'];
+      const statusOptions = ['present', 'absent'];
       feedback.textContent = rosterEntries.length ? `${rosterEntries.length} student${rosterEntries.length === 1 ? '' : 's'} loaded for ${className} on ${date}.` : 'No active students belong to this class.';
       roster.innerHTML = rosterEntries.length ? `
         <div class="overflow-x-auto rounded-2xl border border-slate-200 bg-white">
           <table class="min-w-full text-sm text-slate-700">
             <thead class="bg-slate-100"><tr><th class="px-4 py-3 text-left">Student</th><th class="px-4 py-3 text-left">Student ID</th><th class="px-4 py-3 text-left">Attendance</th></tr></thead>
             <tbody class="divide-y divide-slate-200">${rosterEntries.map(({ student, studentId, status }) => {
-              return `<tr><td class="px-4 py-3 font-semibold text-slate-900">${escapeHtml(student.fullName || student.name || 'Student')}</td><td class="px-4 py-3">${escapeHtml(studentId || '—')}</td><td class="px-4 py-3"><select data-attendance-status data-student-id="${escapeHtml(studentId)}" class="rounded-xl border border-slate-200 bg-white px-3 py-2">${statusOptions.map((option) => `<option value="${option}" ${status === option ? 'selected' : ''}>${option.charAt(0).toUpperCase() + option.slice(1)}</option>`).join('')}</select></td></tr>`;
+              return `<tr><td class="px-4 py-3 font-semibold text-slate-900">${escapeHtml(student.fullName || student.name || 'Student')}</td><td class="px-4 py-3">${escapeHtml(studentId || '—')}</td><td class="px-4 py-3"><select required data-attendance-status data-student-id="${escapeHtml(studentId)}" class="rounded-xl border border-slate-200 bg-white px-3 py-2"><option value="" ${status ? '' : 'selected'} disabled>Select status</option>${statusOptions.map((option) => `<option value="${option}" ${status === option ? 'selected' : ''}>${option.charAt(0).toUpperCase() + option.slice(1)}</option>`).join('')}</select></td></tr>`;
             }).join('')}</tbody>
           </table>
         </div>
@@ -3593,6 +3844,10 @@ function attachSchoolHandlers() {
 
       roster.querySelector('[data-school-attendance-save]')?.addEventListener('click', async () => {
         const selected = [...roster.querySelectorAll('[data-attendance-status]')];
+        if (selected.some((control) => !normalizeAttendanceStatus(control.value))) {
+          feedback.textContent = 'Choose Present or Absent for every student before saving.';
+          return;
+        }
         const selectedRoster = selected.map((control) => {
           const student = students.find((entry) => String(entry.studentId || entry.id || entry.email || '') === control.dataset.studentId) || {};
           return { student, studentId: control.dataset.studentId, status: control.value };
@@ -3646,6 +3901,11 @@ function attachSchoolHandlers() {
           { name: 'medical', label: 'Medical notes', type: 'textarea', value: studentRecord.medical || '', placeholder: 'Allergies, conditions, special care' },
         ], {
           submitLabel: 'Save Changes',
+          fileOwner: {
+            type: 'student',
+            id: studentRecord.studentId || studentRecord.id || studentRecord.email,
+            field: 'profilePhotoPath',
+          },
           onSave: async (values) => {
             const payload = buildSchoolEntityPayload('students', {
               fullName: values.fullName || '',
@@ -3664,6 +3924,7 @@ function attachSchoolHandlers() {
               parentEmail: values.parentEmail || null,
               medical: values.medical || null,
               profilePhoto: values.profilePhoto || studentRecord.profilePhoto || null,
+              profilePhotoPath: values.profilePhotoPath || studentRecord.profilePhotoPath || undefined,
               status: studentRecord.status || 'active',
             });
             const studentIdentifier = studentRecord.id || studentRecord.studentId || studentRecord.email;
@@ -3802,7 +4063,14 @@ function attachSchoolHandlers() {
             { label: 'No', value: 'false' },
             { label: 'Yes', value: 'true' },
           ] },
-        ], { submitLabel: 'Save Changes' });
+        ], {
+          submitLabel: 'Save Changes',
+          fileOwner: {
+            type: 'teacher',
+            id: teacherRecord.teacherId || teacherRecord.id || teacherRecord.username || teacherRecord.email,
+            field: 'profilePhotoPath',
+          },
+        });
         if (!formData) return;
         const normalizedAssignedClasses = formData.assignedClasses ? [formData.assignedClasses] : [];
         const normalizedAssignedSubjects = Array.isArray(formData.assignedSubjects) ? formData.assignedSubjects : formData.assignedSubjects ? [formData.assignedSubjects] : [];
@@ -3820,6 +4088,7 @@ function attachSchoolHandlers() {
           assignedSubjects: normalizedAssignedSubjects,
           classTeacher: formData.classTeacher === 'true',
           profilePhoto: formData.profilePhoto || teacherRecord.profilePhoto || null,
+          profilePhotoPath: formData.profilePhotoPath || teacherRecord.profilePhotoPath || undefined,
           teacherId: teacherRecord.teacherId || null,
           employeeNumber: teacherRecord.employeeNumber || null,
           status: teacherRecord.status || 'active',
@@ -3889,7 +4158,13 @@ function attachSchoolHandlers() {
         let headers = [];
 
         if (exportType === 'attendance') {
-          rows = Array.isArray(school.attendanceRecords) ? school.attendanceRecords : [];
+          rows = (Array.isArray(school.attendanceRecords) ? school.attendanceRecords : [])
+            .map((record) => ({
+              ...record,
+              date: String(record.date || '').slice(0, 10),
+              status: normalizeAttendanceStatus(record.status),
+            }))
+            .filter((record) => record.status);
           headers = ['date', 'studentName', 'studentId', 'className', 'teacher', 'subject', 'status', 'note'];
         } else if (exportType === 'students') {
           rows = Array.isArray(school.students) ? school.students : [];
@@ -4463,6 +4738,11 @@ function attachSchoolHandlers() {
       const stampPreview = document.getElementById('profile-stamp-preview');
       const principalSignaturePreview = document.getElementById('profile-principal-signature-preview');
 
+      logoHiddenInput.dataset.storagePath = school.logoPath || '';
+      coverHiddenInput.dataset.storagePath = school.coverImagePath || '';
+      stampHiddenInput.dataset.storagePath = school.stampPath || '';
+      principalSignatureHiddenInput.dataset.storagePath = school.principalSignaturePath || '';
+
       function closeProfileEditor() {
         container.remove();
       }
@@ -4480,16 +4760,24 @@ function attachSchoolHandlers() {
       renderImagePreview(principalSignaturePreview, principalSignatureHiddenInput?.value || '', 'No signature selected');
 
       logoFileInput?.addEventListener('change', async () => {
-        await handleImageUpload(logoFileInput, logoHiddenInput, logoPreview, 'No logo selected');
+        await handleImageUpload(logoFileInput, logoHiddenInput, logoPreview, 'No logo selected', {
+          type: 'school', id: school.schoolId, field: 'logoPath',
+        });
       });
       coverFileInput?.addEventListener('change', async () => {
-        await handleImageUpload(coverFileInput, coverHiddenInput, coverPreview, 'No cover selected');
+        await handleImageUpload(coverFileInput, coverHiddenInput, coverPreview, 'No cover selected', {
+          type: 'school', id: school.schoolId, field: 'coverImagePath',
+        });
       });
       stampFileInput?.addEventListener('change', async () => {
-        await handleImageUpload(stampFileInput, stampHiddenInput, stampPreview, 'No stamp selected');
+        await handleImageUpload(stampFileInput, stampHiddenInput, stampPreview, 'No stamp selected', {
+          type: 'school', id: school.schoolId, field: 'stampPath',
+        });
       });
       principalSignatureFileInput?.addEventListener('change', async () => {
-        await handleImageUpload(principalSignatureFileInput, principalSignatureHiddenInput, principalSignaturePreview, 'No signature selected');
+        await handleImageUpload(principalSignatureFileInput, principalSignatureHiddenInput, principalSignaturePreview, 'No signature selected', {
+          type: 'school', id: school.schoolId, field: 'principalSignaturePath',
+        });
       });
 
       if (profileForm) {
@@ -4516,9 +4804,13 @@ function attachSchoolHandlers() {
               timezone: school.timezone || null,
               description: school.description || null,
               logo: school.logo || null,
+              logoPath: school.logoPath || null,
               coverImage: school.coverImage || null,
+              coverImagePath: school.coverImagePath || null,
               stamp: school.stamp || null,
+              stampPath: school.stampPath || null,
               principalSignature: school.principalSignature || null,
+              principalSignaturePath: school.principalSignaturePath || null,
               branding: school.branding || {},
             },
             {
@@ -4532,9 +4824,13 @@ function attachSchoolHandlers() {
               timezone: document.getElementById('profile-timezone').value.trim() || null,
               description: document.getElementById('profile-description').value.trim() || null,
               logo: document.getElementById('profile-logo').value.trim() || null,
+              logoPath: logoHiddenInput.dataset.storagePath || school.logoPath || null,
               coverImage: document.getElementById('profile-cover').value.trim() || null,
+              coverImagePath: coverHiddenInput.dataset.storagePath || school.coverImagePath || null,
               stamp: document.getElementById('profile-stamp').value.trim() || null,
+              stampPath: stampHiddenInput.dataset.storagePath || school.stampPath || null,
               principalSignature: document.getElementById('profile-principal-signature').value.trim() || null,
+              principalSignaturePath: principalSignatureHiddenInput.dataset.storagePath || school.principalSignaturePath || null,
               branding: {
                 ...((school.branding && typeof school.branding === 'object') ? school.branding : {}),
                 language: document.getElementById('profile-language').value.trim() || null,
@@ -4577,8 +4873,13 @@ function attachSchoolHandlers() {
         const file = input.files && input.files[0];
         if (!file) return;
         try {
-          const remoteUrl = await uploadTenantAsset(file, 'school-logo');
-          const result = await updateSchoolDetails(token, schoolId, { logo: remoteUrl });
+          const uploadedAsset = await uploadTenantAsset(file, 'school-logo', true, {
+            type: 'school', id: schoolId, field: 'logoPath',
+          });
+          const result = await updateSchoolDetails(token, schoolId, {
+            logo: uploadedAsset.url,
+            logoPath: uploadedAsset.path,
+          });
           if (!result.ok || result.data?.status !== 'ok') {
             alert(result.data?.message || 'Unable to update logo.');
             return;
@@ -4605,8 +4906,13 @@ function attachSchoolHandlers() {
         const file = input.files && input.files[0];
         if (!file) return;
         try {
-          const dataUrl = await readFileAsDataUrl(file);
-          const result = await updateSchoolDetails(token, schoolId, { coverImage: dataUrl });
+          const uploadedAsset = await uploadTenantAsset(file, 'school-cover', true, {
+            type: 'school', id: schoolId, field: 'coverImagePath',
+          });
+          const result = await updateSchoolDetails(token, schoolId, {
+            coverImage: uploadedAsset.url,
+            coverImagePath: uploadedAsset.path,
+          });
           if (!result.ok || result.data?.status !== 'ok') {
             alert(result.data?.message || 'Unable to update cover image.');
             return;
@@ -4665,10 +4971,21 @@ function attachSchoolHandlers() {
 
     const title = `${existing ? 'Edit' : 'Create'} ${entityType.replace(/-/g, ' ')}`;
     const fields = getEntityFormFields(entityType, existing || {});
-    const formData = await showAdminForm(title, fields);
+    const fileOwner = existing && entityType === 'teachers'
+      ? {
+          type: 'teacher',
+          id: existing.teacherId || existing.id || existing.username || existing.email,
+          field: 'profilePhotoPath',
+        }
+      : null;
+    const formData = await showAdminForm(title, fields, { fileOwner });
     if (!formData) return;
 
     const payload = buildEntityPayload(entityType, formData, existing || {});
+    if (!existing && entityType === 'teachers' && typeof formData.profilePhoto?.arrayBuffer === 'function') {
+      payload.profilePhoto = null;
+      payload.profilePhotoPath = null;
+    }
     const result = existing
       ? await updateSchoolEntity(token, schoolId, entityType, existing.id, payload)
       : await createSchoolEntity(token, schoolId, entityType, payload);
@@ -4676,6 +4993,14 @@ function attachSchoolHandlers() {
     if (!result.ok || result.data?.status !== 'ok') {
       alert(result.data?.message || `Unable to ${existing ? 'update' : 'create'} ${entityType.replace(/-/g, ' ')}.`);
       return;
+    }
+    if (!existing && entityType === 'teachers') {
+      try {
+        await uploadCreatedEntityProfilePhoto(formData.profilePhoto, entityType, result.data.entity, token, schoolId);
+      } catch (error) {
+        alert(error.message || 'Teacher created, but the profile photo could not be saved.');
+        return;
+      }
     }
 
     alert(`${entityType.replace(/-/g, ' ')} ${existing ? 'updated' : 'created'} successfully.`);
@@ -4862,6 +5187,195 @@ function attachSchoolHandlers() {
   initializeStudentImportExport();
 }
 
+function showTeacherReportCardForm({ students = [], classes = [], token, schoolId }) {
+  return new Promise((resolve) => {
+    const columns = ['Subject', 'Class Score (50%)', 'Exam Score (50%)', 'Total (100%)', 'Position', 'Grade', 'Remarks'];
+    const overlay = document.createElement('div');
+    overlay.className = 'fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/60 p-3 sm:items-center sm:p-6';
+    const studentOptions = students.map((student) => {
+      const studentId = String(student.studentId || student.id || student.email || '').trim();
+      const fullName = String(student.fullName || student.name || '').trim();
+      return {
+        student,
+        studentId,
+        label: studentId ? `${fullName} — ${studentId}` : fullName,
+      };
+    }).filter((entry) => entry.studentId && entry.label);
+    const optionMarkup = studentOptions.map((entry) => `<option value="${escapeHtml(entry.label)}"></option>`).join('');
+    const renderRow = () => `
+      <tr data-report-row class="border-t border-slate-200">
+        ${columns.map((_, index) => `<td class="min-w-36 p-2"><input data-report-cell="${index}" aria-label="${escapeHtml(columns[index])}" type="${[1, 2, 3].includes(index) ? 'number' : 'text'}" ${[1, 2, 3].includes(index) ? 'min="0" step="any"' : ''} class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" /></td>`).join('')}
+        <td class="p-2"><button type="button" data-report-remove-row class="rounded-full border border-slate-200 px-3 py-2 text-xs font-semibold text-rose-700">Remove</button></td>
+      </tr>`;
+
+    overlay.innerHTML = `
+      <section class="my-3 max-h-[calc(100vh-1.5rem)] w-full max-w-6xl overflow-y-auto rounded-3xl bg-white p-5 shadow-2xl sm:my-0 sm:max-h-[calc(100vh-3rem)] sm:p-6">
+        <div class="flex items-start justify-between gap-4">
+          <div><p class="text-sm uppercase tracking-[0.25em] text-slate-500">Exams and reports</p><h2 class="mt-2 text-xl font-semibold text-slate-900">Create student report card</h2></div>
+          <button type="button" data-report-close aria-label="Close report card form" class="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 text-xl text-slate-600">&times;</button>
+        </div>
+        <form data-report-form class="mt-5 space-y-5">
+          <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <label class="text-sm font-semibold text-slate-700 sm:col-span-2">Student name
+              <input data-report-student list="teacher-report-student-options" autocomplete="off" required placeholder="Start typing a student name" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" />
+              <datalist id="teacher-report-student-options">${optionMarkup}</datalist>
+              <input data-report-student-id type="hidden" />
+            </label>
+            <label class="text-sm font-semibold text-slate-700">Class
+              <input data-report-class readonly class="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-normal" />
+            </label>
+            <label class="text-sm font-semibold text-slate-700">Exam / assessment
+              <input data-report-exam required placeholder="e.g. End of Term Examination" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" />
+            </label>
+            <label class="text-sm font-semibold text-slate-700">Term
+              <input data-report-term placeholder="Term 1" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" />
+            </label>
+            <label class="text-sm font-semibold text-slate-700">Academic year
+              <input data-report-year placeholder="2026/2027" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" />
+            </label>
+          </div>
+          <div>
+            <div class="flex flex-wrap items-end justify-between gap-3">
+              <div><h3 class="font-semibold text-slate-900">Report columns</h3><p class="mt-1 text-sm text-slate-600">Edit the headings and subject names to match your school’s report format.</p></div>
+              <button type="button" data-report-add-row class="rounded-full border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-semibold text-sky-700">Add subject row</button>
+            </div>
+            <div class="mt-3 overflow-x-auto rounded-2xl border border-slate-200">
+              <table class="min-w-full border-collapse text-left text-sm">
+                <thead class="bg-slate-50"><tr>${columns.map((column, index) => `<th class="min-w-36 p-2"><input data-report-heading="${index}" aria-label="Column heading ${index + 1}" value="${escapeHtml(column)}" required class="w-full rounded-lg border border-slate-200 bg-white px-2 py-2 font-semibold text-slate-700" /></th>`).join('')}<th class="p-2">Actions</th></tr></thead>
+                <tbody data-report-rows>${renderRow()}</tbody>
+              </table>
+            </div>
+          </div>
+          <p data-report-error class="hidden text-sm text-rose-700" role="alert" aria-live="polite"></p>
+          <div class="flex flex-wrap justify-end gap-3">
+            <button type="button" data-report-cancel class="rounded-full border border-slate-200 px-5 py-3 text-sm font-semibold text-slate-700">Cancel</button>
+            <button type="submit" class="rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Save report card</button>
+          </div>
+        </form>
+      </section>`;
+    document.body.appendChild(overlay);
+
+    let settled = false;
+    const cleanup = () => overlay.remove();
+    const close = (value = null) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const studentInput = overlay.querySelector('[data-report-student]');
+    const studentIdInput = overlay.querySelector('[data-report-student-id]');
+    const classInput = overlay.querySelector('[data-report-class]');
+    studentInput.addEventListener('input', () => {
+      const selected = studentOptions.find((entry) => entry.label === studentInput.value);
+      studentIdInput.value = selected?.studentId || '';
+      const student = selected?.student;
+      const studentClass = student && classes.find((entry) => [entry.classId, entry.id].some((value) => String(value || '').toLowerCase() === String(student.classId || '').toLowerCase()));
+      classInput.value = student ? String(student.className || student.gradeLevel || student.grade || studentClass?.name || studentClass?.className || studentClass?.grade || '') : '';
+    });
+    overlay.querySelector('[data-report-add-row]').addEventListener('click', () => {
+      overlay.querySelector('[data-report-rows]').insertAdjacentHTML('beforeend', renderRow());
+    });
+    overlay.addEventListener('click', (event) => {
+      const removeButton = event.target.closest('[data-report-remove-row]');
+      if (removeButton) {
+        const rows = overlay.querySelectorAll('[data-report-row]');
+        if (rows.length > 1) removeButton.closest('[data-report-row]').remove();
+        else removeButton.closest('[data-report-row]').querySelectorAll('[data-report-cell]').forEach((input) => { input.value = ''; });
+      }
+    });
+    overlay.querySelector('[data-report-close]').addEventListener('click', () => close());
+    overlay.querySelector('[data-report-cancel]').addEventListener('click', () => close());
+    overlay.querySelector('[data-report-form]').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const errorMessage = overlay.querySelector('[data-report-error]');
+      const saveButton = overlay.querySelector('button[type="submit"]');
+      const selected = studentOptions.find((entry) => entry.studentId === studentIdInput.value && entry.label === studentInput.value);
+      const className = classInput.value.trim();
+      const rows = Array.from(overlay.querySelectorAll('[data-report-row]')).map((row) => Array.from(row.querySelectorAll('[data-report-cell]')).map((input) => input.value.trim()));
+      const subjectRows = rows.filter((row) => row[0]);
+      if (!selected || !className) {
+        errorMessage.textContent = 'Choose a student from the assigned-student suggestions.';
+        errorMessage.classList.remove('hidden');
+        return;
+      }
+      if (!subjectRows.length) {
+        errorMessage.textContent = 'Add at least one subject row before saving.';
+        errorMessage.classList.remove('hidden');
+        return;
+      }
+      const subjectNames = subjectRows.map((row) => row[0].toLowerCase());
+      if (new Set(subjectNames).size !== subjectNames.length) {
+        errorMessage.textContent = 'Each subject can only appear once on a report card.';
+        errorMessage.classList.remove('hidden');
+        return;
+      }
+      const invalidScore = subjectRows.some((row) => [1, 2, 3].some((index) => row[index] !== '' && !Number.isFinite(Number(row[index]))));
+      if (invalidScore) {
+        errorMessage.textContent = 'Class score, exam score, and total must be valid numbers.';
+        errorMessage.classList.remove('hidden');
+        return;
+      }
+      saveButton.disabled = true;
+      saveButton.textContent = 'Saving...';
+      errorMessage.classList.add('hidden');
+      try {
+        const schoolResponse = await fetchSchoolDetails(token, schoolId);
+        if (!schoolResponse.ok || schoolResponse.data?.status !== 'ok') {
+          throw new Error(schoolResponse.data?.message || 'Unable to load existing exam results.');
+        }
+        const school = schoolResponse.data.school || {};
+        const existingResults = Array.isArray(school.examResults) ? school.examResults : [];
+        const reportColumns = Array.from(overlay.querySelectorAll('[data-report-heading]')).map((input) => input.value.trim());
+        if (reportColumns.some((column) => !column)) throw new Error('All report column headings are required.');
+        const exam = overlay.querySelector('[data-report-exam]').value.trim();
+        const term = overlay.querySelector('[data-report-term]').value.trim() || 'Term 1';
+        const academicYear = overlay.querySelector('[data-report-year]').value.trim() || '2026/2027';
+        const now = new Date().toISOString();
+        const newResults = subjectRows.map((cells) => {
+          const result = {
+            studentId: selected.studentId,
+            student: selected.student.fullName || selected.student.name || selected.label,
+            className,
+            subject: cells[0],
+            exam,
+            term,
+            academicYear,
+            reportColumns,
+            reportCells: cells,
+            remark: cells[6] || '',
+            updatedAt: now,
+          };
+          if (cells[3] !== '') {
+            result.mark = Number(cells[3]);
+            result.maxMarks = 100;
+            result.average = Math.round(result.mark);
+            result.grade = cells[5] || '';
+            result.passed = result.mark >= 40;
+          }
+          return result;
+        });
+        const resultKey = (entry) => `${String(entry.studentId || entry.student || '').trim().toLowerCase()}|${String(entry.subject || '').trim().toLowerCase()}|${String(entry.exam || '').trim().toLowerCase()}|${String(entry.term || '').trim().toLowerCase()}|${String(entry.academicYear || '').trim().toLowerCase()}`;
+        const managedKeys = new Set(newResults.map(resultKey));
+        const nextResults = existingResults.filter((entry) => !managedKeys.has(resultKey(entry))).concat(newResults.map((entry) => {
+          const previous = existingResults.find((record) => resultKey(record) === resultKey(entry));
+          return previous ? { ...previous, ...entry } : { ...entry, id: `result-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, createdAt: now };
+        }));
+        const saveResponse = await updateSchoolDetails(token, schoolId, { examResults: nextResults });
+        if (!saveResponse.ok || saveResponse.data?.status !== 'ok') {
+          throw new Error(saveResponse.data?.message || 'Unable to save the report card.');
+        }
+        close(true);
+      } catch (error) {
+        errorMessage.textContent = error.message || 'Unable to save the report card.';
+        errorMessage.classList.remove('hidden');
+        saveButton.disabled = false;
+        saveButton.textContent = 'Save report card';
+      }
+    });
+  });
+}
+
 function initializeTeacherWorkspaceHandlers(teacherData = {}) {
   document.querySelectorAll('[data-teacher-workspace-action]').forEach((button) => {
     if (button.dataset.teacherWorkspaceBound === 'true') return;
@@ -4961,6 +5475,8 @@ function initializeTeacherWorkspaceHandlers(teacherData = {}) {
             const selectedClass = classOptions.find((entry) => entry.value === values.classId);
             createResponse = await createSchoolEntity(token, schoolId, 'students', buildSchoolEntityPayload('students', {
               ...values,
+              profilePhoto: null,
+              profilePhotoPath: null,
               className: selectedClass?.label || null,
               status: 'active',
             }));
@@ -4969,8 +5485,31 @@ function initializeTeacherWorkspaceHandlers(teacherData = {}) {
         });
         if (!formData) return;
         const createdStudent = createResponse.data.entity || {};
+        try {
+          await uploadCreatedEntityProfilePhoto(formData.profilePhoto, 'students', createdStudent, token, schoolId);
+        } catch (error) {
+          alert(error.message || 'Student created, but the profile photo could not be saved.');
+          return;
+        }
         alert(`Student created successfully. Student ID: ${createdStudent.studentId || 'Generated'}.`);
         renderRolePage('teacher', 'students');
+        return;
+      }
+
+      if (action === 'create-report-card') {
+        if (teacherData.schoolDataLoadError) {
+          alert(teacherData.schoolDataLoadError);
+          return;
+        }
+        const saved = await showTeacherReportCardForm({
+          students: Array.isArray(teacherData.students) ? teacherData.students : [],
+          classes: Array.isArray(teacherData.classes) ? teacherData.classes : [],
+          token,
+          schoolId,
+        });
+        if (!saved) return;
+        alert('Report card saved successfully.');
+        renderRolePage('teacher', 'exams');
         return;
       }
 
@@ -5034,6 +5573,7 @@ function initializeTeacherWorkspaceHandlers(teacherData = {}) {
 
       if (action === 'save-profile') {
         const profilePhoto = button.dataset.profilePhoto || '';
+        const profilePhotoPath = button.dataset.profilePhotoPath || '';
         const profileResult = await updateSchoolDetails(token, schoolId, {
           teacherProfile: {
             fullName: document.getElementById('teacher-profile-name')?.value.trim(),
@@ -5043,6 +5583,7 @@ function initializeTeacherWorkspaceHandlers(teacherData = {}) {
             position: document.getElementById('teacher-profile-position')?.value.trim(),
             qualification: document.getElementById('teacher-profile-qualification')?.value.trim(),
             profilePhoto: profilePhoto || undefined,
+            profilePhotoPath: profilePhotoPath || undefined,
           },
         });
         if (!profileResult.ok || profileResult.data?.status !== 'ok') {
@@ -5071,9 +5612,14 @@ function initializeTeacherWorkspaceHandlers(teacherData = {}) {
       return;
     }
     try {
-      const remoteUrl = await uploadTenantAsset(file, 'teacher-profile');
-      if (profileSaveButton) profileSaveButton.dataset.profilePhoto = remoteUrl;
-      if (profilePhotoPreview) profilePhotoPreview.innerHTML = `<img src="${escapeHtml(remoteUrl)}" alt="Profile preview" class="h-20 w-20 rounded-full object-cover" />`;
+      const uploadedPhoto = await uploadTenantAsset(file, 'teacher-profile', true, {
+        type: 'teacher', id: 'self', field: 'profilePhotoPath',
+      });
+      if (profileSaveButton) {
+        profileSaveButton.dataset.profilePhoto = uploadedPhoto.url;
+        profileSaveButton.dataset.profilePhotoPath = uploadedPhoto.path;
+      }
+      if (profilePhotoPreview) profilePhotoPreview.innerHTML = `<img src="${escapeHtml(uploadedPhoto.url)}" alt="Profile preview" class="h-20 w-20 rounded-full object-cover" />`;
     } catch (error) {
       alert(error.message || 'Unable to upload the selected profile photo.');
     }
@@ -5099,9 +5645,15 @@ function initializeTeacherWorkspaceHandlers(teacherData = {}) {
         { name: 'className', label: 'Assigned class', value: student.className || '', disabled: true },
       ], {
         submitLabel: 'Save Changes',
+        fileOwner: {
+          type: 'student',
+          id: student.studentId || student.id || student.email,
+          field: 'profilePhotoPath',
+        },
         onSave: (values) => updateSchoolEntity(token, schoolId, 'students', studentId, {
           fullName: values.fullName,
           profilePhoto: values.profilePhoto || student.profilePhoto || null,
+          profilePhotoPath: values.profilePhotoPath || student.profilePhotoPath || undefined,
           className: values.className,
         }),
       });
@@ -5706,7 +6258,7 @@ function attachRegisterHandlers() {
       } else {
         localStorage.setItem('globyedu_schoolId', result.data.schoolId);
         localStorage.setItem('globyedu_schoolName', schoolName);
-        localStorage.setItem('globyedu_trialEnds', result.data.trialEndsAt || '3 days');
+        localStorage.setItem('globyedu_trialEnds', result.data.trialEndsAt || '');
         try {
           const loginResult = await apiLogin(email, password, result.data.schoolId);
           if (loginResult.ok && loginResult.data?.status === 'ok') {
@@ -5757,13 +6309,9 @@ function attachForgotHandlers(loginType = 'school') {
     }
 
     try {
-      if (isFirebaseConfigured()) {
-        await firebaseSendPasswordResetEmail(email);
-      } else {
-        const result = await apiForgot(email, loginType);
-        if (!result.ok || result.data?.status !== 'ok') {
-          throw new Error(result.data?.message || 'Unable to submit request.');
-        }
+      const result = await apiForgot(email, loginType);
+      if (!result.ok || result.data?.status !== 'ok') {
+        throw new Error(result.data?.message || 'Unable to submit request.');
       }
       messageSlot.innerHTML = `<div class="rounded-3xl border border-emerald-100 bg-emerald-50 p-4 text-emerald-800">If that email exists, a password reset link has been sent.</div>`;
     } catch (error) {
@@ -5799,16 +6347,11 @@ function attachResetPasswordHandlers(token = '', loginType = 'school') {
     }
 
     try {
-      if (isFirebaseConfigured()) {
-        await firebaseConfirmPasswordResetClient(token, newPassword);
-        messageSlot.innerHTML = `<div class="rounded-3xl border border-emerald-100 bg-emerald-50 p-4 text-emerald-800">Your password has been updated. You can now sign in.</div>`;
-      } else {
-        const result = await confirmFirebasePasswordReset(token, newPassword);
-        if (!result.ok || result.data?.status !== 'ok') {
-          throw new Error(result.data?.message || 'Unable to reset password.');
-        }
-        messageSlot.innerHTML = `<div class="rounded-3xl border border-emerald-100 bg-emerald-50 p-4 text-emerald-800">Your password has been updated. You can now sign in.</div>`;
+      const result = await confirmFirebasePasswordReset(token, newPassword);
+      if (!result.ok || result.data?.status !== 'ok') {
+        throw new Error(result.data?.message || 'Unable to reset password.');
       }
+      messageSlot.innerHTML = `<div class="rounded-3xl border border-emerald-100 bg-emerald-50 p-4 text-emerald-800">Your password has been updated. You can now sign in.</div>`;
     } catch (error) {
       messageSlot.innerHTML = `<div class="rounded-3xl border border-rose-100 bg-rose-50 p-4 text-rose-800">Unable to reset password. Please try again.</div>`;
     }
@@ -6109,7 +6652,7 @@ function showAdminConfirmation(message) {
   });
 }
 
-function showAdminForm(title, fields, { submitLabel = 'Save Changes', onSave } = {}) {
+function showAdminForm(title, fields, { submitLabel = 'Save Changes', onSave, fileOwner } = {}) {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.className = 'fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/60 p-3 sm:items-center sm:p-6';
@@ -6130,7 +6673,7 @@ function showAdminForm(title, fields, { submitLabel = 'Save Changes', onSave } =
             <label class="block text-sm text-slate-700">
               ${field.label}
               <input id="admin-form-${field.name}" type="file" accept="${field.accept || 'image/*'}" class="mt-3 w-full rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100" ${field.required ? 'required' : ''} />
-              <span id="admin-form-${field.name}-feedback" class="mt-2 block text-xs text-slate-500">Choose an image up to 2 MB.</span>
+              <span id="admin-form-${field.name}-feedback" class="mt-2 block text-xs text-slate-500">Choose an image to upload.</span>
               <span id="admin-form-${field.name}-preview" class="mt-3 block"></span>
             </label>
           `;
@@ -6281,7 +6824,13 @@ function showAdminForm(title, fields, { submitLabel = 'Save Changes', onSave } =
 
             const validationError = validateSchoolImage(file);
             if (validationError) throw new Error(validationError);
-            result[field.name] = await uploadTenantAsset(file, field.name);
+            if (fileOwner) {
+              const uploadedAsset = await uploadTenantAsset(file, field.name, true, fileOwner);
+              result[field.name] = uploadedAsset.url;
+              result[`${field.name}Path`] = uploadedAsset.path;
+            } else {
+              result[field.name] = file;
+            }
             continue;
           }
 

@@ -46,7 +46,7 @@ export function AppShell({
       <div class="flex min-h-screen flex-col lg:flex-row">
         <div id="app-sidebar-backdrop" class="fixed inset-0 z-30 hidden bg-slate-950/70 lg:hidden" aria-hidden="true"></div>
 
-        <aside id="app-sidebar" class="fixed inset-y-0 left-0 z-40 flex h-dvh w-[min(88vw,20rem)] -translate-x-full flex-col border-r border-slate-800 bg-[#0B0F19] p-5 text-slate-100 shadow-2xl transition-transform duration-200 lg:static lg:h-auto lg:w-72 lg:translate-x-0 lg:border-r lg:border-slate-800 lg:p-6 lg:shadow-none" aria-label="${roleLabel} navigation">
+        <aside id="app-sidebar" class="fixed inset-y-0 left-0 z-40 flex h-dvh w-[min(88vw,20rem)] -translate-x-full flex-col border-r border-slate-800 bg-[#0B0F19] p-5 text-slate-100 shadow-2xl transition-transform duration-200 lg:static lg:h-auto lg:w-72 lg:translate-x-0 lg:border-r lg:border-slate-800 lg:p-6 lg:shadow-none" aria-label="${roleLabel} navigation" aria-hidden="true" inert>
           <div class="flex items-center justify-between gap-3">
             <div class="flex items-center gap-3">
               <div class="flex h-12 w-12 items-center justify-center rounded-2xl bg-linear-to-br from-sky-500 to-emerald-500 text-lg font-bold text-white">
@@ -57,7 +57,7 @@ export function AppShell({
                 <p class="text-lg font-semibold text-white">${roleLabel}</p>
               </div>
             </div>
-            <button type="button" data-app-sidebar-close class="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-slate-700 bg-slate-900/70 text-slate-100 lg:hidden">×</button>
+            <button type="button" data-app-sidebar-close aria-label="Close navigation" class="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-700 bg-slate-900/70 text-slate-100 lg:hidden">×</button>
           </div>
 
           <div class="mt-8 flex-1 space-y-2 overflow-y-auto">${navMarkup}</div>
@@ -75,7 +75,7 @@ export function AppShell({
           <header class="sticky top-0 z-20 border-b border-slate-200 bg-white/95 backdrop-blur-xl">
             <div class="flex flex-col gap-4 px-4 py-4 md:flex-row md:items-center md:justify-between md:px-6">
               <div class="flex items-center gap-3">
-                <button type="button" data-app-sidebar-toggle class="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-700 shadow-sm lg:hidden" aria-label="Open navigation" aria-controls="app-sidebar" aria-expanded="false">☰</button>
+                <button type="button" data-app-sidebar-toggle class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-700 shadow-sm lg:hidden" aria-label="Open navigation" aria-controls="app-sidebar" aria-expanded="false">☰</button>
                 <div class="min-w-0">
                   <p class="text-xs uppercase tracking-[0.3em] text-slate-500">${title}</p>
                   <h1 class="truncate text-xl font-semibold text-slate-900 sm:text-2xl">${subtitle}</h1>
@@ -89,9 +89,9 @@ export function AppShell({
                 </label>
 
                 <div class="flex flex-wrap items-center gap-2">
-                  <button type="button" data-app-action="notifications" class="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">🔔</button>
-                  <button type="button" data-app-action="messages" class="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">💬</button>
-                  <button type="button" data-app-action="help" class="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">❓</button>
+                  <button type="button" data-app-action="notifications" aria-label="Notifications" class="inline-flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-white text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">🔔</button>
+                  <button type="button" data-app-action="messages" aria-label="Messages" class="inline-flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-white text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">💬</button>
+                  <button type="button" data-app-action="help" aria-label="Help" class="inline-flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-white text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">❓</button>
                   <div class="relative" data-account-menu>
                     <button type="button" data-account-menu-toggle aria-haspopup="true" aria-expanded="false" aria-controls="account-actions-menu" class="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">${profileName}</button>
                     <div id="account-actions-menu" data-account-menu-panel class="absolute right-0 top-full z-30 mt-2 hidden w-48 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">

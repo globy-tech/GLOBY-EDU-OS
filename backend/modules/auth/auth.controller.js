@@ -14,6 +14,7 @@ const router = express.Router();
 const authService = require('./auth.service');
 const { sendEmail, resetTemplate, verificationTemplate } = require('./utils/email');
 const schoolService = require('../school/school.service');
+const { DEFAULT_TRIAL_LABEL, createTrialEndDate } = require('../school/trial-period');
 const { validateRegistrationPayload } = require('./registration.service');
 const authMiddleware = require('./middleware/auth.middleware');
 const {
@@ -122,7 +123,8 @@ router.post('/register', async (req, res) => {
       }
     }
 
-    const trialEndsAt = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
+    const trialStartedAt = new Date();
+    const trialEndsAt = createTrialEndDate(trialStartedAt);
     const schoolId = payload.schoolId || null;
     const schoolPayload = {
       name: payload.schoolName,
@@ -147,9 +149,10 @@ router.post('/register', async (req, res) => {
       headFullName: schoolHead.fullName,
       headEmail: String(schoolHead.email || payload.email || '').trim().toLowerCase(),
       headPassword: schoolHead.password,
-      subscriptionPlan: '5-Day Trial',
+      subscriptionPlan: DEFAULT_TRIAL_LABEL,
       subscriptionStatus: 'trial',
-      trialStatus: '5-Day Trial',
+      trialStatus: DEFAULT_TRIAL_LABEL,
+      trialStartedAt,
       trialEndsAt,
       schoolStatus: 'active',
     };
@@ -198,7 +201,7 @@ router.post('/register', async (req, res) => {
         schoolId: tenantId,
         tenantId,
         trialEndsAt: (created.trialEndsAt || trialEndsAt).toISOString ? (created.trialEndsAt || trialEndsAt).toISOString() : new Date(created.trialEndsAt || trialEndsAt).toISOString(),
-        trialStatus: '5-Day Trial',
+        trialStatus: DEFAULT_TRIAL_LABEL,
         accountStatus: 'trial',
         schoolName: payload.schoolName,
         verificationEmail: schoolPayload.headEmail,
@@ -216,7 +219,7 @@ router.post('/register', async (req, res) => {
       schoolId: tenantId,
       tenantId,
       trialEndsAt: (created.trialEndsAt || trialEndsAt).toISOString ? (created.trialEndsAt || trialEndsAt).toISOString() : new Date(created.trialEndsAt || trialEndsAt).toISOString(),
-      trialStatus: '5-Day Trial',
+      trialStatus: DEFAULT_TRIAL_LABEL,
       accountStatus: 'trial',
       schoolName: payload.schoolName,
       headAccount: { email: headAccount.username },

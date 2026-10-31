@@ -4,6 +4,23 @@ const prisma = require('../../config/prisma.client');
 const firebaseData = require('../../firebase.data');
 
 const PRICING_FILE = path.join(__dirname, '../../data/pricing-plans.json');
+const QA_MODE = String(process.env.GLOBY_QA_MODE || '').trim().toLowerCase() === 'true';
+const QA_PLANS = Object.freeze([
+  {
+    id: 'qa-basic',
+    slug: 'qa-basic',
+    name: 'QA Basic',
+    studentLimit: 50,
+    monthlyAmount: 0,
+    yearlyAmount: 0,
+    currency: 'GHS',
+    active: true,
+    displayOrder: 1,
+    shortDescription: 'Synthetic plan for isolated local QA.',
+    recommendedBadge: false,
+  },
+]);
+
 function assertFallbackAllowed() {
   if (process.env.NODE_ENV === 'production' && String(process.env.DATABASE_URL || '').trim().length > 0) {
     return;
@@ -66,6 +83,12 @@ function mergeConfiguredPlans(plans) {
 }
 
 async function listPricingPlans({ activeOnly = false } = {}) {
+  if (QA_MODE) {
+    return QA_PLANS
+      .map(normalizePlan)
+      .filter((plan) => !activeOnly || plan.active)
+      .sort((a, b) => a.displayOrder - b.displayOrder);
+  }
   if (firebaseData.isFirebaseDataConfigured()) {
     const snapshot = await firebaseData.getFirestore().collection('pricingPlans').orderBy('displayOrder').get();
     const storedPlans = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
@@ -87,6 +110,7 @@ async function getPricingPlan(slug, billingPeriod = 'monthly') {
 }
 
 async function updatePricingPlan(id, updates = {}) {
+  if (QA_MODE) throw new Error('Pricing updates are disabled in isolated QA mode.');
   const payload = {
     name: String(updates.name || '').trim(),
     studentLimit: Number(updates.studentLimit),

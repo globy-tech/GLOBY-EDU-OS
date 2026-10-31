@@ -5,7 +5,9 @@ const bcrypt = require('bcrypt');
 const config = require('../../config/auth.config');
 const { generateSchoolSubdomain } = require('./tenant-hostname');
 
-const SCHOOLS_FILE = path.join(__dirname, '../../data/schools.json');
+const SCHOOLS_FILE = process.env.GLOBY_SCHOOLS_FILE
+  ? path.resolve(process.env.GLOBY_SCHOOLS_FILE)
+  : path.join(__dirname, '../../data/schools.json');
 const DEMO_SCHOOL_ID = 'globy-school';
 const LEGACY_DEMO_SCHOOL_ID = 'GLOBY-DEMO-001';
 const DEMO_SCHOOL_NAME = 'Globy School';
@@ -726,12 +728,19 @@ function ensureDemoSchool() {
         delete existing.passwordHash;
       }
 
-      const sameUser = existing.username === demoUser.username && existing.role === demoUser.role && existing.passwordHash === demoUser.passwordHash && existing.studentPasswordHash === demoUser.studentPasswordHash && existing.passwordNeedsReset === demoUser.passwordNeedsReset;
+      const credentialFields = ['passwordHash', 'studentPasswordHash', 'passwordNeedsReset'];
+      const existingCredentials = Object.fromEntries(credentialFields
+        .filter((field) => Object.prototype.hasOwnProperty.call(existing, field))
+        .map((field) => [field, existing[field]]));
+      const sameUser = Object.keys(demoUser).every((field) => credentialFields.includes(field)
+        ? Object.prototype.hasOwnProperty.call(existing, field)
+        : existing[field] === demoUser[field]);
       if (!sameUser) {
         Object.assign(existing, demoUser);
+        Object.assign(existing, existingCredentials);
         if (String(existing.role || '').toLowerCase() === 'student') {
           if (demoUser.studentPasswordHash) {
-            existing.studentPasswordHash = demoUser.studentPasswordHash;
+            existing.studentPasswordHash = existingCredentials.studentPasswordHash || demoUser.studentPasswordHash;
           }
           delete existing.passwordHash;
         }

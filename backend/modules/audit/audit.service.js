@@ -4,7 +4,9 @@ const crypto = require('crypto');
 const prisma = require('../../config/prisma.client');
 const firebaseData = require('../../firebase.data');
 
-const AUDIT_FILE = path.join(__dirname, '../../data/audit-logs.json');
+const AUDIT_FILE = process.env.GLOBY_AUDIT_FILE
+  ? path.resolve(process.env.GLOBY_AUDIT_FILE)
+  : path.join(__dirname, '../../data/audit-logs.json');
 const SENSITIVE_KEY = /password|hash|token|secret|api[_-]?key|oauth|credential|private/i;
 const SENSITIVE_VALUE = /^\$2[aby]\$|^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 

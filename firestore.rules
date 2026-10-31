@@ -63,11 +63,7 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow get, list: if isSignedIn() && (
-        isSuperAdmin() ||
-        resource.data.schoolId == request.auth.token.tenantId ||
-        request.auth.token.uid == userId
-      );
+      allow get, list: if false;
       allow create, update, delete: if false;
     }
 

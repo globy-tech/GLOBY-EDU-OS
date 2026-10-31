@@ -20,8 +20,15 @@ jest.mock('../../../firebase.admin', () => ({
   verifyIdToken: jest.fn(),
 }));
 
+jest.mock('../../../firebase.core', () => ({
+  getMaintenanceMode: jest.fn().mockResolvedValue(false),
+}));
+
 jest.mock('../../../config/prisma.client', () => null);
-jest.mock('../utils/token', () => ({ verifyAccessToken: jest.fn() }));
+jest.mock('../utils/token', () => ({
+  ...jest.requireActual('../utils/token'),
+  verifyAccessToken: jest.fn(),
+}));
 
 const authMiddleware = require('../middleware/auth.middleware');
 const { verifyAccessToken } = require('../utils/token');

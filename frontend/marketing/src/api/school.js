@@ -18,6 +18,9 @@ function handleUnauthorized(response) {
       document.dispatchEvent(new CustomEvent('globyedu-school-suspended', { detail: response.data }));
     }
   }
+  if (response.status === 503 && response.data?.code === 'MAINTENANCE_MODE' && typeof document !== 'undefined') {
+    document.dispatchEvent(new CustomEvent('globyedu-maintenance-mode', { detail: response.data }));
+  }
   return response;
 }
 
@@ -140,6 +143,10 @@ export async function fetchPlatformAuditLogs(token, filters = {}) {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => { if (value !== undefined && value !== '') params.set(key, value); });
   return getJson(`/api/v1/audit-logs?${params.toString()}`, token);
+}
+
+export async function fetchSchoolActivity(token, schoolId, limit = 100) {
+  return getJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/activity?limit=${encodeURIComponent(limit)}`, token);
 }
 
 export async function fetchAdminSchoolList(token, search = '') {

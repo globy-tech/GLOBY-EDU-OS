@@ -7,7 +7,13 @@ jest.mock('../../../firebase.admin', () => ({
 jest.mock('../../../config/prisma.client', () => ({
   __stub: false,
   tenant: {
-    findUnique: jest.fn(async () => ({ id: 'tenant-db-id', schoolId: 'globy-school' })),
+    findUnique: jest.fn(async () => ({
+      id: 'tenant-db-id',
+      schoolId: 'globy-school',
+      status: 'active',
+      schoolStatus: 'active',
+      subscriptionStatus: 'active',
+    })),
   },
   user: {
     findUnique: jest.fn(async ({ where }) => (where.email === 'linked@globy.test' ? {
@@ -96,6 +102,7 @@ describe('Firebase login account-linking policy', () => {
   test('returns explicit tenant and school identifiers for linked accounts', async () => {
     const result = await authService.loginWithFirebaseIdToken('firebase-token', 'globy-school');
 
+    expect(require('../../../firebase.admin').verifyIdToken).toHaveBeenCalledWith('firebase-token', true);
     expect(result.tenantId).toBe('tenant-db-id');
     expect(result.schoolId).toBe('globy-school');
     expect(result.user.roles).toEqual(['school_authority']);
@@ -103,12 +110,56 @@ describe('Firebase login account-linking policy', () => {
     expect(result.refreshToken).toBeTruthy();
   });
 
+  test('does not create a session while Firebase password synchronization is pending', async () => {
+    mockFirebaseSchoolLogin({
+      schoolId: 'globy-school',
+      schoolStatus: 'active',
+      subscriptionStatus: 'active',
+    }, { passwordSyncPending: true });
+
+    await expect(authService.loginWithFirebaseIdToken('firebase-token', 'globy-school'))
+      .rejects.toThrow('Password update is still being synchronized.');
+  });
+
   test('allows an active subscription when an old trial end date remains on the tenant', async () => {
     mockFirebaseSchoolLogin({
       schoolId: 'globy-school',
       schoolStatus: 'active',
       subscriptionStatus: 'active',
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       trialEndsAt: new Date(Date.now() - 60 * 60 * 1000),
+    });
+
+    await expect(authService.login('globy-school', 'linked@globy.test', 'test-password'))
+      .resolves.toMatchObject({ user: { schoolId: 'globy-school' } });
+  });
+
+  test('keeps renewal authentication available after paid expiry while tenant routes enforce access', async () => {
+    mockFirebaseSchoolLogin({
+      schoolId: 'globy-school',
+      schoolStatus: 'active',
+      status: 'active',
+      subscriptionStatus: 'active',
+      expiresAt: new Date(Date.now() - 60 * 60 * 1000),
+      subscriptions: [{ status: 'active', expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) }],
+    });
+    const firebaseAdmin = require('../../../firebase.admin');
+
+    await expect(authService.login('globy-school', 'linked@globy.test', 'test-password'))
+      .resolves.toMatchObject({ user: { schoolId: 'globy-school' } });
+
+    firebaseAdmin.verifyIdToken.mockResolvedValueOnce({ email: 'linked@globy.test', email_verified: true });
+    await expect(authService.loginWithFirebaseIdToken('firebase-token', 'globy-school'))
+      .resolves.toMatchObject({ user: { schoolId: 'globy-school' } });
+  });
+
+  test('allows renewal login for a persisted expired paid subscription', async () => {
+    mockFirebaseSchoolLogin({
+      schoolId: 'globy-school',
+      schoolStatus: 'active',
+      subscriptionStatus: 'expired',
+      subscriptionPlan: 'Starter',
+      expiresAt: new Date(Date.now() - 60 * 60 * 1000),
     });
 
     await expect(authService.login('globy-school', 'linked@globy.test', 'test-password'))
@@ -120,6 +171,18 @@ describe('Firebase login account-linking policy', () => {
       schoolId: 'globy-school',
       schoolStatus: 'active',
       subscriptionStatus: 'trial',
+      trialEndsAt: new Date(Date.now() - 60 * 60 * 1000),
+    });
+
+    await expect(authService.login('globy-school', 'linked@globy.test', 'test-password'))
+      .rejects.toThrow('School account is not active');
+  });
+
+  test('continues to deny a legacy expired trial subscription', async () => {
+    mockFirebaseSchoolLogin({
+      schoolId: 'globy-school',
+      status: 'trial',
+      subscriptionPlan: '5-Day Trial',
       trialEndsAt: new Date(Date.now() - 60 * 60 * 1000),
     });
 

@@ -8,8 +8,10 @@ const fs = require('fs');
 const dotenv = require('dotenv');
 
 // Load backend configuration consistently for both workspace-root and backend launches.
-dotenv.config({ path: path.join(__dirname, '.env') });
+const isolatedQaMode = String(process.env.GLOBY_QA_MODE || '').trim().toLowerCase() === 'true';
+if (!isolatedQaMode) dotenv.config({ path: path.join(__dirname, '.env') });
 
+require('./config/qa-config').assertIsolatedQaConfiguration(process.env, __dirname);
 require('./firebase.admin').assertFirebaseConfiguration();
 
 const apiRoutes = require('./routes/api');

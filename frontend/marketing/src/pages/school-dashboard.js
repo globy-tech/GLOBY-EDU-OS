@@ -16,28 +16,36 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function summarizeAttendanceRecords(records = []) {
-  const list = Array.isArray(records) ? records : [];
-  const counts = { present: 0, absent: 0, late: 0, excused: 0 };
+function getAttendanceStatusLabel(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'present' || normalized === 'late') return 'Present';
+  if (normalized === 'absent' || normalized === 'excused') return 'Absent';
+  return '—';
+}
+
+function summarizeAttendanceRecords(records = [], date = new Date().toISOString().slice(0, 10)) {
+  const list = (Array.isArray(records) ? records : [])
+    .filter((entry) => String(entry.date || '').slice(0, 10) === date)
+    .map((entry) => ({ ...entry, status: getAttendanceStatusLabel(entry.status).toLowerCase() }))
+    .filter((entry) => entry.status === 'present' || entry.status === 'absent');
+  const counts = { present: 0, absent: 0 };
 
   list.forEach((entry) => {
     const normalized = String(entry.status || '').trim().toLowerCase();
     if (normalized === 'present') counts.present += 1;
     else if (normalized === 'absent') counts.absent += 1;
-    else if (normalized === 'late') counts.late += 1;
-    else if (normalized === 'excused') counts.excused += 1;
   });
 
-  const total = list.length;
+  const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
   return {
+    date,
+    records: list,
     total,
     counts,
     presentRatio: total ? Math.round((counts.present / total) * 100) : 0,
     statusSummary: [
       { label: 'Present', count: counts.present, tone: 'emerald' },
       { label: 'Absent', count: counts.absent, tone: 'rose' },
-      { label: 'Late', count: counts.late, tone: 'amber' },
-      { label: 'Excused', count: counts.excused, tone: 'sky' },
     ],
   };
 }
@@ -67,10 +75,12 @@ function normalizeExamResults(results = []) {
   const list = Array.isArray(results) ? results : [];
   return list.map((entry, index) => {
     const maxMarks = Number(entry.maxMarks || entry.maximumMarks || 100);
-    const mark = Number(entry.mark || entry.score || entry.total || 0);
+    const rawMark = entry.mark ?? entry.score ?? entry.total;
+    const hasMark = rawMark !== undefined && rawMark !== null && rawMark !== '';
+    const mark = hasMark ? Number(rawMark) : undefined;
     const passingMarks = Number(entry.passingMarks || entry.passMark || 40);
-    const average = maxMarks ? Math.round((mark / maxMarks) * 100) : 0;
-    const passed = mark >= passingMarks;
+    const average = hasMark && maxMarks ? Math.round((mark / maxMarks) * 100) : undefined;
+    const passed = hasMark ? mark >= passingMarks : undefined;
     return {
       id: entry.id || `result-${index + 1}`,
       student: entry.student || 'Student',
@@ -114,24 +124,75 @@ function getGradeForMark(mark, gradingSystem = []) {
   return found ? found.label : 'F';
 }
 
+function renderReportSheets(results = [], students = [], schoolName = '') {
+  const studentById = new Map();
+  const studentByName = new Map();
+  (Array.isArray(students) ? students : []).forEach((student) => {
+    const id = student.studentId || student.id || student.email;
+    const name = student.fullName || student.name || student.email;
+    if (id) studentById.set(String(id).trim().toLowerCase(), student);
+    if (name) studentByName.set(String(name).trim().toLowerCase(), student);
+  });
+  const groups = new Map();
+  (Array.isArray(results) ? results : []).filter((entry) => Array.isArray(entry.reportColumns) && Array.isArray(entry.reportCells)).forEach((entry) => {
+    const key = [
+      entry.studentId || entry.student || '',
+      entry.exam || entry.examName || '',
+      entry.term || '',
+      entry.academicYear || '',
+    ].map((value) => String(value).trim().toLowerCase()).join('|');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(entry);
+  });
+  return Array.from(groups.values()).map((entries) => {
+    const first = entries[0];
+    const columns = first.reportColumns;
+    const studentId = String(first.studentId || '').trim().toLowerCase();
+    const studentName = String(first.student || '').trim().toLowerCase();
+    const student = studentById.get(studentId) || studentByName.get(studentName);
+    const displayName = student?.fullName || student?.name || first.student || 'Student';
+    const photo = student?.profilePhoto || student?.passportPhoto || '';
+    return `
+      <article data-report-card class="rounded-2xl border border-slate-200 bg-white p-4">
+        <div class="report-card-header mb-3 flex flex-wrap items-start justify-between gap-2">
+          <div class="flex items-center gap-3">
+            ${photo ? `<img class="report-card-photo h-16 w-16 rounded-full object-cover" src="${escapeHtml(photo)}" alt="${escapeHtml(displayName)}" />` : `<div class="report-card-photo-fallback flex h-16 w-16 items-center justify-center rounded-full bg-sky-100 text-xl font-semibold text-sky-700">${escapeHtml(displayName.charAt(0).toUpperCase())}</div>`}
+            <div><p class="font-semibold text-slate-900">${escapeHtml(displayName)}</p><p class="mt-1 text-sm text-slate-600">${escapeHtml(schoolName || first.schoolName || '')}</p><p class="mt-1 text-sm text-slate-600">${escapeHtml(first.exam || 'Assessment')} · ${escapeHtml(first.term || 'Term 1')} · ${escapeHtml(first.academicYear || '')}</p></div>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="rounded-full bg-sky-50 px-3 py-1 text-xs font-semibold text-sky-700">${escapeHtml(first.className || student?.className || 'Class')}</span>
+            <button type="button" data-print-report-card class="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700">Print report card</button>
+          </div>
+        </div>
+        <div class="overflow-x-auto rounded-xl border border-slate-200">
+          <table class="report-card-table min-w-full border-collapse text-left text-sm">
+            <thead class="bg-slate-50 text-slate-700"><tr>${columns.map((column) => `<th class="whitespace-nowrap px-3 py-2 font-semibold">${escapeHtml(column)}</th>`).join('')}</tr></thead>
+            <tbody>${entries.map((entry) => `<tr class="border-t border-slate-200">${columns.map((_, index) => `<td class="whitespace-nowrap px-3 py-2 text-slate-700">${escapeHtml(entry.reportCells[index] || '')}</td>`).join('')}</tr>`).join('')}</tbody>
+          </table>
+        </div>
+      </article>`;
+  }).join('');
+}
+
 function buildExamDashboardMetrics(exams = [], results = [], gradingSystem = []) {
   const examList = normalizeExamItems(exams);
   const resultList = normalizeExamResults(results);
+  const scoredResultList = resultList.filter((entry) => entry.mark !== undefined && entry.mark !== null);
   const upcomingExams = examList.filter((exam) => String(exam.status || '').toLowerCase() !== 'completed' && String(exam.status || '').toLowerCase() !== 'published').length;
   const completedExams = examList.filter((exam) => String(exam.status || '').toLowerCase() === 'completed' || String(exam.status || '').toLowerCase() === 'published').length;
   const pendingMarking = examList.filter((exam) => String(exam.status || '').toLowerCase() === 'draft' || String(exam.status || '').toLowerCase() === 'pending-marking').length;
-  const averagePerformance = resultList.length
-    ? Math.round(resultList.reduce((sum, entry) => sum + Number(entry.average || 0), 0) / resultList.length)
+  const averagePerformance = scoredResultList.length
+    ? Math.round(scoredResultList.reduce((sum, entry) => sum + Number(entry.average || 0), 0) / scoredResultList.length)
     : 0;
-  const passRate = resultList.length
-    ? Math.round((resultList.filter((entry) => entry.passed).length / resultList.length) * 100)
+  const passRate = scoredResultList.length
+    ? Math.round((scoredResultList.filter((entry) => entry.passed).length / scoredResultList.length) * 100)
     : 0;
-  const failRate = resultList.length ? Math.max(0, 100 - passRate) : 0;
-  const topClass = resultList.length
-    ? resultList.reduce((best, entry) => (entry.average > best.average ? entry : best), resultList[0]).className || '—'
+  const failRate = scoredResultList.length ? Math.max(0, 100 - passRate) : 0;
+  const topClass = scoredResultList.length
+    ? scoredResultList.reduce((best, entry) => (entry.average > best.average ? entry : best), scoredResultList[0]).className || '—'
     : '—';
-  const lowestClass = resultList.length
-    ? resultList.reduce((worst, entry) => (entry.average < worst.average ? entry : worst), resultList[0]).className || '—'
+  const lowestClass = scoredResultList.length
+    ? scoredResultList.reduce((worst, entry) => (entry.average < worst.average ? entry : worst), scoredResultList[0]).className || '—'
     : '—';
 
   return {
@@ -176,10 +237,6 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
   const students = Array.isArray(sectionData.students) ? sectionData.students : [];
   const teachers = Array.isArray(sectionData.teachers) ? sectionData.teachers : [];
   const attendanceRecords = Array.isArray(sectionData.attendanceRecords) ? sectionData.attendanceRecords : [];
-  const attendanceClasses = [...new Set([
-    ...(Array.isArray(sectionData.classes) ? sectionData.classes.map((entry) => entry.name || entry.className || entry.classId) : []),
-    ...students.map((student) => student.className || student.gradeLevel || student.grade),
-  ].filter(Boolean).map((value) => String(value).trim()))].sort();
   const payments = Array.isArray(sectionData.payments) ? sectionData.payments : [];
   const financeCategories = Array.isArray(sectionData.financeCategories) ? sectionData.financeCategories : [];
   const invoices = Array.isArray(sectionData.invoices) ? sectionData.invoices : [];
@@ -195,13 +252,67 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
   const examRecords = Array.isArray(sectionData.examRecords) ? sectionData.examRecords : [];
   const examResults = Array.isArray(sectionData.examResults) ? sectionData.examResults : [];
   const gradingSystem = Array.isArray(sectionData.gradingSystem) ? sectionData.gradingSystem : [];
+  const teacherActivity = Array.isArray(sectionData.teacherActivity) ? sectionData.teacherActivity : [];
+  const teacherActivityLoadError = sectionData.teacherActivityLoadError || '';
   const school = sectionData.school || summary || {};
-  const attendanceSummary = summarizeAttendanceRecords(attendanceRecords);
+  const attendanceDate = sectionData.attendanceViewDate || new Date().toISOString().slice(0, 10);
+  const attendanceSummary = summarizeAttendanceRecords(attendanceRecords, attendanceDate);
   const normalizedExamRecords = normalizeExamItems(examRecords.length ? examRecords : examSchedules);
   const normalizedExamResults = normalizeExamResults(examResults.length ? examResults : gradeEntries);
+  const reportSheetResults = normalizedExamResults.filter((entry) => Array.isArray(entry.reportColumns) && Array.isArray(entry.reportCells));
+  const legacyExamResults = normalizedExamResults.filter((entry) => !Array.isArray(entry.reportColumns) || !Array.isArray(entry.reportCells));
   const examDashboardMetrics = buildExamDashboardMetrics(examRecords.length ? examRecords : examSchedules, examResults.length ? examResults : gradeEntries, gradingSystem);
 
   const sectionContent = {
+    activity: `
+      <div class="space-y-6">
+        <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
+          <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Teacher Activity</p>
+          <h2 class="mt-2 text-2xl font-semibold text-slate-900">Dated school activity log</h2>
+          <p class="mt-3 text-sm text-slate-600">Review teacher attendance, marks, assignments, lessons, student-record changes, and message activity. Message contents and sensitive student details are not shown in this log.</p>
+        </div>
+        ${teacherActivityLoadError ? `<div role="alert" class="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">${escapeHtml(teacherActivityLoadError)}</div>` : ''}
+        <div class="space-y-3">
+          ${teacherActivity.length ? teacherActivity.map((entry) => {
+            const actionLabels = {
+              'teacher.attendance.updated': 'Attendance records updated',
+              'teacher.marks.updated': 'Student marks updated',
+              'teacher.assignment.created': 'Assignment created',
+              'teacher.lesson.created': 'Learning material created',
+              'teacher.message.sent': 'Message sent',
+              'teacher.message.updated': 'Message activity updated',
+              'teacher.message.deleted': 'Message deleted',
+              'teacher.profile.updated': 'Teacher profile updated',
+              'student.created': 'Student record created',
+              'student.updated': 'Student record updated',
+              'student.archived': 'Student record archived',
+            };
+            const action = String(entry.action || '');
+            const label = actionLabels[action] || action.replace(/^teacher\\./, '').replace(/[._-]/g, ' ');
+            const actor = String(entry.actorId || 'Teacher').split(':').pop();
+            const timestamp = entry.createdAt ? new Date(entry.createdAt).toLocaleString() : 'Date unavailable';
+            const metadata = entry.metadata && typeof entry.metadata === 'object' ? entry.metadata : {};
+            const details = [
+              metadata.title,
+              metadata.className,
+              metadata.subject,
+              metadata.recordCount ? `${metadata.recordCount} record${metadata.recordCount === 1 ? '' : 's'}` : '',
+              metadata.date,
+              metadata.recipientCount ? `${metadata.recipientCount} recipient${metadata.recipientCount === 1 ? '' : 's'}` : '',
+            ].filter(Boolean).join(' • ');
+            return `<article class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div class="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p class="font-semibold capitalize text-slate-900">${escapeHtml(label)}</p>
+                  <p class="mt-1 text-sm text-slate-600">By ${escapeHtml(actor)}${details ? ` • ${escapeHtml(details)}` : ''}</p>
+                </div>
+                <time class="text-xs text-slate-500">${escapeHtml(timestamp)}</time>
+              </div>
+            </article>`;
+          }).join('') : teacherActivityLoadError ? '' : '<div class="rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-600">No teacher activity has been recorded yet.</div>'}
+        </div>
+      </div>
+    `,
     notifications: `
       <div class="space-y-6">
         <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -255,7 +366,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
                   <p class="text-sm text-slate-600">${escapeHtml((sectionData.profile && sectionData.profile.email) || summary.email || '')}</p>
                 </div>
               </div>
-              <button type="button" data-workspace-profile-upload class="mt-5 rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white">Upload photo</button>
+              <button type="button" data-workspace-profile-upload class="mt-5 rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white">Upload photo (unavailable)</button>
             </div>
             <div class="rounded-4xl border border-slate-200 bg-white p-5">
               <p class="text-sm font-semibold text-slate-900">Personal information</p>
@@ -264,9 +375,10 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
                 <label class="text-sm text-slate-700">Email<input id="workspace-profile-email" value="${escapeHtml((sectionData.profile && sectionData.profile.email) || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" /></label>
                 <label class="text-sm text-slate-700">Phone<input id="workspace-profile-phone" value="${escapeHtml((sectionData.profile && sectionData.profile.phone) || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" /></label>
               </div>
+              <p class="mt-4 text-sm text-amber-800">Profile edits are browser-only drafts. Account updates and two-factor authentication are not available through this service.</p>
               <div class="mt-4 flex flex-wrap gap-3">
-                <button type="button" data-workspace-profile-save class="rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white">Save profile</button>
-                <button type="button" data-workspace-profile-2fa class="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700">Enable 2FA</button>
+                <button type="button" data-workspace-profile-save class="rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white">Save browser draft</button>
+                <button type="button" data-workspace-profile-2fa class="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700">2FA unavailable</button>
               </div>
             </div>
           </div>
@@ -284,14 +396,15 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
       <div class="space-y-6">
         <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
           <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Settings</p>
-          <h2 class="mt-2 text-2xl font-semibold text-slate-900">Preferences, notifications, and security</h2>
+          <h2 class="mt-2 text-2xl font-semibold text-slate-900">Workspace preferences</h2>
+          <p class="mt-3 text-sm text-amber-800">These preferences are stored in this browser only. Account security settings are not changed here.</p>
         </div>
         <div class="rounded-4xl border border-slate-200 bg-slate-50 p-6 shadow-sm">
           <div class="grid gap-4 md:grid-cols-2">
             <label class="text-sm text-slate-700">Theme<input id="workspace-settings-theme" value="${escapeHtml((sectionData.settings && sectionData.settings.theme) || 'midnight')}" class="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3" /></label>
             <label class="text-sm text-slate-700">Language<input id="workspace-settings-language" value="${escapeHtml((sectionData.settings && sectionData.settings.language) || 'English')}" class="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3" /></label>
             <label class="text-sm text-slate-700">Timezone<input id="workspace-settings-timezone" value="${escapeHtml((sectionData.settings && sectionData.settings.timezone) || 'UTC')}" class="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3" /></label>
-            <label class="text-sm text-slate-700">Security mode<input id="workspace-settings-security" value="${escapeHtml((sectionData.settings && sectionData.settings.securityMode) || 'standard')}" class="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3" /></label>
+            <p class="text-sm text-slate-600">Security settings are managed by your account provider.</p>
           </div>
           <div class="mt-6 flex flex-wrap gap-3">
             <button type="button" data-workspace-settings-save class="rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white">Save settings</button>
@@ -329,14 +442,14 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
             <div class="max-w-full break-all rounded-full bg-sky-50 px-5 py-3 text-sm font-semibold text-sky-700">School ID: <span id="school-dashboard-id">${escapeHtml(schoolId || '---')}</span></div>
           </div>
 
-          <div class="mt-8 grid gap-6 lg:grid-cols-4">
+          <div class="mt-8 grid gap-4 sm:grid-cols-2 lg:gap-6 lg:grid-cols-4">
             ${MetricCard({ label: 'Total Students', value: totalStudents, description: 'Active learners in the tenant school.' })}
             ${MetricCard({ label: 'Total Teachers', value: totalTeachers, description: 'Teaching staff available to the school.' })}
             ${MetricCard({ label: 'Total Staff', value: totalStaff, description: 'Non-teaching staff linked to the school.' })}
             ${MetricCard({ label: 'Active Classes', value: activeClasses, description: 'Live class groups currently in use.' })}
           </div>
 
-          <div class="mt-8 grid gap-6 lg:grid-cols-4">
+          <div class="mt-8 grid gap-4 sm:grid-cols-2 lg:gap-6 lg:grid-cols-4">
             ${MetricCard({ label: "Today's Attendance", value: attendanceToday, description: 'Current daily attendance snapshot.' })}
             ${MetricCard({ label: 'Today&apos;s Revenue', value: feesCollectedToday, description: 'Cashflow captured today.' })}
             ${MetricCard({ label: 'Outstanding Fees', value: outstandingFees, description: 'Open invoices requiring follow-up.' })}
@@ -514,9 +627,9 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
             </div>
             <input id="school-student-search" class="min-w-0 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100" placeholder="Search students by name, ID, class, grade, or guardian" />
           </div>
-          <div class="mt-6 overflow-x-auto">
+          <div class="mt-6 max-w-full overflow-x-auto overscroll-x-contain" role="region" aria-label="Student directory table" tabindex="0">
             ${students.length ? `
-              <table class="min-w-full divide-y divide-slate-200 text-sm text-slate-700">
+              <table class="min-w-3xl divide-y divide-slate-200 text-sm text-slate-700">
                 <thead class="bg-slate-100 text-slate-700">
                   <tr>
                     <th class="px-4 py-3 text-left font-semibold">Name</th>
@@ -588,9 +701,9 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
           </div>
         </div>
         <div class="rounded-4xl border border-slate-200 bg-slate-50 p-6 shadow-sm">
-          <div class="mt-6 overflow-x-auto">
+          <div class="mt-6 max-w-full overflow-x-auto overscroll-x-contain" role="region" aria-label="Teacher directory table" tabindex="0">
             ${teachers.length ? `
-              <table class="min-w-full divide-y divide-slate-200 text-sm text-slate-700">
+              <table class="min-w-3xl divide-y divide-slate-200 text-sm text-slate-700">
                 <thead class="bg-slate-100 text-slate-700">
                   <tr>
                     <th class="px-4 py-3 text-left font-semibold">Name</th>
@@ -675,53 +788,47 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
       <div class="space-y-6">
         <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
           <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Attendance</p>
-          <h2 class="mt-2 text-2xl font-semibold text-slate-900">Attendance overview for daily school operations</h2>
-          <p class="mt-3 text-sm text-slate-600">Track present, absent, late, and excused learners while keeping class and teacher attendance visible in one place.</p>
-          <div class="mt-4 grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
-            <label class="text-sm font-semibold text-slate-700">Date<input id="school-attendance-date" type="date" value="${new Date().toISOString().slice(0, 10)}" class="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 font-normal text-slate-700" /></label>
-            <label class="text-sm font-semibold text-slate-700">Class / grade<select id="school-attendance-class" class="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 font-normal text-slate-700"><option value="">Select a class</option>${attendanceClasses.map((className) => `<option value="${escapeHtml(className)}">${escapeHtml(className)}</option>`).join('')}</select></label>
-            <button type="button" data-school-attendance-load class="rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Load roster</button>
-          </div>
-          <p id="school-attendance-feedback" class="mt-3 text-sm text-slate-600" role="status"></p>
-          <div id="school-attendance-roster" class="mt-6"></div>
-          <div class="mt-4 flex flex-wrap gap-3">
+          <h2 class="mt-2 text-2xl font-semibold text-slate-900">Teacher-submitted attendance</h2>
+          <p class="mt-3 text-sm text-slate-600">Review dated attendance records submitted by teachers. Only Present and Absent are recorded; School Authority can view and export records but cannot take attendance.</p>
+          <div class="mt-4 flex flex-wrap items-end gap-3">
+            <label class="text-sm font-semibold text-slate-700">Attendance date<input id="school-attendance-view-date" type="date" value="${escapeHtml(attendanceSummary.date)}" class="mt-2 block rounded-2xl border border-slate-200 bg-white px-4 py-3 font-normal" /></label>
             <button type="button" data-school-export="attendance" class="rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700">Export CSV</button>
           </div>
         </div>
         <div class="rounded-4xl border border-slate-200 bg-slate-50 p-6 shadow-sm">
-          <div class="grid gap-4 md:grid-cols-4">
+          <div class="grid gap-4 md:grid-cols-2">
             ${attendanceSummary.statusSummary.map((metric) => `
               <div class="rounded-2xl border border-slate-200 bg-white p-4">
                 <p class="text-sm font-semibold text-slate-900">${escapeHtml(metric.label)}</p>
                 <p class="mt-2 text-3xl font-semibold text-slate-900">${escapeHtml(metric.count)}</p>
-                <p class="mt-1 text-sm text-slate-500">${metric.label === 'Present' ? 'Learners marked present' : 'Attendance status count'}</p>
+                <p class="mt-1 text-sm text-slate-500">${metric.label === 'Present' ? 'Students who came' : 'Students absent'}</p>
               </div>
             `).join('')}
           </div>
           <div class="mt-6 rounded-2xl border border-slate-200 bg-white p-5">
             <div class="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <p class="text-sm font-semibold text-slate-900">Today&apos;s attendance coverage</p>
-                <p class="mt-1 text-sm text-slate-600">${attendanceSummary.total ? `${attendanceSummary.presentRatio}% present across ${attendanceSummary.total} captured records` : 'No attendance records captured yet.'}</p>
+                <p class="text-sm font-semibold text-slate-900">Attendance coverage for ${escapeHtml(attendanceSummary.date)}</p>
+                <p class="mt-1 text-sm text-slate-600">${attendanceSummary.total ? `${attendanceSummary.total} student attendance record${attendanceSummary.total === 1 ? '' : 's'} submitted for ${attendanceSummary.date}.` : `No teacher attendance has been submitted for ${attendanceSummary.date} yet.`}</p>
               </div>
-              <span class="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-emerald-700">${attendanceSummary.total ? `${attendanceSummary.presentRatio}% present` : 'Pending'}</span>
+              <span class="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-emerald-700">${attendanceSummary.total ? `${attendanceSummary.counts.present} present` : 'Pending'}</span>
             </div>
           </div>
           <div class="mt-6 space-y-3">
-            ${attendanceRecords.length ? attendanceRecords.slice(0, 8).map((entry) => `
+            ${attendanceSummary.records.length ? attendanceSummary.records.slice(0, 8).map((entry) => `
               <div class="rounded-2xl border border-slate-200 bg-white p-4">
                 <div class="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p class="font-semibold text-slate-900">${escapeHtml(entry.studentName || entry.student || entry.className || 'Attendance entry')}</p>
-                    <p class="mt-1 text-sm text-slate-500">${escapeHtml(entry.note || entry.detail || `${entry.teacher || 'Class'} • ${entry.subject || 'general attendance'}`)}</p>
+                    <p class="mt-1 text-sm text-slate-500">${escapeHtml([entry.className, entry.teacher ? `Recorded by ${entry.teacher}` : '', entry.note || entry.detail].filter(Boolean).join(' • ') || entry.subject || 'Teacher-submitted attendance')}</p>
                   </div>
                   <div class="text-right">
-                    <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-slate-700">${escapeHtml(entry.status || 'Recorded')}</span>
+                    <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-slate-700">${['present', 'late'].includes(String(entry.status || '').toLowerCase()) ? 'Present' : ['absent', 'excused'].includes(String(entry.status || '').toLowerCase()) ? 'Absent' : '—'}</span>
                     <p class="mt-2 text-xs text-slate-500">${escapeHtml(entry.date || 'Pending')}</p>
                   </div>
                 </div>
               </div>
-            `).join('') : `<div class="rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-600">No attendance records have been captured yet.</div>`}
+            `).join('') : `<div class="rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-600">No teacher attendance has been submitted for ${attendanceSummary.date} yet.</div>`}
           </div>
         </div>
       </div>
@@ -741,7 +848,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
           </div>
         </div>
 
-        <div class="grid gap-6 lg:grid-cols-4">
+        <div class="grid gap-4 sm:grid-cols-2 lg:gap-6 lg:grid-cols-4">
           ${[{label:'Today&apos;s Revenue', value: typeof feesCollectedToday === 'number' ? formatCurrencyValue(feesCollectedToday, getSchoolCurrency(school)) : feesCollectedToday, tone:'emerald'}, {label:'Outstanding Fees', value: typeof outstandingFees === 'number' ? formatCurrencyValue(outstandingFees, getSchoolCurrency(school)) : outstandingFees, tone:'amber'}, {label:'Paid Invoices', value: Math.max(0, payments.length), tone:'sky'}, {label:'Pending Invoices', value: Math.max(0, Math.min(payments.length + 1, 3)), tone:'slate'}].map((metric) => `
             <div class="rounded-4xl border border-slate-200 bg-white p-5 shadow-sm">
               <p class="text-sm font-semibold text-slate-900">${escapeHtml(metric.label)}</p>
@@ -904,14 +1011,14 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
           </div>
         </div>
 
-        <div class="grid gap-6 lg:grid-cols-4">
+        <div class="grid gap-4 sm:grid-cols-2 lg:gap-6 lg:grid-cols-4">
           ${MetricCard({ label: 'Upcoming Exams', value: examDashboardMetrics.upcomingExams, description: 'Assessment events yet to be administered.' })}
           ${MetricCard({ label: 'Completed Exams', value: examDashboardMetrics.completedExams, description: 'Exams already closed and reviewed.' })}
           ${MetricCard({ label: 'Pending Marking', value: examDashboardMetrics.pendingMarking, description: 'Assessments awaiting marks and review.' })}
           ${MetricCard({ label: 'Average Performance', value: `${examDashboardMetrics.averagePerformance}%`, description: 'Average score across entered results.' })}
         </div>
 
-        <div class="grid gap-6 lg:grid-cols-4">
+        <div class="grid gap-4 sm:grid-cols-2 lg:gap-6 lg:grid-cols-4">
           ${MetricCard({ label: 'Pass Rate', value: `${examDashboardMetrics.passRate}%`, description: 'Students meeting the passing threshold.' })}
           ${MetricCard({ label: 'Fail Rate', value: `${examDashboardMetrics.failRate}%`, description: 'Students beneath the passing threshold.' })}
           ${MetricCard({ label: 'Top Performing Class', value: examDashboardMetrics.topClass, description: 'Highest average class in the current cycle.' })}
@@ -969,7 +1076,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
                           <p class="font-semibold text-slate-900">${escapeHtml(entry.student || 'Student')}</p>
                           <p class="mt-1 text-sm text-slate-600">${escapeHtml(entry.subject || 'Subject')} • ${escapeHtml(entry.exam || 'Assessment')}</p>
                         </div>
-                        <span class="rounded-full bg-emerald-50 px-3 py-1 text-sm font-semibold text-emerald-700">${escapeHtml(entry.average || 0)}%</span>
+                        <span class="rounded-full bg-emerald-50 px-3 py-1 text-sm font-semibold text-emerald-700">${Array.isArray(entry.reportCells) ? 'Report row' : `${escapeHtml(entry.average || 0)}%`}</span>
                       </div>
                     </div>
                   `).join('') : '<div class="rounded-2xl border border-dashed border-slate-300 bg-white p-4 text-sm text-slate-600">No marks entered yet.</div>')}
@@ -984,7 +1091,8 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
             <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Results & grading</p>
             <h3 class="mt-2 text-xl font-semibold text-slate-900">Automatic calculations for total, average, grade, remark, pass/fail, and position</h3>
             <div class="mt-4 space-y-3">
-              ${(normalizedExamResults.length ? normalizedExamResults.map((entry) => `
+              ${reportSheetResults.length ? `<h4 class="font-semibold text-slate-900">Teacher report cards</h4>${renderReportSheets(reportSheetResults, students, summary.name)}` : ''}
+              ${(legacyExamResults.length ? legacyExamResults.map((entry) => `
                 <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                   <div class="flex flex-wrap items-center justify-between gap-3">
                     <div>
@@ -998,7 +1106,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
                   </div>
                   <p class="mt-3 text-sm text-slate-600">${escapeHtml(entry.remark || 'Ready for review')}</p>
                 </div>
-              `).join('') : '<div class="rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-600">No result records have been generated yet.</div>')}
+              `).join('') : (!reportSheetResults.length ? '<div class="rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-600">No result records have been generated yet.</div>' : ''))}
             </div>
           </div>
 
@@ -1187,8 +1295,8 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
 
   return `
     <div class="min-h-screen bg-slate-50 text-slate-900">
-      <main class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-        <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-2xl shadow-slate-200/50 sm:p-8 lg:p-10">
+      <main class="mx-auto max-w-7xl px-0 py-4 sm:px-2 sm:py-6 lg:px-8 lg:py-8">
+        <div class="rounded-4xl border border-slate-200 bg-white p-4 shadow-2xl shadow-slate-200/50 sm:p-6 lg:p-10">
           ${sectionContent}
         </div>
       </main>
@@ -1239,6 +1347,7 @@ export function SchoolAuthorityDashboard(section = 'overview', schoolData = {}) 
     payments: Array.isArray(school.payments) ? school.payments : Array.isArray(schoolData.payments) ? schoolData.payments : [],
     messages,
     reports,
+    attendanceViewDate: schoolData.attendanceViewDate || new Date().toISOString().slice(0, 10),
     examRecords: Array.isArray(school.examRecords) ? school.examRecords : Array.isArray(schoolData.examRecords) ? schoolData.examRecords : [],
     examResults: Array.isArray(school.examResults) ? school.examResults : Array.isArray(schoolData.examResults) ? schoolData.examResults : [],
     gradeEntries: Array.isArray(school.gradeEntries) ? school.gradeEntries : Array.isArray(schoolData.gradeEntries) ? schoolData.gradeEntries : [],
@@ -1273,6 +1382,8 @@ export function TeacherDashboard(section = 'overview', teacherData = {}) {
   const announcements = Array.isArray(teacherData.announcements) ? teacherData.announcements : [];
   const exams = Array.isArray(teacherData.examRecords) ? teacherData.examRecords : [];
   const results = Array.isArray(teacherData.examResults) ? teacherData.examResults : [];
+  const reportSheetResults = results.filter((entry) => Array.isArray(entry.reportColumns) && Array.isArray(entry.reportCells));
+  const legacyExamResults = results.filter((entry) => !Array.isArray(entry.reportColumns) || !Array.isArray(entry.reportCells));
   const assignments = Array.isArray(teacherData.assignments) ? teacherData.assignments : [];
   const lessons = Array.isArray(teacherData.lessons) ? teacherData.lessons : [];
   const profile = teacherData.teacherProfile || {};
@@ -1308,20 +1419,24 @@ export function TeacherDashboard(section = 'overview', teacherData = {}) {
       <div class="space-y-6">
         <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
           <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Exams / Marks</p>
-          <h2 class="mt-2 text-2xl font-semibold text-slate-900">Assigned assessments and persisted marks</h2>
-          <button type="button" data-teacher-workspace-action="enter-marks" class="mt-5 rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Enter marks</button>
+          <h2 class="mt-2 text-2xl font-semibold text-slate-900">Exams and student report cards</h2>
+          <div class="mt-5 flex flex-wrap gap-3">
+            <button type="button" data-teacher-workspace-action="create-report-card" class="rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Create report card</button>
+            <button type="button" data-teacher-workspace-action="enter-marks" class="rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700">Enter one mark</button>
+          </div>
         </div>
         <div class="grid gap-6 lg:grid-cols-2">
           <div class="rounded-4xl border border-slate-200 bg-slate-50 p-6"><p class="font-semibold text-slate-900">Relevant exams</p><div class="mt-4 space-y-3">${exams.length ? exams.map((exam) => `<div class="rounded-2xl border border-slate-200 bg-white p-4"><p class="font-semibold text-slate-900">${escapeHtml(exam.title || exam.examName || exam.name || 'Assessment')}</p><p class="mt-1 text-sm text-slate-600">${escapeHtml(exam.subject || 'Subject')} · ${escapeHtml(exam.className || exam.class || 'Assigned class')}</p></div>`).join('') : '<p class="mt-3 text-sm text-slate-600">No assigned exams found.</p>'}</div></div>
-          <div class="rounded-4xl border border-slate-200 bg-white p-6"><p class="font-semibold text-slate-900">Saved marks</p><div class="mt-4 space-y-3">${results.length ? results.map((result) => `<div class="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p class="font-semibold text-slate-900">${escapeHtml(result.student || result.studentId || 'Student')}</p><p class="mt-1 text-sm text-slate-600">${escapeHtml(result.subject || 'Subject')} · ${escapeHtml(result.exam || 'Assessment')}</p><p class="mt-2 text-sm font-semibold text-emerald-700">${escapeHtml(result.mark || 0)} / ${escapeHtml(result.maxMarks || 100)}</p></div>`).join('') : '<p class="mt-3 text-sm text-slate-600">No marks saved yet.</p>'}</div></div>
+          <div class="rounded-4xl border border-slate-200 bg-white p-6"><p class="font-semibold text-slate-900">Saved marks</p><div class="mt-4 space-y-3">${legacyExamResults.length ? legacyExamResults.map((result) => `<div class="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p class="font-semibold text-slate-900">${escapeHtml(result.student || result.studentId || 'Student')}</p><p class="mt-1 text-sm text-slate-600">${escapeHtml(result.subject || 'Subject')} · ${escapeHtml(result.exam || 'Assessment')}</p><p class="mt-2 text-sm font-semibold text-emerald-700">${escapeHtml(result.mark ?? '—')} / ${escapeHtml(result.maxMarks || 100)}</p></div>`).join('') : '<p class="mt-3 text-sm text-slate-600">No individual marks saved.</p>'}</div></div>
         </div>
+        <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="font-semibold text-slate-900">Report cards</p><div class="mt-4 space-y-4">${reportSheetResults.length ? renderReportSheets(reportSheetResults, students, teacherData.schoolName) : '<p class="text-sm text-slate-600">No report cards have been saved yet.</p>'}</div></div>
       </div>
     `,
     messages: `
       <div class="space-y-6"><div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Messages</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Authorized teacher communication</h2><div class="mt-4 flex flex-wrap gap-3"><button type="button" data-workspace-message-folder="inbox" class="rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white">Inbox</button><button type="button" data-workspace-message-folder="sent" class="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700">Sent</button><button type="button" data-workspace-message-compose class="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700">Compose</button></div><input id="workspace-message-search" class="mt-4 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm" placeholder="Search messages" /><div id="workspace-messages-list" class="mt-5 space-y-3"></div></div></div>
     `,
     announcements: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Announcements</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Updates for teachers and everyone</h2><div class="mt-5 space-y-3">${announcements.length ? announcements.map((entry) => `<article class="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p class="font-semibold text-slate-900">${escapeHtml(entry.title || 'Announcement')}</p><p class="mt-1 text-sm text-slate-600">${escapeHtml(entry.detail || entry.message || '')}</p></article>`).join('') : '<p class="text-sm text-slate-600">No announcements for teachers.</p>'}</div></div>`,
-    profile: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Profile</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">${escapeHtml(profile.fullName || teacherName)}</h2><div class="mt-5 grid gap-4 sm:grid-cols-2"><label class="text-sm font-semibold text-slate-700">Full name<input id="teacher-profile-name" value="${escapeHtml(profile.fullName || teacherName)}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Teacher ID<input value="${escapeHtml(profile.teacherId || profile.username || '')}" disabled class="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Email<input id="teacher-profile-email" value="${escapeHtml(profile.email || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Phone<input id="teacher-profile-phone" value="${escapeHtml(profile.phone || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Department<input id="teacher-profile-department" value="${escapeHtml(profile.department || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Position<input id="teacher-profile-position" value="${escapeHtml(profile.position || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Qualification<input id="teacher-profile-qualification" value="${escapeHtml(profile.qualification || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Profile photo<input id="teacher-profile-photo" type="file" accept="image/*" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /><span id="teacher-profile-photo-preview" class="mt-2 block"></span></label></div><div class="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">Assigned classes: ${escapeHtml(classes.map((entry) => entry.name || entry.className || entry.grade).filter(Boolean).join(', ') || 'None')}</div><button type="button" data-teacher-workspace-action="save-profile" class="mt-5 rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Save profile</button></div>`,
+    profile: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Profile</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">${escapeHtml(profile.fullName || teacherName)}</h2><div class="mt-5 grid gap-4 sm:grid-cols-2"><label class="text-sm font-semibold text-slate-700">Full name<input id="teacher-profile-name" value="${escapeHtml(profile.fullName || teacherName)}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Teacher ID<input value="${escapeHtml(profile.teacherId || profile.username || '')}" disabled class="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Email<input id="teacher-profile-email" value="${escapeHtml(profile.email || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Phone<input id="teacher-profile-phone" value="${escapeHtml(profile.phone || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Department<input id="teacher-profile-department" value="${escapeHtml(profile.department || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Position<input id="teacher-profile-position" value="${escapeHtml(profile.position || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Qualification<input id="teacher-profile-qualification" value="${escapeHtml(profile.qualification || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><div class="sm:col-span-2"><label class="text-sm font-semibold text-slate-700">Profile photo<input id="teacher-profile-photo" type="file" accept="image/*" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /><span id="teacher-profile-photo-preview" class="mt-2 block"></span></label><div class="mt-3 flex flex-wrap gap-2"><button type="button" data-teacher-photo-source="gallery" class="rounded-full border border-sky-200 bg-white px-3 py-2 text-xs font-semibold text-sky-700">Upload Photo</button><button type="button" data-teacher-photo-source="camera" class="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">Open Camera</button></div></div></div><div class="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">Assigned classes: ${escapeHtml(classes.map((entry) => entry.name || entry.className || entry.grade).filter(Boolean).join(', ') || 'None')}</div><button type="button" data-teacher-workspace-action="save-profile" class="mt-5 rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Save profile</button></div>`,
     settings: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Settings</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Teacher account settings</h2><p class="mt-4 text-sm text-slate-600">No individual teacher preference store is configured in the current architecture. School-wide settings remain restricted to School Authority.</p><p class="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">NOT SUPPORTED: editable teacher settings persistence.</p></div>`,
   };
   const content = sectionMarkup[activeSection] || '';
@@ -1375,6 +1490,8 @@ export function StudentDashboard(section = 'overview', studentData = {}) {
   const profilePhoto = student.profilePhoto || studentData.profilePhoto || '';
   const attendanceRecords = Array.isArray(studentData.attendanceRecords) ? studentData.attendanceRecords : [];
   const allResults = Array.isArray(studentData.examResults) ? studentData.examResults : [];
+  const reportSheetResults = allResults.filter((entry) => Array.isArray(entry.reportColumns) && Array.isArray(entry.reportCells));
+  const legacyExamResults = allResults.filter((entry) => !Array.isArray(entry.reportColumns) || !Array.isArray(entry.reportCells));
   const announcements = Array.isArray(studentData.announcements) ? studentData.announcements : [];
   const messages = Array.isArray(studentData.messages) ? studentData.messages : [];
   const payments = Array.isArray(studentData.payments) ? studentData.payments : [];
@@ -1382,7 +1499,11 @@ export function StudentDashboard(section = 'overview', studentData = {}) {
   const assignments = Array.isArray(studentData.assignments) ? studentData.assignments : [];
   const lessons = Array.isArray(studentData.lessons) ? studentData.lessons : [];
   const summary = summarizeAttendanceRecords(attendanceRecords);
-  const averageMark = allResults.length ? Math.round(allResults.reduce((sum, entry) => sum + Number(entry.mark || entry.score || 0), 0) / allResults.length) : 0;
+  const displayAttendanceRecords = attendanceRecords
+    .map((entry) => ({ ...entry, status: getAttendanceStatusLabel(entry.status) }))
+    .filter((entry) => entry.status !== '—');
+  const scoredResults = allResults.filter((entry) => entry.mark !== undefined && entry.mark !== null || entry.score !== undefined && entry.score !== null || entry.total !== undefined && entry.total !== null);
+  const averageMark = scoredResults.length ? Math.round(scoredResults.reduce((sum, entry) => sum + Number(entry.mark || entry.score || entry.total || 0), 0) / scoredResults.length) : 0;
   const latestResults = allResults.slice(0, 3);
   const subjectOptions = [...new Set([
     ...classes.flatMap((entry) => [entry.subjects, entry.subject, entry.name, entry.className, entry.className || entry.name]),
@@ -1470,9 +1591,8 @@ export function StudentDashboard(section = 'overview', studentData = {}) {
       <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
         <h2 class="text-2xl font-semibold text-slate-900">My attendance</h2>
         <p class="mt-2 text-sm text-slate-600">Visible attendance history for your own account only.</p>
-        <div class="mt-6 grid gap-4 sm:grid-cols-3">
+        <div class="mt-6 grid gap-4 sm:grid-cols-2">
           <div class="rounded-2xl bg-emerald-50 p-4"><p class="text-sm font-semibold text-slate-700">Present</p><p class="mt-2 text-2xl font-bold text-emerald-700">${summary.counts.present}</p></div>
-          <div class="rounded-2xl bg-amber-50 p-4"><p class="text-sm font-semibold text-slate-700">Late</p><p class="mt-2 text-2xl font-bold text-amber-700">${summary.counts.late}</p></div>
           <div class="rounded-2xl bg-rose-50 p-4"><p class="text-sm font-semibold text-slate-700">Absent</p><p class="mt-2 text-2xl font-bold text-rose-700">${summary.counts.absent}</p></div>
         </div>
         <div class="mt-6 overflow-hidden rounded-3xl border border-slate-200">
@@ -1481,7 +1601,7 @@ export function StudentDashboard(section = 'overview', studentData = {}) {
               <tr><th class="px-4 py-3">Date</th><th class="px-4 py-3">Status</th><th class="px-4 py-3">Class</th></tr>
             </thead>
             <tbody>
-              ${attendanceRecords.length ? attendanceRecords.map((entry) => `<tr class="border-t border-slate-200"><td class="px-4 py-3">${escapeHtml(entry.date || '—')}</td><td class="px-4 py-3"><span class="rounded-full bg-slate-100 px-2 py-1 capitalize text-slate-700">${escapeHtml(entry.status || '—')}</span></td><td class="px-4 py-3">${escapeHtml(entry.className || className)}</td></tr>`).join('') : '<tr><td colspan="3" class="px-4 py-3 text-slate-500">No attendance is available for your student record yet.</td></tr>'}
+              ${displayAttendanceRecords.length ? displayAttendanceRecords.map((entry) => `<tr class="border-t border-slate-200"><td class="px-4 py-3">${escapeHtml(entry.date || '—')}</td><td class="px-4 py-3"><span class="rounded-full bg-slate-100 px-2 py-1 text-slate-700">${escapeHtml(getAttendanceStatusLabel(entry.status))}</span></td><td class="px-4 py-3">${escapeHtml(entry.className || className)}</td></tr>`).join('') : '<tr><td colspan="3" class="px-4 py-3 text-slate-500">No attendance is available for your student record yet.</td></tr>'}
             </tbody>
           </table>
         </div>
@@ -1491,16 +1611,22 @@ export function StudentDashboard(section = 'overview', studentData = {}) {
       <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
         <h2 class="text-2xl font-semibold text-slate-900">My results</h2>
         <p class="mt-2 text-sm text-slate-600">Your own exam marks, grades, and report data only.</p>
+        <div class="mt-6 space-y-4">
+          <h3 class="font-semibold text-slate-900">Report cards</h3>
+          ${reportSheetResults.length ? renderReportSheets(reportSheetResults, [student], schoolName) : '<p class="text-sm text-slate-500">No report cards are available yet.</p>'}
+        </div>
+        ${legacyExamResults.length ? `
         <div class="mt-6 overflow-hidden rounded-3xl border border-slate-200">
           <table class="min-w-full text-left text-sm">
             <thead class="bg-slate-100 text-slate-700">
               <tr><th class="px-4 py-3">Exam</th><th class="px-4 py-3">Subject</th><th class="px-4 py-3">Score</th><th class="px-4 py-3">Grade</th></tr>
             </thead>
             <tbody>
-              ${allResults.length ? allResults.map((entry) => `<tr class="border-t border-slate-200"><td class="px-4 py-3">${escapeHtml(entry.exam || entry.title || 'Assessment')}</td><td class="px-4 py-3">${escapeHtml(entry.subject || 'Subject')}</td><td class="px-4 py-3">${escapeHtml(String(entry.mark || entry.score || '—'))}/${escapeHtml(String(entry.maxMarks || entry.total || '—'))}</td><td class="px-4 py-3"><span class="rounded-full bg-emerald-100 px-2 py-1 text-emerald-700">${escapeHtml(entry.grade || '—')}</span></td></tr>`).join('') : '<tr><td colspan="4" class="px-4 py-3 text-slate-500">No results are available for your student record yet.</td></tr>'}
+              ${legacyExamResults.map((entry) => `<tr class="border-t border-slate-200"><td class="px-4 py-3">${escapeHtml(entry.exam || entry.title || 'Assessment')}</td><td class="px-4 py-3">${escapeHtml(entry.subject || 'Subject')}</td><td class="px-4 py-3">${escapeHtml(String(entry.mark ?? entry.score ?? '—'))}/${escapeHtml(String(entry.maxMarks || entry.total || '—'))}</td><td class="px-4 py-3"><span class="rounded-full bg-emerald-100 px-2 py-1 text-emerald-700">${escapeHtml(entry.grade || '—')}</span></td></tr>`).join('')}
             </tbody>
           </table>
         </div>
+        ` : ''}
       </div>
     `,
     announcements: `
@@ -1539,7 +1665,10 @@ export function StudentDashboard(section = 'overview', studentData = {}) {
             <p class="mt-4 text-xl font-semibold text-slate-900">${escapeHtml(studentName)}</p>
             <p class="text-sm text-slate-600">${escapeHtml(studentId)}</p>
             <input type="file" accept="image/*" data-student-profile-photo-input class="sr-only" />
-            <button type="button" data-student-profile-photo-upload class="mt-4 rounded-full border border-sky-200 bg-white px-4 py-2 text-sm font-semibold text-sky-700 transition hover:bg-sky-50">${profilePhoto ? 'Change photo' : 'Upload photo'}</button>
+            <div class="mt-4 flex flex-wrap gap-2">
+              <button type="button" data-student-profile-photo-upload class="rounded-full border border-sky-200 bg-white px-4 py-2 text-sm font-semibold text-sky-700 transition hover:bg-sky-50">Upload Photo</button>
+              <button type="button" data-student-profile-photo-camera class="rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100">Open Camera</button>
+            </div>
           </div>
           <div class="grid gap-4 md:grid-cols-2">
             <div class="rounded-[1.25rem] border border-slate-200 bg-white p-4"><p class="text-sm text-slate-500">Student ID</p><p class="mt-1 font-semibold text-slate-900">${escapeHtml(studentId)}</p></div>

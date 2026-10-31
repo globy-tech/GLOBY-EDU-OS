@@ -8,6 +8,8 @@ let assertFails;
 let assertSucceeds;
 let initializeTestEnvironment;
 let doc;
+let collection;
+let getDocs;
 let getDoc;
 let setDoc;
 let updateDoc;
@@ -25,7 +27,7 @@ function tenantContext(uid, role) {
 describeWithFirestoreEmulator('Firestore tenant and Super Admin security rules', () => {
   beforeAll(async () => {
     ({ assertFails, assertSucceeds, initializeTestEnvironment } = require('@firebase/rules-unit-testing'));
-    ({ doc, getDoc, setDoc, updateDoc } = require('firebase/firestore'));
+    ({ collection, doc, getDoc, getDocs, setDoc, updateDoc } = require('firebase/firestore'));
     const [host, port] = process.env.FIRESTORE_EMULATOR_HOST.split(':');
     testEnvironment = await initializeTestEnvironment({
       projectId,
@@ -56,6 +58,22 @@ describeWithFirestoreEmulator('Firestore tenant and Super Admin security rules',
       platformAdmin: true,
       firebaseUid: 'attacker-auth-uid',
     }));
+  });
+
+  test.each(['school_authority', 'teacher', 'student'])('%s cannot read or list same-tenant user records', async (role) => {
+    await testEnvironment.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'users', 'school-a:other-user'), {
+        email: 'other-user@example.test',
+        schoolId: 'school-a',
+        tenantId: 'school-a',
+        role: 'student',
+        passwordHash: 'bcrypt-hash',
+      });
+    });
+
+    const db = tenantContext(`${role}-a`, role).firestore();
+    await assertFails(getDoc(doc(db, 'users', 'school-a:other-user')));
+    await assertFails(getDocs(collection(db, 'users')));
   });
 
   test('tenant user cannot change an existing user role to Super Admin', async () => {

@@ -75,6 +75,7 @@ async function createFirebaseUserIfConfigured(email, password, displayName) {
 async function createSessionForUser(user) {
   if (!user) throw new Error('Invalid user');
   if (user.status !== 'active') throw new Error('User account is not active');
+  if (user.passwordSyncPending === true) throw new Error('Password update is still being synchronized.');
 
   const payload = {
     userId: user.id,
@@ -96,6 +97,7 @@ async function createSessionForUser(user) {
     await firestore.runTransaction(async (transaction) => {
       const userSnapshot = await transaction.get(userRef);
       if (!userSnapshot.exists || userSnapshot.data()?.status !== 'active') throw new Error('User account is not active');
+      if (userSnapshot.data()?.passwordSyncPending === true) throw new Error('Password update is still being synchronized.');
       const activeIds = Array.isArray(userSnapshot.data()?.activeSessionIds) ? userSnapshot.data().activeSessionIds : [];
       const activeReferences = activeIds.map((id) => sessions.doc(String(id)));
       const activeSnapshots = await Promise.all(activeReferences.map((reference) => transaction.get(reference)));
@@ -292,18 +294,23 @@ async function login(tenantId, identifier, password, options = {}) {
   if (firebaseData.isFirebaseDataConfigured()) {
     const tenant = await findTenantBySchoolId(tenantId);
     if (!tenant) throw new Error('Tenant not found');
-    const schoolStatus = String(tenant.schoolStatus || tenant.status || 'active').trim().toLowerCase();
-    const subscriptionStatus = String(tenant.subscriptionStatus || 'active').trim().toLowerCase();
+    const legacyStatus = String(tenant.status || '').trim().toLowerCase();
+    const schoolStatus = String(tenant.schoolStatus || (['trial', 'expired'].includes(legacyStatus) ? 'active' : legacyStatus) || 'active').trim().toLowerCase();
+    const subscriptionStatus = String(tenant.subscriptionStatus || (!tenant.schoolStatus && ['trial', 'expired'].includes(legacyStatus) ? legacyStatus : 'active')).trim().toLowerCase();
+    const isTrialPlan = /trial/i.test(String(tenant.subscriptionPlan || ''));
     const trialEndsAt = tenant.trialEndsAt ? new Date(tenant.trialEndsAt) : null;
-    if (['suspended', 'inactive', 'blocked', 'disabled', 'expired'].includes(schoolStatus) ||
-        ['suspended', 'inactive', 'blocked', 'disabled', 'expired'].includes(subscriptionStatus) ||
-        (subscriptionStatus === 'trial' && trialEndsAt && !Number.isNaN(trialEndsAt.getTime()) && trialEndsAt.getTime() <= Date.now())) {
+    const trialExpired = ['trial', 'expired'].includes(subscriptionStatus) &&
+      (subscriptionStatus === 'trial' || isTrialPlan) &&
+      trialEndsAt && !Number.isNaN(trialEndsAt.getTime()) && trialEndsAt.getTime() <= Date.now();
+    if (['suspended', 'inactive', 'blocked', 'disabled'].includes(schoolStatus) ||
+        ['suspended', 'inactive', 'blocked', 'disabled'].includes(subscriptionStatus) || trialExpired) {
       throw new Error('School account is not active');
     }
   }
 
   let user = await validateUserByEmail(tenantId, identifier, password);
   if (!user) throw new Error('Invalid credentials');
+  if (user.passwordSyncPending === true) throw new Error('Password update is still being synchronized.');
   if (user.status !== 'active' || !roleMatchesLoginType(user, options.loginType)) throw new Error('Invalid credentials');
   if (firebaseData.isFirebaseDataConfigured() && user.isVerified !== true) {
     let firebaseUser = null;
@@ -369,7 +376,7 @@ async function loginWithFirebaseIdToken(idToken, tenantId, options = {}) {
     throw new Error('Firebase authentication is not configured.');
   }
 
-  const decoded = await firebaseAdmin.verifyIdToken(idToken);
+  const decoded = await firebaseAdmin.verifyIdToken(idToken, true);
   if (!decoded || !decoded.email) {
     throw new Error('Invalid Firebase ID token.');
   }
@@ -384,6 +391,7 @@ async function loginWithFirebaseIdToken(idToken, tenantId, options = {}) {
   if (!user) {
     throw new Error('Google account not recognized. Contact your administrator.');
   }
+  if (user.passwordSyncPending === true) throw new Error('Password update is still being synchronized.');
 
   if (!firebaseMode && tenant.id !== user.tenantId) {
     throw new Error('User does not belong to the requested tenant.');
@@ -530,6 +538,38 @@ async function logout(userId, refreshToken) {
 }
 
 async function changePassword(userId, oldPassword, newPassword) {
+  if (firebaseData.isFirebaseDataConfigured()) {
+    if (!isStrongPassword(newPassword)) throw new Error('New password must be at least 8 characters and include uppercase, lowercase, number, and symbol.');
+    const firestore = firebaseData.getFirestore();
+    const userRef = firestore.collection('users').doc(String(userId));
+    const passwordHash = await bcrypt.hash(newPassword, config.bcrypt.saltRounds);
+    let updatedUser;
+
+    await firestore.runTransaction(async (transaction) => {
+      const userSnapshot = await transaction.get(userRef);
+      if (!userSnapshot.exists || userSnapshot.data()?.status !== 'active') throw new Error('User not found');
+      const user = { id: userSnapshot.id, ...userSnapshot.data() };
+      if (user.passwordSyncPending === true) throw new Error('Password update is still being synchronized.');
+      if (!(await bcrypt.compare(oldPassword, user.passwordHash || ''))) throw new Error('Invalid current password');
+      const passwordChangedAt = new Date().toISOString();
+      const activeSessionIds = Array.isArray(user.activeSessionIds) ? user.activeSessionIds : [];
+      const activeSessionRefs = activeSessionIds.map((sessionId) => firestore.collection('authSessions').doc(String(sessionId)));
+      const activeSessionSnapshots = await Promise.all(activeSessionRefs.map((sessionRef) => transaction.get(sessionRef)));
+      activeSessionSnapshots.forEach((sessionSnapshot, index) => {
+        if (sessionSnapshot.exists && sessionSnapshot.data()?.revoked !== true) {
+          transaction.update(activeSessionRefs[index], { revoked: true, revokedAt: Date.now() });
+        }
+      });
+      transaction.update(userRef, { passwordHash, passwordNeedsReset: false, passwordChangedAt, passwordSyncPending: true, activeSessionIds: [] });
+      updatedUser = { ...user, passwordHash, passwordNeedsReset: false, passwordChangedAt, passwordSyncPending: true, activeSessionIds: [] };
+    });
+
+    await syncFirebasePassword(updatedUser, newPassword);
+    await clearFirebasePasswordSyncPending(userId, passwordHash);
+    updatedUser.passwordSyncPending = false;
+    return createSessionForUser(updatedUser);
+  }
+
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) throw new Error('User not found');
   const ok = await bcrypt.compare(oldPassword, user.passwordHash);
@@ -544,7 +584,56 @@ async function changePassword(userId, oldPassword, newPassword) {
   return createSessionForUser(updatedUser);
 }
 
-async function forgotPassword(email) {
+async function forgotPassword(email, options = {}) {
+  if (firebaseData.isFirebaseDataConfigured()) {
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    if (!normalizedEmail) return true;
+
+    const firestore = firebaseData.getFirestore();
+    const userSnapshot = await firestore.collection('users').where('email', '==', normalizedEmail).get();
+    const requestedLoginType = String(options.loginType || 'school').trim().toLowerCase();
+    const matches = userSnapshot.docs
+      .map((document) => ({ id: document.id, ...document.data() }))
+      .filter((user) => {
+        if (user.status !== 'active') return false;
+        const roles = normalizeRoles(user).map((role) => String(role).trim().toLowerCase());
+        const isPlatformAdmin = user.platformAdmin === true && roles.includes('super_admin') && !user.tenantId && !user.schoolId;
+        if (requestedLoginType === 'platform_admin') return isPlatformAdmin;
+        if (isPlatformAdmin || roles.includes('super_admin')) return false;
+        if (requestedLoginType === 'teacher' || requestedLoginType === 'student') return roles.includes(requestedLoginType);
+        return true;
+      });
+    if (matches.length !== 1 || typeof options.deliverResetToken !== 'function') return true;
+
+    const user = matches[0];
+    const token = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashToken(token);
+    const tokenRef = firestore.collection('passwordResetTokens').doc(tokenHash);
+    const now = Date.now();
+    await firestore.runTransaction(async (transaction) => {
+      transaction.create(tokenRef, {
+        userId: user.id,
+        email: normalizedEmail,
+        createdAt: now,
+        expiresAt: now + config.tokens.emailTokenMinutes * 60 * 1000,
+        used: false,
+      });
+    });
+
+    try {
+      await options.deliverResetToken(token);
+    } catch (error) {
+      await firestore.runTransaction(async (transaction) => {
+        const tokenSnapshot = await transaction.get(tokenRef);
+        if (tokenSnapshot.exists && tokenSnapshot.data()?.used !== true) {
+          transaction.update(tokenRef, { revoked: true, revokedAt: Date.now() });
+        }
+      });
+      throw error;
+    }
+    return true;
+  }
+
   // Find user then create email token
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user) return true; // do not reveal whether user exists
@@ -565,7 +654,85 @@ async function verifyFirebaseIdToken(idToken) {
   return firebaseAdmin.verifyIdToken(idToken);
 }
 
+async function syncFirebasePassword(user, password) {
+  const email = String(user.email || '').trim().toLowerCase();
+  if (!email) throw new Error('Firebase account email is unavailable; password update cannot be synchronized.');
+
+  const firebaseUser = await firebaseAdmin.getUserByEmail(email);
+  const storedUid = String(user.firebaseUid || '').trim();
+  if (!firebaseUser?.uid || String(firebaseUser.email || '').trim().toLowerCase() !== email ||
+      (storedUid && storedUid !== String(firebaseUser.uid))) {
+    throw new Error('Firebase account identity does not match; password update cannot be synchronized.');
+  }
+
+  await firebaseAdmin.updateUser(firebaseUser.uid, { password });
+  await firebaseAdmin.revokeRefreshTokens(firebaseUser.uid);
+}
+
+async function clearFirebasePasswordSyncPending(userId, passwordHash) {
+  const firestore = firebaseData.getFirestore();
+  const userRef = firestore.collection('users').doc(String(userId));
+  await firestore.runTransaction(async (transaction) => {
+    const userSnapshot = await transaction.get(userRef);
+    if (!userSnapshot.exists || userSnapshot.data()?.passwordHash !== passwordHash ||
+        userSnapshot.data()?.passwordSyncPending !== true) {
+      throw new Error('Password update changed during Firebase synchronization.');
+    }
+    transaction.update(userRef, { passwordSyncPending: false });
+  });
+}
+
 async function resetPassword(token, newPassword) {
+  if (firebaseData.isFirebaseDataConfigured()) {
+    if (!token) throw new Error('Invalid or expired token');
+    if (!isStrongPassword(newPassword)) throw new Error('New password must be at least 8 characters and include uppercase, lowercase, number, and symbol.');
+    const firestore = firebaseData.getFirestore();
+    const tokenHash = hashToken(token);
+    const tokenRef = firestore.collection('passwordResetTokens').doc(tokenHash);
+    const passwordHash = await bcrypt.hash(newPassword, config.bcrypt.saltRounds);
+    const now = Date.now();
+    const passwordChangedAt = new Date(now).toISOString();
+
+    let updatedUser;
+    await firestore.runTransaction(async (transaction) => {
+      const tokenSnapshot = await transaction.get(tokenRef);
+      const record = tokenSnapshot.exists ? tokenSnapshot.data() : null;
+      if (!record || record.used === true || record.revoked === true || Number(record.expiresAt) <= now || !record.userId) {
+        throw new Error('Invalid or expired token');
+      }
+
+      const userRef = firestore.collection('users').doc(String(record.userId));
+      const userSnapshot = await transaction.get(userRef);
+      const user = userSnapshot.exists ? userSnapshot.data() : null;
+      if (!user || user.status !== 'active' || String(user.email || '').trim().toLowerCase() !== String(record.email || '').trim().toLowerCase()) {
+        throw new Error('Invalid or expired token');
+      }
+      if (user.passwordSyncPending === true) throw new Error('Password update is still being synchronized.');
+
+      const activeSessionIds = Array.isArray(user.activeSessionIds) ? user.activeSessionIds : [];
+      const activeSessionRefs = activeSessionIds.map((sessionId) => firestore.collection('authSessions').doc(String(sessionId)));
+      const activeSessionSnapshots = await Promise.all(activeSessionRefs.map((sessionRef) => transaction.get(sessionRef)));
+      activeSessionSnapshots.forEach((sessionSnapshot, index) => {
+        if (sessionSnapshot.exists && sessionSnapshot.data()?.revoked !== true) {
+          transaction.update(activeSessionRefs[index], { revoked: true, revokedAt: now });
+        }
+      });
+      transaction.update(userRef, { passwordHash, passwordNeedsReset: false, passwordChangedAt, passwordSyncPending: true, activeSessionIds: [] });
+      updatedUser = { ...user, id: String(record.userId), email: record.email, passwordHash, passwordSyncPending: true };
+    });
+    await syncFirebasePassword(updatedUser, newPassword);
+    await firestore.runTransaction(async (transaction) => {
+      const [userSnapshot, tokenSnapshot] = await Promise.all([transaction.get(firestore.collection('users').doc(String(updatedUser.id))), transaction.get(tokenRef)]);
+      if (!userSnapshot.exists || userSnapshot.data()?.passwordHash !== passwordHash || userSnapshot.data()?.passwordSyncPending !== true ||
+          !tokenSnapshot.exists || tokenSnapshot.data()?.used === true) {
+        throw new Error('Password update changed during Firebase synchronization.');
+      }
+      transaction.update(firestore.collection('users').doc(String(updatedUser.id)), { passwordSyncPending: false });
+      transaction.update(tokenRef, { used: true, usedAt: now });
+    });
+    return true;
+  }
+
   const tokenHash = hashToken(token);
   const record = await prisma.emailToken.findFirst({ where: { tokenHash, type: 'RESET', used: false, expiresAt: { gt: new Date() } } });
   if (!record) throw new Error('Invalid or expired token');

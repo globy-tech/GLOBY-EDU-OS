@@ -7,6 +7,7 @@ const prisma = require('../../config/prisma.client');
 const config = require('../../config/auth.config');
 const firebaseCore = require('../../firebase.core');
 const { listPricingPlans } = require('../pricing/pricing.service');
+const { DEFAULT_TRIAL_LABEL, createTrialEndDate } = require('./trial-period');
 const { generateSchoolSubdomain } = require('./tenant-hostname');
 const {
   loadSchoolData,
@@ -299,12 +300,17 @@ function resolveSchoolLifecycleStatus(school = {}) {
   const schoolStatus = storedSchoolStatus || legacyOperationalStatus || subscriptionOperationalStatus;
   const operationallySuspended = ['suspended', 'inactive', 'blocked', 'disabled'].includes(schoolStatus);
   const trialEndsAt = normalized.trialEndsAt ? new Date(normalized.trialEndsAt) : null;
+  const subscriptionEndsAt = normalized.expiresAt ? new Date(normalized.expiresAt) : null;
   const hasExpiredTrial = (!subscriptionStatus || subscriptionStatus === 'trial')
     && Boolean(trialEndsAt && !Number.isNaN(trialEndsAt.getTime()) && trialEndsAt.getTime() <= Date.now());
+  const hasExpiredPaidSubscription = ['active', 'paid'].includes(subscriptionStatus)
+    && Boolean(subscriptionEndsAt && !Number.isNaN(subscriptionEndsAt.getTime()) && subscriptionEndsAt.getTime() <= Date.now());
 
   if (hasExpiredTrial && normalized.developmentOnly !== true) {
     normalized.subscriptionStatus = 'expired';
     normalized.trialStatus = normalized.trialStatus || 'Expired';
+  } else if (hasExpiredPaidSubscription && normalized.developmentOnly !== true) {
+    normalized.subscriptionStatus = 'expired';
   } else if (!normalized.subscriptionStatus && legacySubscriptionStatus) {
     normalized.subscriptionStatus = legacySubscriptionStatus;
   }
@@ -579,6 +585,7 @@ function mapUserEntity(user, roleName) {
     status: user.status,
     role: roleName,
     profilePhoto: user.profilePhoto || metadata.profilePhoto || null,
+    profilePhotoPath: user.profilePhotoPath || metadata.profilePhotoPath || null,
     signature: metadata.signature || null,
     teacherId: metadata.teacherId || null,
     studentId: metadata.studentId || null,
@@ -636,7 +643,8 @@ async function createSchool(data) {
   const headEmail = (data.headEmail || `head@${schoolId}.globyedu.com`).toLowerCase();
   const headPassword = data.headPassword || `Head@${Math.random().toString(36).slice(2, 8)}`;
   const headFullName = data.headFullName || 'School Head';
-  const trailEndsAt = data.trialEndsAt || new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
+  const trialStartedAt = data.trialStartedAt || now;
+  const trialEndsAt = data.trialEndsAt || createTrialEndDate(trialStartedAt);
 
   const payload = {
     schoolId,
@@ -645,10 +653,10 @@ async function createSchool(data) {
     country: data.country || null,
     timezone: data.timezone || null,
     branding: data.branding || null,
-    subscriptionPlan: data.subscriptionPlan || '5-Day Trial',
+    subscriptionPlan: data.subscriptionPlan || DEFAULT_TRIAL_LABEL,
     subscriptionStatus: data.subscriptionStatus || 'trial',
-    trialEndsAt: trailEndsAt,
-    expiresAt: data.expiresAt || trailEndsAt,
+    trialEndsAt,
+    expiresAt: data.expiresAt || trialEndsAt,
     status: data.schoolStatus || 'active',
     createdAt: now,
     updatedAt: now,
@@ -746,7 +754,8 @@ async function createSchoolFirebase(data) {
   }
 
   const now = new Date().toISOString();
-  const trialEndsAt = data.trialEndsAt || new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+  const trialStartedAt = data.trialStartedAt || now;
+  const trialEndsAt = data.trialEndsAt || createTrialEndDate(trialStartedAt).toISOString();
   const subdomain = data.subdomain || generateSchoolSubdomain(data.name, []);
   const resolvedHeadEmail = headEmail || `head@${schoolId}.globyedu.com`;
   const headPassword = data.headPassword || `Head@${Math.random().toString(36).slice(2, 8)}`;
@@ -768,13 +777,15 @@ async function createSchoolFirebase(data) {
     logo: data.logo || null,
     coverImage: data.coverImage || null,
     branding: data.branding || null,
-    subscriptionPlan: data.subscriptionPlan || '5-Day Trial',
+    subscriptionPlan: data.subscriptionPlan || DEFAULT_TRIAL_LABEL,
     subscriptionStatus: data.subscriptionStatus || 'trial',
+    trialStartedAt,
+    trialStatus: data.trialStatus || DEFAULT_TRIAL_LABEL,
     trialEndsAt,
     expiresAt: data.expiresAt || trialEndsAt,
     schoolStatus: data.schoolStatus || 'active',
     status: data.schoolStatus || 'active',
-    createdAt: now,
+    createdAt: data.createdAt || trialStartedAt,
   };
   const passwordHash = await runStep('password.hash', () => bcrypt.hash(headPassword, config.bcrypt.saltRounds));
   const userData = {
@@ -823,7 +834,8 @@ async function createSchoolFallback(data) {
   const headFullName = data.headFullName || 'School Head';
   const headPassword = data.headPassword || `Head@${Math.random().toString(36).slice(2, 8)}`;
   const passwordHash = await bcrypt.hash(headPassword, config.bcrypt.saltRounds);
-  const trialEndsAt = data.trialEndsAt || new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
+  const trialStartedAt = data.trialStartedAt || new Date();
+  const trialEndsAt = data.trialEndsAt || createTrialEndDate(trialStartedAt);
 
   const newSchool = {
     id: schoolId,
@@ -844,10 +856,12 @@ async function createSchoolFallback(data) {
     email: data.email || null,
     timezone: data.timezone || null,
     branding: data.branding || null,
-    subscriptionPlan: data.subscriptionPlan || '5-Day Trial',
+    subscriptionPlan: data.subscriptionPlan || DEFAULT_TRIAL_LABEL,
     subscriptionStatus: data.subscriptionStatus || 'trial',
-    trialStatus: data.trialStatus || '5-Day Trial',
-    trialEndsAt: trialEndsAt,
+    trialStatus: data.trialStatus || DEFAULT_TRIAL_LABEL,
+    trialStartedAt,
+    trialEndsAt,
+    createdAt: data.createdAt || trialStartedAt,
     schoolStatus: data.schoolStatus || 'active',
     academicYears: [
       {
@@ -963,24 +977,166 @@ function getUserIdentifier(user = {}) {
   return userId.includes(':') ? userId.split(':').pop() : userId;
 }
 
+const SIGNED_FILE_URL_PARAMETERS = new Set([
+  'key-pair-id',
+  'policy',
+  'se',
+  'sig',
+  'signature',
+  'sp',
+  'token',
+  'x-amz-credential',
+  'x-amz-signature',
+  'x-goog-credential',
+  'x-goog-signature',
+]);
+const PROFILE_PHOTO_URL_FIELDS = ['profilePhoto', 'passportPhoto', 'avatar', 'photo', 'signature'];
+const SCHOOL_ASSET_URL_FIELDS = [
+  'logo',
+  'logoUrl',
+  'coverImage',
+  'coverImageUrl',
+  'stamp',
+  'stampUrl',
+  'principalSignature',
+  'principalSignatureUrl',
+];
+
+function isSignedFileUrl(value) {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    return [...url.searchParams.keys()].some((key) => SIGNED_FILE_URL_PARAMETERS.has(key.toLowerCase()));
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeSignedUrlFields(record = {}, fields = []) {
+  const safeRecord = { ...record };
+  fields.forEach((field) => {
+    if (isSignedFileUrl(safeRecord[field])) safeRecord[field] = null;
+  });
+  if (safeRecord.metadata && typeof safeRecord.metadata === 'object' && !Array.isArray(safeRecord.metadata)) {
+    safeRecord.metadata = sanitizeSignedUrlFields(safeRecord.metadata, PROFILE_PHOTO_URL_FIELDS);
+  }
+  return safeRecord;
+}
+
+function sanitizeSchoolAssetUrls(school = {}) {
+  const safeSchool = sanitizeSignedUrlFields(school, SCHOOL_ASSET_URL_FIELDS);
+  if (safeSchool.branding && typeof safeSchool.branding === 'object' && !Array.isArray(safeSchool.branding)) {
+    safeSchool.branding = sanitizeSignedUrlFields(safeSchool.branding, SCHOOL_ASSET_URL_FIELDS);
+  }
+  return safeSchool;
+}
+
 function sanitizeTeacherRecord(record = {}) {
   const { passwordHash, studentPasswordHash, password, ...safeRecord } = record;
-  return safeRecord;
+  return sanitizeSignedUrlFields(safeRecord, PROFILE_PHOTO_URL_FIELDS);
 }
 
 function sanitizeStudentRecord(record = {}) {
   const { passwordHash, studentPasswordHash, password, ...safeRecord } = record;
-  return safeRecord;
+  return sanitizeSignedUrlFields(safeRecord, PROFILE_PHOTO_URL_FIELDS);
+}
+
+function normalizeAttendanceStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'late' || normalized === 'present') return 'present';
+  if (normalized === 'absent' || normalized === 'excused') return 'absent';
+  return '';
+}
+
+function normalizeAttendanceRecords(records = []) {
+  return (Array.isArray(records) ? records : [])
+    .map((entry) => ({
+      ...entry,
+      date: String(entry.date || '').slice(0, 10),
+      status: normalizeAttendanceStatus(entry.status),
+    }))
+    .filter((entry) => entry.status);
 }
 
 function sanitizeSchoolResponse(school = {}) {
-  const { users, teachers, students, ...safeSchool } = school;
+  const sanitizedSchool = sanitizeSchoolAssetUrls(school);
+  const { users, teachers, students, ...safeSchool } = sanitizedSchool;
   return {
     ...safeSchool,
     users: Array.isArray(users) ? users.map(sanitizeTeacherRecord) : [],
     teachers: Array.isArray(teachers) ? teachers.map(sanitizeTeacherRecord) : [],
     students: Array.isArray(students) ? students.map(sanitizeStudentRecord) : [],
+    attendanceRecords: normalizeAttendanceRecords(school.attendanceRecords),
   };
+}
+
+function getStudentProjectionIdentifiers(student = {}) {
+  return new Set([student.studentId, student.id, student.username, student.email, student.userId]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean));
+}
+
+function getStudentProjectionNames(student = {}) {
+  const fullName = [student.firstName, student.lastName].filter(Boolean).join(' ');
+  return new Set([student.fullName, student.name, student.studentName, fullName]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean));
+}
+
+function getSchoolStudentRecords(school = {}) {
+  const userStudents = (Array.isArray(school.users) ? school.users : []).filter((user) => {
+    const roles = Array.isArray(user.roles) ? user.roles : [user.role];
+    return user.studentId || roles.some((role) => {
+      const name = typeof role === 'string' ? role : role?.role?.name || role?.name;
+      return String(name || '').trim().toLowerCase() === 'student';
+    });
+  });
+  const records = [];
+  [...(Array.isArray(school.students) ? school.students : []), ...userStudents].forEach((candidate) => {
+    const identifiers = getStudentProjectionIdentifiers(candidate);
+    const existingIndex = records.findIndex((record) => (
+      [...identifiers].some((identifier) => getStudentProjectionIdentifiers(record).has(identifier))
+    ));
+    if (existingIndex === -1) records.push(candidate);
+    else records[existingIndex] = { ...records[existingIndex], ...candidate };
+  });
+  return records;
+}
+
+function findReportCardStudent(reportCard, students) {
+  const cardStudent = reportCard?.student;
+  const explicitIdentifiers = [
+    reportCard?.studentId,
+    reportCard?.studentUserId,
+    reportCard?.userId,
+    typeof cardStudent === 'object' ? cardStudent.studentId || cardStudent.id || cardStudent.email : null,
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean);
+
+  if (explicitIdentifiers.length) {
+    const matches = students.filter((student) => (
+      [...getStudentProjectionIdentifiers(student)].some((identifier) => explicitIdentifiers.includes(identifier))
+    ));
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  const owner = typeof cardStudent === 'object'
+    ? cardStudent.fullName || cardStudent.name || reportCard?.studentName
+    : reportCard?.studentName || cardStudent;
+  const ownerName = String(owner || '').trim().toLowerCase();
+  if (!ownerName) return null;
+  const matches = students.filter((student) => (
+    getStudentProjectionNames(student).has(ownerName) || getStudentProjectionIdentifiers(student).has(ownerName)
+  ));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function getReportCardsForStudents(school, permittedStudents) {
+  const schoolStudents = getSchoolStudentRecords(school);
+  const permittedIdentifiers = new Set(permittedStudents.flatMap((student) => [...getStudentProjectionIdentifiers(student)]));
+  return (Array.isArray(school.reportCards) ? school.reportCards : []).filter((reportCard) => {
+    const owner = findReportCardStudent(reportCard, schoolStudents);
+    return owner && [...getStudentProjectionIdentifiers(owner)].some((identifier) => permittedIdentifiers.has(identifier));
+  });
 }
 
 function getStudentSchoolView(school, user = {}) {
@@ -1003,7 +1159,7 @@ function getStudentSchoolView(school, user = {}) {
 
   if (!student) {
     return {
-      ...school,
+      ...sanitizeSchoolAssetUrls(school),
       users: [],
       teachers: [],
       students: [],
@@ -1015,6 +1171,7 @@ function getStudentSchoolView(school, user = {}) {
       examResults: [],
       announcements: [],
       messages: [],
+      reportCards: [],
       payments: [],
       fees: [],
       financeCategories: [],
@@ -1071,14 +1228,14 @@ function getStudentSchoolView(school, user = {}) {
   const sanitizedStudent = sanitizeStudentRecord(student);
 
   return {
-    ...school,
+    ...sanitizeSchoolAssetUrls(school),
     users: [],
     teachers: [],
     students: [],
     student: sanitizedStudent,
     profile: sanitizedStudent,
     classes: studentClasses,
-    attendanceRecords,
+    attendanceRecords: normalizeAttendanceRecords(attendanceRecords),
     examRecords: (Array.isArray(school.examRecords) ? school.examRecords : []).filter((entry) => {
       const entryStudent = String(entry.studentId || entry.student || '').trim().toLowerCase();
       return entryStudent === studentId;
@@ -1086,6 +1243,7 @@ function getStudentSchoolView(school, user = {}) {
     examResults,
     announcements,
     messages,
+    reportCards: getReportCardsForStudents(school, [student]),
     payments,
     fees: payments,
     financeCategories: [],
@@ -1100,7 +1258,8 @@ function nextFinanceReference(items, prefix) {
   const year = new Date().getFullYear();
   const pattern = new RegExp(`^${prefix}-${year}-(\\d{6})$`);
   const next = (Array.isArray(items) ? items : []).reduce((highest, item) => {
-    const match = String(item?.receiptNumber || item?.id || '').match(pattern);
+    const identifier = prefix === 'PMT' ? item?.id : item?.receiptNumber || item?.id;
+    const match = String(identifier || '').match(pattern);
     return match ? Math.max(highest, Number(match[1])) : highest;
   }, 0) + 1;
   return `${prefix}-${year}-${String(next).padStart(6, '0')}`;
@@ -1122,54 +1281,82 @@ async function createFeePayment(schoolId, input = {}, actor = {}) {
   const status = String(input.status || 'received').trim().toLowerCase();
   if (!new Set(['received', 'paid', 'complete', 'completed']).has(status)) throw new Error('Only successful payments can generate a receipt.');
 
-  const payments = Array.isArray(school.payments) ? school.payments : [];
-  const receipts = Array.isArray(school.receipts) ? school.receipts : [];
-  const receiptNumber = nextFinanceReference(receipts, 'RCPT');
-  const paymentId = nextFinanceReference(payments, 'PMT');
+  const paymentReference = String(input.reference || '').trim();
   const academicYear = input.academicYear || school.academicYear || school.settings?.academicYear || null;
   const term = input.term || school.currentTerm || school.settings?.term || null;
-  const payment = {
-    id: paymentId,
-    schoolId,
-    studentId: student.studentId || student.id || student.email,
-    studentName: student.fullName || student.name || student.email,
-    classId: student.classId || null,
-    className: student.className || student.gradeLevel || student.grade || null,
-    feeType: input.feeType || input.category || null,
-    amount,
-    paymentDate: paymentDate.toISOString(),
-    paidAt: paymentDate.toISOString(),
-    method: input.method || input.paymentMethod || null,
-    reference: input.reference || null,
-    academicYear,
-    term,
-    status,
-    receiptNumber,
-    note: input.note || '',
-    recordedBy: actor.userId || null,
-    createdAt: new Date().toISOString(),
+  const buildFeeRecords = (payments, receipts) => {
+    if (paymentReference && payments.some((payment) => String(payment.reference || '').trim() === paymentReference)) {
+      throw new Error('Payment reference has already been recorded.');
+    }
+    const receiptNumber = nextFinanceReference(receipts, 'RCPT');
+    const paymentId = nextFinanceReference(payments, 'PMT');
+    const payment = {
+      id: paymentId,
+      schoolId,
+      studentId: student.studentId || student.id || student.email,
+      studentName: student.fullName || student.name || student.email,
+      classId: student.classId || null,
+      className: student.className || student.gradeLevel || student.grade || null,
+      feeType: input.feeType || input.category || null,
+      amount,
+      paymentDate: paymentDate.toISOString(),
+      paidAt: paymentDate.toISOString(),
+      method: input.method || input.paymentMethod || null,
+      reference: paymentReference || null,
+      academicYear,
+      term,
+      status,
+      receiptNumber,
+      note: input.note || '',
+      recordedBy: actor.userId || null,
+      createdAt: new Date().toISOString(),
+    };
+    const receipt = {
+      receiptNumber,
+      paymentId,
+      schoolId,
+      studentId: payment.studentId,
+      student: payment.studentName,
+      studentName: payment.studentName,
+      className: payment.className,
+      feeType: payment.feeType,
+      amount,
+      currency: school.currency || school.branding?.currency || school.settings?.currency || 'USD',
+      paymentMethod: payment.method,
+      paymentDate: payment.paymentDate,
+      paidAt: payment.paidAt,
+      academicYear,
+      term,
+      reference: payment.reference,
+      status,
+      authorizedBy: actor.userId || null,
+      createdAt: payment.createdAt,
+    };
+    return { payment, receipt };
   };
-  const receipt = {
-    receiptNumber,
-    paymentId,
-    schoolId,
-    studentId: payment.studentId,
-    student: payment.studentName,
-    studentName: payment.studentName,
-    className: payment.className,
-    feeType: payment.feeType,
-    amount,
-    currency: school.currency || school.branding?.currency || school.settings?.currency || 'USD',
-    paymentMethod: payment.method,
-    paymentDate: payment.paymentDate,
-    paidAt: payment.paidAt,
-    academicYear,
-    term,
-    reference: payment.reference,
-    status,
-    authorizedBy: actor.userId || null,
-    createdAt: payment.createdAt,
-  };
+
+  if (firebaseCore.isFirebaseCoreMode()) {
+    const { tenant, result } = await firebaseCore.updateTenantInTransaction(schoolId, (currentTenant) => {
+      const payments = Array.isArray(currentTenant.payments) ? currentTenant.payments : [];
+      const receipts = Array.isArray(currentTenant.receipts) ? currentTenant.receipts : [];
+      const records = buildFeeRecords(payments, receipts);
+      return {
+        updates: {
+          payments: [...payments, records.payment],
+          receipts: [...receipts, records.receipt],
+        },
+        result: records,
+      };
+    });
+    return {
+      ...result,
+      school: sanitizeSchoolResponse(resolveSchoolLifecycleStatus(tenant)),
+    };
+  }
+
+  const payments = Array.isArray(school.payments) ? school.payments : [];
+  const receipts = Array.isArray(school.receipts) ? school.receipts : [];
+  const { payment, receipt } = buildFeeRecords(payments, receipts);
   const updated = await updateSchool(school.id, { payments: [...payments, payment], receipts: [...receipts, receipt] });
   return { payment, receipt, school: sanitizeSchoolResponse(updated) };
 }
@@ -1183,12 +1370,13 @@ function getTeacherSchoolView(school, user = {}) {
     .some((value) => String(value || '').trim().toLowerCase() === identifier));
   const teacherIdentifiers = new Set([identifier, teacher?.teacherId, teacher?.username, teacher?.email]
     .filter(Boolean).map((value) => String(value).trim().toLowerCase()));
+  const schoolClasses = Array.isArray(school.classes) ? school.classes : [];
   const assignedNames = new Set([
     ...(Array.isArray(teacher?.assignedClasses) ? teacher.assignedClasses : []),
     ...(Array.isArray(teacher?.classes) ? teacher.classes : []),
     teacher?.className,
   ].filter(Boolean).map((value) => String(value).trim().toLowerCase()));
-  const classes = (Array.isArray(school.classes) ? school.classes : []).filter((entry) => {
+  const classes = schoolClasses.filter((entry) => {
     const classId = String(entry.classId || entry.id || '').trim().toLowerCase();
     const classTeacher = String(entry.teacherId || entry.teacher || entry.classTeacher || '').trim().toLowerCase();
     const className = String(entry.name || entry.className || '').trim().toLowerCase();
@@ -1198,10 +1386,35 @@ function getTeacherSchoolView(school, user = {}) {
   const classIds = new Set(classes.map((entry) => String(entry.classId || entry.id || '').trim().toLowerCase()).filter(Boolean));
   const classNames = new Set(classes.flatMap((entry) => [entry.name, entry.className, entry.grade]).filter(Boolean).map((value) => String(value).trim().toLowerCase()));
   assignedNames.forEach((name) => classNames.add(name));
+  const getClassId = (entry) => String(entry.classId || entry.id || '').trim().toLowerCase();
+  const getClassAliases = (entry) => [entry.name, entry.className, entry.grade]
+    .filter(Boolean).map((value) => String(value).trim().toLowerCase());
+  const getClassesForAlias = (value) => {
+    const alias = String(value || '').trim().toLowerCase();
+    return alias ? schoolClasses.filter((entry) => getClassAliases(entry).includes(alias)) : [];
+  };
+  const isAuthorizedClassId = (value) => {
+    const classId = String(value || '').trim().toLowerCase();
+    const matches = schoolClasses.filter((entry) => getClassId(entry) === classId);
+    return matches.length === 1 && classes.includes(matches[0]);
+  };
+  const isAuthorizedClassAlias = (value) => {
+    const alias = String(value || '').trim().toLowerCase();
+    const matches = getClassesForAlias(alias);
+    return matches.length
+      ? matches.every((entry) => classes.includes(entry))
+      : classNames.has(alias);
+  };
   const students = (Array.isArray(school.students) ? school.students : []).filter((entry) => {
     const classId = String(entry.classId || '').trim().toLowerCase();
     const className = String(entry.className || entry.gradeLevel || entry.grade || '').trim().toLowerCase();
-    return classIds.has(classId) || classNames.has(className);
+    if (classId) {
+      const classRecord = schoolClasses.find((item) => getClassId(item) === classId);
+      return isAuthorizedClassId(classId)
+        && (!className || !getClassesForAlias(className).length
+          || Boolean(classRecord && getClassAliases(classRecord).includes(className)));
+    }
+    return isAuthorizedClassAlias(className);
   });
   const studentIds = new Set(students.map((entry) => String(entry.studentId || entry.id || entry.email || '').trim().toLowerCase()).filter(Boolean));
   const subjects = Array.isArray(teacher?.assignedSubjects) ? teacher.assignedSubjects : [];
@@ -1214,23 +1427,51 @@ function getTeacherSchoolView(school, user = {}) {
   });
   const results = (Array.isArray(school.examResults) ? school.examResults : []).filter((entry) => {
     const resultStudent = String(entry.studentId || entry.student || '').trim().toLowerCase();
-    const resultClass = String(entry.className || entry.class || '').trim().toLowerCase();
+    const resultStudentId = String(entry.studentId || '').trim().toLowerCase();
+    const resultClassId = String(entry.classId || '').trim().toLowerCase();
+    const resultClassName = String(entry.className || entry.class || entry.classroom || '').trim().toLowerCase();
     const resultSubject = String(entry.subject || '').trim().toLowerCase();
-    return studentIds.has(resultStudent) || classNames.has(resultClass) || (subjectNames.size > 0 && subjectNames.has(resultSubject));
+    const studentAuthorized = studentIds.has(resultStudent);
+    const resultClassRecord = resultClassId
+      ? schoolClasses.find((item) => getClassId(item) === resultClassId)
+      : null;
+    const classAuthorized = resultClassId
+      ? isAuthorizedClassId(resultClassId)
+        && (!resultClassName || Boolean(resultClassRecord && getClassAliases(resultClassRecord).includes(resultClassName)))
+      : isAuthorizedClassAlias(resultClassName);
+    const resultClass = resultClassId || resultClassName;
+    const hasAuthorizedScope = studentAuthorized || classAuthorized;
+    const matchingStudent = students.find((student) => [student.studentId, student.id, student.email]
+      .some((value) => String(value || '').trim().toLowerCase() === resultStudent));
+    const studentClassId = String(matchingStudent?.classId || '').trim().toLowerCase();
+    const studentClassName = String(matchingStudent?.className || matchingStudent?.gradeLevel || matchingStudent?.grade || '').trim().toLowerCase();
+    const studentClasses = studentClassId
+      ? schoolClasses.filter((item) => getClassId(item) === studentClassId)
+      : getClassesForAlias(studentClassName);
+    const resultClasses = resultClassId
+      ? schoolClasses.filter((item) => getClassId(item) === resultClassId)
+      : getClassesForAlias(resultClassName);
+    const classMatchesStudent = !resultClass || !studentAuthorized || studentClasses.some((studentClass) => resultClasses.includes(studentClass));
+    return hasAuthorizedScope
+      && (!resultStudentId || studentIds.has(resultStudentId))
+      && (!resultClass || classAuthorized)
+      && classMatchesStudent
+      && subjectNames.has(resultSubject);
   });
   return {
-    ...school,
+    ...sanitizeSchoolAssetUrls(school),
     users: [],
     teachers: teacher ? [sanitizeTeacherRecord(teacher)] : [],
     classes,
     students: students.map(sanitizeTeacherRecord),
-    attendanceRecords: (Array.isArray(school.attendanceRecords) ? school.attendanceRecords : []).filter((entry) => {
+    attendanceRecords: normalizeAttendanceRecords((Array.isArray(school.attendanceRecords) ? school.attendanceRecords : []).filter((entry) => {
       const classId = String(entry.classId || '').trim().toLowerCase();
       const className = String(entry.className || '').trim().toLowerCase();
       return classIds.has(classId) || classNames.has(className);
-    }),
+    })),
     examRecords: exams,
     examResults: results,
+    reportCards: getReportCardsForStudents(school, students),
     teacherProfile: teacher ? sanitizeTeacherRecord(teacher) : null,
     payments: [],
     financeCategories: [],
@@ -1253,18 +1494,65 @@ function updateTeacherWorkspace(school, user = {}, updates = {}) {
   const teacherView = getTeacherSchoolView(school, user);
   if (!teacherView?.teacherProfile) throw new Error('Teacher profile not found');
   const allowedStudentIds = new Set(teacherView.students.map((entry) => String(entry.studentId || entry.id || entry.email || '').trim().toLowerCase()).filter(Boolean));
-  const allowedClassNames = new Set(teacherView.classes.flatMap((entry) => [entry.name, entry.className, entry.grade]).filter(Boolean).map((value) => String(value).trim().toLowerCase()));
+  const allowedSubjectNames = new Set(normalizeArray(teacherView.teacherProfile.assignedSubjects)
+    .map((value) => String(value).trim().toLowerCase()).filter(Boolean));
+  const teacherClasses = Array.isArray(teacherView.classes) ? teacherView.classes : [];
+  const getClassAliases = (entry) => [entry.classId, entry.id, entry.name, entry.className, entry.grade]
+    .filter(Boolean).map((value) => String(value).trim().toLowerCase());
+  const allowedClassNames = new Set([
+    ...teacherClasses.flatMap(getClassAliases),
+    ...normalizeArray(teacherView.teacherProfile.assignedClasses),
+    ...normalizeArray(teacherView.teacherProfile.classes),
+    ...normalizeArray(teacherView.teacherProfile.className),
+    ...normalizeArray(teacherView.teacherProfile.assignedClass),
+  ].map((value) => String(value).trim().toLowerCase()).filter(Boolean));
+  const getStudentClassAliases = (student) => {
+    const studentClassId = String(student.classId || '').trim().toLowerCase();
+    const studentClassName = String(student.className || '').trim().toLowerCase();
+    if (studentClassId) {
+      const matchingClasses = teacherClasses.filter((entry) => [entry.classId, entry.id]
+        .some((value) => String(value || '').trim().toLowerCase() === studentClassId));
+      return matchingClasses.length ? new Set(matchingClasses.flatMap(getClassAliases)) : new Set();
+    }
+    if (studentClassName) {
+      const matchingClasses = teacherClasses.filter((entry) => [entry.name, entry.className]
+        .some((value) => String(value || '').trim().toLowerCase() === studentClassName));
+      if (matchingClasses.length) return new Set(matchingClasses.flatMap(getClassAliases));
+      if (allowedClassNames.has(studentClassName)) return new Set([studentClassName]);
+    }
+
+    const gradeValues = [student.gradeLevel, student.grade].filter(Boolean).map((value) => String(value).trim().toLowerCase());
+    const gradeMatches = teacherClasses.filter((entry) => gradeValues.includes(String(entry.grade || '').trim().toLowerCase()));
+    if (gradeMatches.length === 1) return new Set(getClassAliases(gradeMatches[0]));
+    if (!teacherClasses.length) return new Set(gradeValues.filter((value) => allowedClassNames.has(value)));
+    return new Set();
+  };
   const currentAttendance = Array.isArray(school.attendanceRecords) ? school.attendanceRecords : [];
   const currentResults = Array.isArray(school.examResults) ? school.examResults : [];
   if (updates.attendanceRecords !== undefined) {
     const submitted = Array.isArray(updates.attendanceRecords) ? updates.attendanceRecords : [];
-    const validSubmitted = submitted.filter((entry) => {
+    const validSubmitted = submitted.map((entry) => ({
+      ...entry,
+      date: String(entry.date || '').slice(0, 10),
+      status: normalizeAttendanceStatus(entry.status),
+    })).filter((entry) => {
+      const parsedDate = /^\d{4}-\d{2}-\d{2}$/.test(entry.date)
+        ? new Date(`${entry.date}T00:00:00Z`)
+        : null;
       const studentId = String(entry.studentId || '').trim().toLowerCase();
       const className = String(entry.className || '').trim().toLowerCase();
-      return allowedStudentIds.has(studentId) && allowedClassNames.has(className);
+      const student = teacherView.students.find((candidate) => [candidate.studentId, candidate.id, candidate.email]
+        .some((value) => String(value || '').trim().toLowerCase() === studentId));
+      return Boolean(parsedDate)
+        && !Number.isNaN(parsedDate.getTime())
+        && parsedDate.toISOString().slice(0, 10) === entry.date
+        && Boolean(entry.status)
+        && allowedStudentIds.has(studentId)
+        && allowedClassNames.has(className)
+        && Boolean(student && getStudentClassAliases(student).has(className));
     });
     const managedKeys = new Set(validSubmitted.map((entry) => `${entry.date || ''}|${entry.className || ''}|${entry.studentId || ''}`));
-    school.attendanceRecords = currentAttendance
+    school.attendanceRecords = normalizeAttendanceRecords(currentAttendance)
       .filter((entry) => !managedKeys.has(`${entry.date || ''}|${entry.className || ''}|${entry.studentId || ''}`))
       .concat(validSubmitted);
   }
@@ -1273,7 +1561,12 @@ function updateTeacherWorkspace(school, user = {}, updates = {}) {
     const validSubmitted = submitted.filter((entry) => {
       const studentId = String(entry.studentId || entry.student || '').trim().toLowerCase();
       const className = String(entry.className || entry.class || '').trim().toLowerCase();
-      return allowedStudentIds.has(studentId) || allowedClassNames.has(className);
+      const subject = String(entry.subject || '').trim().toLowerCase();
+      if (!allowedStudentIds.has(studentId) || !allowedClassNames.has(className)) return false;
+      if (allowedSubjectNames.size && !allowedSubjectNames.has(subject)) return false;
+      const student = teacherView.students.find((candidate) => [candidate.studentId, candidate.id, candidate.email]
+        .some((value) => String(value || '').trim().toLowerCase() === studentId));
+      return Boolean(student && getStudentClassAliases(student).has(className));
     });
     const managedKeys = new Set(validSubmitted.map((entry) => `${entry.student || entry.studentId || ''}|${entry.subject || ''}|${entry.exam || ''}|${entry.term || ''}|${entry.academicYear || ''}`.toLowerCase()));
     school.examResults = currentResults
@@ -1281,7 +1574,7 @@ function updateTeacherWorkspace(school, user = {}, updates = {}) {
       .concat(validSubmitted);
   }
   if (updates.teacherProfile && typeof updates.teacherProfile === 'object') {
-    const allowedFields = ['fullName', 'email', 'phone', 'department', 'position', 'qualification', 'profilePhoto'];
+    const allowedFields = ['fullName', 'email', 'phone', 'department', 'position', 'qualification', 'profilePhoto', 'profilePhotoPath'];
     const profileUpdates = Object.fromEntries(allowedFields.filter((field) => updates.teacherProfile[field] !== undefined).map((field) => [field, updates.teacherProfile[field]]));
     Object.assign(teacherView.teacherProfile, profileUpdates);
     const identifiers = [teacherView.teacherProfile.teacherId, teacherView.teacherProfile.username, teacherView.teacherProfile.email].filter(Boolean).map((value) => String(value).toLowerCase());
@@ -1357,7 +1650,7 @@ async function updateSchool(id, updates) {
   const updated = await prisma.tenant.update({ where: { id }, data }).catch((err) => {
     throw new Error('Failed to update school: ' + (err.message || err));
   });
-  return updated;
+  return resolveSchoolLifecycleStatus(updated);
 }
 
 function generateTemporaryPassword() {
@@ -1476,10 +1769,11 @@ async function activateSchool(id) {
     const school = await firebaseCore.getTenant(id);
     if (!school) throw new Error('School not found');
     if (isArchivedSchool(school)) throw createSchoolArchiveError('SCHOOL_ARCHIVED', 'Archived schools must be restored before activation.');
-    return firebaseCore.saveTenant(id, {
+    const updated = await firebaseCore.saveTenant(id, {
       status: 'active',
       schoolStatus: 'active',
     });
+    return resolveSchoolLifecycleStatus({ ...school, ...updated });
   }
 
   if (prisma && prisma.__stub) {
@@ -1498,7 +1792,7 @@ async function activateSchool(id) {
     };
     schools[index] = updated;
     saveSchoolData(schools);
-    return updated;
+    return resolveSchoolLifecycleStatus(updated);
   }
 
   const school = await prisma.tenant.findUnique({ where: { id } });
@@ -1507,7 +1801,7 @@ async function activateSchool(id) {
   const updated = await prisma.tenant.update({ where: { id }, data: { status: 'active' } }).catch((err) => {
     throw new Error('Failed to activate school: ' + (err.message || err));
   });
-  return updated;
+  return resolveSchoolLifecycleStatus(updated);
 }
 
 async function listSchools(search) {
@@ -1525,13 +1819,24 @@ async function listArchivedSchools(search = '', status = '') {
     .map(sanitizeSchoolResponse);
 }
 
+function userHasSchoolRole(schoolUser, role) {
+  const assignedRoles = Array.isArray(schoolUser.roles) ? schoolUser.roles.map((entry) => {
+    if (typeof entry === 'string') return entry;
+    if (typeof entry?.role === 'string') return entry.role;
+    return entry?.role?.name || entry?.name || '';
+  }) : [];
+  return [schoolUser.role, ...assignedRoles].some((assignedRole) => String(assignedRole || '').toLowerCase() === role);
+}
+
+function getSchoolRoleRecords(school, role) {
+  const records = role === 'student' ? school.students : school.teachers;
+  if (Array.isArray(records) && records.length > 0) return records;
+  return (Array.isArray(school.users) ? school.users : []).filter((user) => userHasSchoolRole(user, role));
+}
+
 function countSchoolUsers(school, role) {
-  if (Array.isArray(school.students) && role === 'student') return school.students.filter((entry) => String(entry.status || 'active').toLowerCase() !== 'archived').length;
-  if (Array.isArray(school.teachers) && role === 'teacher') return school.teachers.filter((entry) => String(entry.status || 'active').toLowerCase() !== 'archived').length;
-  return (Array.isArray(school.users) ? school.users : []).filter((user) => {
-    const matchesRole = String(user.role || '').toLowerCase() === role || (Array.isArray(user.roles) && user.roles.some((entry) => String(entry.role?.name || entry.name || '').toLowerCase() === role));
-    return matchesRole && String(user.status || 'active').toLowerCase() !== 'archived';
-  }).length;
+  return getSchoolRoleRecords(school, role)
+    .filter((entry) => String(entry.status || 'active').toLowerCase() !== 'archived').length;
 }
 
 function buildGrowthSeries(items, days, dateField = 'createdAt') {
@@ -1548,8 +1853,8 @@ function buildGrowthSeries(items, days, dateField = 'createdAt') {
 
 function buildPlatformAnalytics(schools, days) {
   const schoolEntities = schools.map((school) => ({ ...school, createdAt: school.createdAt }));
-  const students = schools.flatMap((school) => Array.isArray(school.students) ? school.students : (school.users || []).filter((user) => String(user.role || '').toLowerCase() === 'student' || user.roles?.some((entry) => String(entry.role?.name || entry.name || '').toLowerCase() === 'student')));
-  const teachers = schools.flatMap((school) => Array.isArray(school.teachers) ? school.teachers : (school.users || []).filter((user) => String(user.role || '').toLowerCase() === 'teacher' || user.roles?.some((entry) => String(entry.role?.name || entry.name || '').toLowerCase() === 'teacher')));
+  const students = schools.flatMap((school) => getSchoolRoleRecords(school, 'student'));
+  const teachers = schools.flatMap((school) => getSchoolRoleRecords(school, 'teacher'));
   return {
     days,
     schoolGrowth: buildGrowthSeries(schoolEntities, days),
@@ -1612,7 +1917,9 @@ async function getPlatformSummary({ days = 365 } = {}) {
   }
 
   try {
-    const tenants = (await prisma.tenant.findMany({ include: { users: true } }))
+    const tenants = (await prisma.tenant.findMany({
+      include: { users: { include: { roles: { include: { role: true } } } } },
+    }))
       .filter((tenant) => !isArchivedSchool(tenant))
       .map((tenant) => resolveSchoolLifecycleStatus(tenant));
     const totalSchools = tenants.length;
@@ -1621,16 +1928,8 @@ async function getPlatformSummary({ days = 365 } = {}) {
       (tenant) => String(tenant.subscriptionStatus || '').toLowerCase() === 'trial'
     ).length;
     const expiredSchools = tenants.filter((tenant) => String(tenant.subscriptionStatus || '').toLowerCase() === 'expired').length;
-    const totalStudents = tenants.reduce(
-      (sum, tenant) =>
-        sum + ((tenant.users || []).filter((user) => user.roles?.some((role) => role.role?.name === 'student')).length || 0),
-      0
-    );
-    const totalTeachers = tenants.reduce(
-      (sum, tenant) =>
-        sum + ((tenant.users || []).filter((user) => user.roles?.some((role) => role.role?.name === 'teacher')).length || 0),
-      0
-    );
+    const totalStudents = tenants.reduce((sum, tenant) => sum + countSchoolUsers(tenant, 'student'), 0);
+    const totalTeachers = tenants.reduce((sum, tenant) => sum + countSchoolUsers(tenant, 'teacher'), 0);
     const schoolSummaries = tenants.map((tenant) => ({
       schoolId: tenant.schoolId,
       name: tenant.name,
@@ -1712,16 +2011,14 @@ function calculateAttendanceMetrics(records = []) {
     return normalizeDateKey(candidate) === selectedDateKey;
   });
 
-  const counts = { present: 0, absent: 0, late: 0, excused: 0 };
+  const counts = { present: 0, absent: 0 };
   selectedEntries.forEach((entry) => {
-    const normalizedStatus = String(entry.status || '').trim().toLowerCase();
+    const normalizedStatus = normalizeAttendanceStatus(entry.status);
     if (normalizedStatus === 'present') counts.present += 1;
     else if (normalizedStatus === 'absent') counts.absent += 1;
-    else if (normalizedStatus === 'late') counts.late += 1;
-    else if (normalizedStatus === 'excused') counts.excused += 1;
   });
 
-  const total = selectedEntries.length;
+  const total = counts.present + counts.absent;
   const presentRatio = total ? Math.round((counts.present / total) * 100) : 0;
   return {
     total,
@@ -1733,8 +2030,8 @@ function calculateAttendanceMetrics(records = []) {
       const parsed = new Date(date);
       const label = Number.isNaN(parsed.getTime()) ? 'Today' : parsed.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
       const status = String(entry.status || '').trim().toLowerCase();
-      const percentage = total ? Math.round(((status === 'present' ? 1 : 0) / 1) * 100) : 0;
-      return { date: label, percentage: percentage || (status === 'absent' ? 0 : 100) };
+      const percentage = status === 'present' || status === 'late' ? 100 : status === 'absent' || status === 'excused' ? 0 : null;
+      return { date: label, percentage };
     }),
   };
 }
@@ -1922,7 +2219,33 @@ function applyAcademicYearWorkflow(school, createdYear, payload = {}) {
   return createdYear;
 }
 
-async function getEntities(schoolId, entityType, query = {}) {
+function applyActorEntityScope(school, field, items = [], actor = {}, schoolId = '') {
+  const actorRoles = Array.isArray(actor.roles) ? actor.roles : [actor.role].filter(Boolean);
+  const normalizedRoles = actorRoles.map((role) => String(role).trim().toLowerCase());
+  const actorSchoolId = String(actor.schoolId || actor.tenantId || '').trim();
+
+  if (actorSchoolId && schoolId && actorSchoolId !== String(schoolId).trim()) {
+    return [];
+  }
+
+  if (normalizedRoles.includes('student')) {
+    return [];
+  }
+
+  if (!normalizedRoles.includes('teacher') || normalizedRoles.some((role) => ['school_authority', 'school_head', 'super_admin'].includes(role))) {
+    return items;
+  }
+
+  const authorizedSource = getTeacherSchoolView(school, actor);
+  const authorizedItems = Array.isArray(authorizedSource?.[field]) ? authorizedSource[field] : [];
+
+  if (field === 'students') return authorizedItems;
+  if (field === 'teachers') return authorizedItems;
+  if (field === 'classes') return authorizedSource?.classes || [];
+  return items;
+}
+
+async function getEntities(schoolId, entityType, query = {}, actor = {}) {
   const field = normalizeEntityType(entityType);
   if (!field) {
     throw new Error('Unsupported entity type');
@@ -1935,7 +2258,8 @@ async function getEntities(schoolId, entityType, query = {}) {
     const school = await firebaseCore.getSchoolAggregate(schoolId);
     if (!school) throw new Error('School not found');
     const items = school[field] || [];
-    const filtered = buildSearchFilter(items, query.search, query.status);
+    const scoped = applyActorEntityScope(school, field, items, actor, schoolId);
+    const filtered = buildSearchFilter(scoped, query.search, query.status);
     const safeItems = field === 'teachers'
       ? filtered.map(sanitizeTeacherRecord)
       : field === 'students'
@@ -1950,7 +2274,8 @@ async function getEntities(schoolId, entityType, query = {}) {
     if (!school) throw new Error('School not found');
     ensureSchoolEntities(school);
     const items = school[field] || [];
-    const filtered = buildSearchFilter(items, query.search, query.status);
+    const scoped = applyActorEntityScope(school, field, items, actor, schoolId);
+    const filtered = buildSearchFilter(scoped, query.search, query.status);
     const safeItems = field === 'teachers'
       ? filtered.map(sanitizeTeacherRecord)
       : field === 'students'
@@ -1973,8 +2298,14 @@ async function getEntities(schoolId, entityType, query = {}) {
     items = tenant[field] || [];
   }
 
-  const filtered = buildSearchFilter(items, query.search, query.status);
-  return paginate(filtered, page, pageSize);
+  const scoped = applyActorEntityScope({ ...tenant, teachers: items.filter((entry) => entry.role === 'teacher' || entry.teacherId || entry.email), students: items.filter((entry) => entry.role === 'student' || entry.studentId || entry.email) }, field, items, actor, schoolId);
+  const filtered = buildSearchFilter(scoped, query.search, query.status);
+  const safeItems = field === 'teachers'
+    ? filtered.map(sanitizeTeacherRecord)
+    : field === 'students'
+      ? filtered.map(sanitizeStudentRecord)
+      : filtered;
+  return paginate(safeItems, page, pageSize);
 }
 
 async function searchEntities(schoolId, query, scope = '') {
@@ -2366,7 +2697,7 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
   }
 
   if (studentOwnProfileAccess) {
-    const allowedStudentFields = new Set(['profilePhoto', 'avatar', 'photo']);
+    const allowedStudentFields = new Set(['profilePhoto', 'profilePhotoPath', 'avatar', 'photo']);
     const disallowedKeys = Object.keys(updates || {}).filter((key) => !allowedStudentFields.has(key));
     if (disallowedKeys.length > 0) {
       throw new Error('Students can only update their own profile photo.');
@@ -2424,8 +2755,15 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
         teacherId: record.teacherId || null,
         studentId: record.studentId || null,
         profilePhoto: updated.profilePhoto || null,
-        metadata: { ...(record.metadata || {}), ...(safeUpdates.metadata || {}), ...(safeUpdates.profilePhoto !== undefined ? { profilePhoto: safeUpdates.profilePhoto } : {}) },
+        profilePhotoPath: updated.profilePhotoPath || null,
+        metadata: {
+          ...(record.metadata || {}),
+          ...(safeUpdates.metadata || {}),
+          ...(safeUpdates.profilePhoto !== undefined ? { profilePhoto: safeUpdates.profilePhoto } : {}),
+          ...(safeUpdates.profilePhotoPath !== undefined ? { profilePhotoPath: safeUpdates.profilePhotoPath } : {}),
+        },
         ...(safeUpdates.profilePhoto !== undefined ? { profilePhoto: safeUpdates.profilePhoto } : {}),
+        ...(safeUpdates.profilePhotoPath !== undefined ? { profilePhotoPath: safeUpdates.profilePhotoPath } : {}),
         ...(safeUpdates.fullName ? { fullName: safeUpdates.fullName } : {}),
         ...(safeUpdates.phone !== undefined ? { phone: safeUpdates.phone } : {}),
         ...(safeUpdates.email ? { email: String(safeUpdates.email).toLowerCase() } : {}),
@@ -2447,7 +2785,7 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
       if (String(currentStudent.studentId || currentStudent.id || currentStudent.email || '').toLowerCase() !== String(entityId).trim().toLowerCase()) {
         throw new Error('Students can only update their own profile.');
       }
-      const selfAllowed = new Set(['profilePhoto', 'avatar']);
+      const selfAllowed = new Set(['profilePhoto', 'profilePhotoPath', 'avatar']);
       const disallowedSelf = Object.keys(updates || {}).filter((key) => !selfAllowed.has(key));
       if (disallowedSelf.length > 0) throw new Error('Students can only update their own profile photo.');
     }
@@ -2542,7 +2880,7 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
       if (selfStudentId !== actorStudentId && String(user.email || '').trim().toLowerCase() !== String(actor.username || '').trim().toLowerCase()) {
         throw new Error('Students can only update their own profile.');
       }
-      const selfAllowed = new Set(['profilePhoto', 'avatar']);
+      const selfAllowed = new Set(['profilePhoto', 'profilePhotoPath', 'avatar']);
       const disallowedSelf = Object.keys(updates || {}).filter((key) => !selfAllowed.has(key));
       if (disallowedSelf.length > 0) {
         throw new Error('Students can only update their own profile photo.');
@@ -2570,6 +2908,10 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
       ...(user.metadata || {}),
       ...(updatesWithEmail.metadata || {}),
     };
+
+    if (updatesWithEmail.profilePhoto !== undefined) metadata.profilePhoto = updatesWithEmail.profilePhoto;
+    if (updatesWithEmail.profilePhotoPath !== undefined) metadata.profilePhotoPath = updatesWithEmail.profilePhotoPath;
+    delete updatesWithEmail.profilePhotoPath;
 
     if (field === 'teachers') {
       delete metadata.nationalId;
@@ -2770,6 +3112,42 @@ function assertMessagingRecipient(school, actor, recipientId) {
 }
 
 async function createWorkspaceMessage(schoolId, payload = {}, actor = {}) {
+  if (firebaseCore.isFirebaseCoreMode()) {
+    const school = await firebaseCore.getSchoolAggregate(schoolId);
+    if (!school) throw new Error('School not found');
+    ensureSchoolEntities(school);
+    const roles = getMessagingRoles(actor);
+    if (roles.length && !isTenantMatch(actor, schoolId)) throw new Error('School access denied');
+    const recipientIds = Array.isArray(payload.recipientIds) ? payload.recipientIds : [payload.recipientId || payload.recipient].filter(Boolean);
+    if (roles.length && !recipientIds.length) throw new Error('A recipient is required');
+    const actorRecord = getMessagingActor(school, actor);
+    const senderId = normalizeMessagingIdentifier(actor.userId || actor.username || actor.email || actorRecord?.username);
+    const senderName = actorRecord?.fullName || actorRecord?.name || actorRecord?.username || 'User';
+    const messages = roles.length
+      ? recipientIds.map((recipientId) => {
+        const recipient = assertMessagingRecipient(school, actor, recipientId);
+        return normalizeWorkspaceMessage(school, {
+          ...payload,
+          id: undefined,
+          folder: 'inbox',
+          from: senderName,
+          to: recipient.name,
+          recipient: recipient.id,
+          recipientId: normalizeMessagingIdentifier(recipient.id),
+          recipientRole: recipient.role,
+          senderId,
+          senderRole: roles[0],
+          senderName,
+          unread: true,
+          readAt: null,
+          readBy: [],
+        });
+      })
+      : [normalizeWorkspaceMessage(school, payload)];
+    await Promise.all(messages.map((message) => firebaseCore.saveById('messages', `${schoolId}:${message.id}`, message, false)));
+    return messages[0];
+  }
+
   if (prisma && prisma.__stub) {
     const schools = loadSchoolData();
     const school = findSchoolBySchoolId(schools, schoolId);
@@ -2812,8 +3190,9 @@ async function createWorkspaceMessage(schoolId, payload = {}, actor = {}) {
 }
 
 async function createAssignment(schoolId, payload = {}, actor = {}) {
-  const schools = loadSchoolData();
-  const school = findSchoolBySchoolId(schools, schoolId);
+  const firebaseMode = firebaseCore.isFirebaseCoreMode();
+  const schools = firebaseMode ? null : loadSchoolData();
+  const school = firebaseMode ? await firebaseCore.getSchoolAggregate(schoolId) : findSchoolBySchoolId(schools, schoolId);
   if (!school) throw new Error('School not found');
   ensureSchoolEntities(school);
   if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
@@ -2848,6 +3227,8 @@ async function createAssignment(schoolId, payload = {}, actor = {}) {
     schoolId,
   };
 
+  if (firebaseMode) return firebaseCore.saveById('assignments', `${schoolId}:${assignment.id}`, assignment, false);
+
   if (!Array.isArray(school.assignments)) school.assignments = [];
   school.assignments.unshift(assignment);
   saveSchoolData(schools);
@@ -2855,14 +3236,15 @@ async function createAssignment(schoolId, payload = {}, actor = {}) {
 }
 
 async function listAssignments(schoolId, query = {}, actor = {}) {
-  const schools = loadSchoolData();
-  const school = findSchoolBySchoolId(schools, schoolId);
+  const firebaseMode = firebaseCore.isFirebaseCoreMode();
+  const school = firebaseMode ? await firebaseCore.getSchoolAggregate(schoolId) : findSchoolBySchoolId(loadSchoolData(), schoolId);
   if (!school) throw new Error('School not found');
   if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
   ensureSchoolEntities(school);
 
   const teacherFilter = String(query.teacherId || query.createdBy || '').trim();
-  const items = (Array.isArray(school.assignments) ? school.assignments : []).filter((entry) => {
+  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId) : school.assignments;
+  const items = (Array.isArray(assignments) ? assignments : []).filter((entry) => {
     const matchesTeacher = !teacherFilter || String(entry.teacherId || entry.createdBy || '').trim() === teacherFilter;
     return matchesTeacher;
   });
@@ -2870,26 +3252,33 @@ async function listAssignments(schoolId, query = {}, actor = {}) {
 }
 
 async function listAssignmentsForStudent(schoolId, query = {}, actor = {}) {
-  const schools = loadSchoolData();
-  const school = findSchoolBySchoolId(schools, schoolId);
+  const firebaseMode = firebaseCore.isFirebaseCoreMode();
+  const school = firebaseMode ? await firebaseCore.getSchoolAggregate(schoolId) : findSchoolBySchoolId(loadSchoolData(), schoolId);
   if (!school) throw new Error('School not found');
   if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
   ensureSchoolEntities(school);
 
-  const studentId = String(query.studentId || actor.username || actor.userId || '').split(':').pop().trim();
-  const student = resolveStudentByActor(school, { ...actor, username: studentId, userId: `${schoolId}:${studentId}` });
+  const student = resolveStudentByActor(school, actor);
   if (!student) return { schoolId, items: [], total: 0 };
 
+  const studentIds = new Set([student.studentId, student.id, student.email]
+    .filter(Boolean).map((value) => String(value).trim().toLowerCase()));
   const classKeys = resolveStudentClassKeys(school, student);
-  const items = (Array.isArray(school.assignments) ? school.assignments : []).filter((entry) => {
-    return classKeys.has(String(entry.classId || '').trim().toLowerCase()) || classKeys.has(String(entry.className || '').trim().toLowerCase());
-  });
+  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId) : school.assignments;
+  const items = (Array.isArray(assignments) ? assignments : [])
+    .filter((entry) => classKeys.has(String(entry.classId || '').trim().toLowerCase()) || classKeys.has(String(entry.className || '').trim().toLowerCase()))
+    .map((entry) => ({
+      ...entry,
+      submissions: (Array.isArray(entry.submissions) ? entry.submissions : [])
+        .filter((submission) => studentIds.has(String(submission.studentId || '').trim().toLowerCase())),
+    }));
   return { schoolId, items, total: items.length };
 }
 
 async function submitAssignment(schoolId, assignmentId, payload = {}, actor = {}) {
-  const schools = loadSchoolData();
-  const school = findSchoolBySchoolId(schools, schoolId);
+  const firebaseMode = firebaseCore.isFirebaseCoreMode();
+  const schools = firebaseMode ? null : loadSchoolData();
+  const school = firebaseMode ? await firebaseCore.getSchoolAggregate(schoolId) : findSchoolBySchoolId(schools, schoolId);
   if (!school) throw new Error('School not found');
   if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
   ensureSchoolEntities(school);
@@ -2897,7 +3286,8 @@ async function submitAssignment(schoolId, assignmentId, payload = {}, actor = {}
   const roles = getUserRoleList(actor);
   if (!roles.includes('student')) throw new Error('Student role required');
 
-  const assignment = (Array.isArray(school.assignments) ? school.assignments : []).find((entry) => entry.id === assignmentId);
+  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId) : school.assignments;
+  const assignment = (Array.isArray(assignments) ? assignments : []).find((entry) => entry.id === assignmentId);
   if (!assignment) throw new Error('Assignment not found');
 
   const student = resolveStudentByActor(school, actor);
@@ -2906,15 +3296,21 @@ async function submitAssignment(schoolId, assignmentId, payload = {}, actor = {}
   const entryMatch = classKeys.has(String(assignment.classId || '').trim().toLowerCase()) || classKeys.has(String(assignment.className || '').trim().toLowerCase());
   if (!entryMatch) throw new Error('Assignment not available for this class');
 
-  const studentId = String(payload.studentId || student.studentId || actor.username || '').trim();
+  const submittedAt = new Date();
+  const dueDate = assignment.dueDate ? new Date(assignment.dueDate) : null;
+  if (dueDate && !Number.isNaN(dueDate.getTime()) && dueDate.getTime() < submittedAt.getTime()) {
+    throw new Error('Assignment deadline has passed');
+  }
+
+  const studentId = String(student.studentId || student.id || student.username || actor.username || '').trim();
   const submission = {
     id: payload.id || `submission-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     studentId,
-    studentName: String(payload.studentName || student.fullName || actor.username || '').trim(),
+    studentName: String(student.fullName || student.name || student.studentName || actor.username || '').trim(),
     text: payload.text || '',
     attachment: payload.attachment || null,
     status: 'submitted',
-    submittedAt: payload.submittedAt || new Date().toISOString(),
+    submittedAt: submittedAt.toISOString(),
   };
 
   const existing = Array.isArray(assignment.submissions) ? assignment.submissions : [];
@@ -2922,23 +3318,17 @@ async function submitAssignment(schoolId, assignmentId, payload = {}, actor = {}
   if (index >= 0) existing[index] = { ...existing[index], ...submission };
   else existing.push(submission);
 
-  const dueDate = assignment.dueDate ? new Date(assignment.dueDate) : null;
-  if (dueDate && dueDate.getTime() < new Date(submission.submittedAt).getTime()) {
-    submission.status = 'late';
-    if (index >= 0) existing[index].status = 'late';
-    else existing[existing.length - 1].status = 'late';
-  }
-
   assignment.submissions = existing;
   assignment.status = existing.some((entry) => entry.status === 'submitted' || entry.status === 'late') ? 'submitted' : 'assigned';
   assignment.updatedAt = new Date().toISOString();
+  if (firebaseMode) return firebaseCore.saveById('assignments', `${schoolId}:${assignment.id}`, assignment);
   saveSchoolData(schools);
   return assignment;
 }
 
 async function getAssignmentSubmissions(schoolId, assignmentId, actor = {}) {
-  const schools = loadSchoolData();
-  const school = findSchoolBySchoolId(schools, schoolId);
+  const firebaseMode = firebaseCore.isFirebaseCoreMode();
+  const school = firebaseMode ? await firebaseCore.getSchoolAggregate(schoolId) : findSchoolBySchoolId(loadSchoolData(), schoolId);
   if (!school) throw new Error('School not found');
   if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
   ensureSchoolEntities(school);
@@ -2948,7 +3338,8 @@ async function getAssignmentSubmissions(schoolId, assignmentId, actor = {}) {
     throw new Error('Teacher or school authority role required');
   }
 
-  const assignment = (Array.isArray(school.assignments) ? school.assignments : []).find((entry) => entry.id === assignmentId);
+  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId) : school.assignments;
+  const assignment = (Array.isArray(assignments) ? assignments : []).find((entry) => entry.id === assignmentId);
   if (!assignment) throw new Error('Assignment not found');
   if (roles.includes('teacher') && !resolveAssignmentOwnership(school, assignment, actor)) {
     throw new Error('Teacher is not assigned to this assignment');
@@ -2958,14 +3349,16 @@ async function getAssignmentSubmissions(schoolId, assignmentId, actor = {}) {
 }
 
 async function updateAssignment(schoolId, assignmentId, updates = {}, actor = {}) {
-  const schools = loadSchoolData();
-  const school = findSchoolBySchoolId(schools, schoolId);
+  const firebaseMode = firebaseCore.isFirebaseCoreMode();
+  const schools = firebaseMode ? null : loadSchoolData();
+  const school = firebaseMode ? await firebaseCore.getSchoolAggregate(schoolId) : findSchoolBySchoolId(schools, schoolId);
   if (!school) throw new Error('School not found');
   if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
   ensureSchoolEntities(school);
 
   const roles = getUserRoleList(actor);
-  const assignment = (Array.isArray(school.assignments) ? school.assignments : []).find((entry) => entry.id === assignmentId);
+  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId) : school.assignments;
+  const assignment = (Array.isArray(assignments) ? assignments : []).find((entry) => entry.id === assignmentId);
   if (!assignment) throw new Error('Assignment not found');
   if (roles.includes('student')) throw new Error('Students are not permitted to modify assignment definitions');
   if (!roles.includes('teacher') && !roles.includes('school_authority') && !roles.includes('super_admin')) {
@@ -2986,13 +3379,15 @@ async function updateAssignment(schoolId, assignmentId, updates = {}, actor = {}
     updatedAt: new Date().toISOString(),
   });
   assignment.status = normalizeAssignmentStatus(assignment.dueDate, assignment.status);
+  if (firebaseMode) return firebaseCore.saveById('assignments', `${schoolId}:${assignment.id}`, assignment);
   saveSchoolData(schools);
   return assignment;
 }
 
 async function createLesson(schoolId, payload = {}, actor = {}) {
-  const schools = loadSchoolData();
-  const school = findSchoolBySchoolId(schools, schoolId);
+  const firebaseMode = firebaseCore.isFirebaseCoreMode();
+  const schools = firebaseMode ? null : loadSchoolData();
+  const school = firebaseMode ? await firebaseCore.getSchoolAggregate(schoolId) : findSchoolBySchoolId(schools, schoolId);
   if (!school) throw new Error('School not found');
   if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
   ensureSchoolEntities(school);
@@ -3024,25 +3419,28 @@ async function createLesson(schoolId, payload = {}, actor = {}) {
     schoolId,
   };
 
+  if (firebaseMode) return firebaseCore.saveById('lessons', `${schoolId}:${lesson.id}`, lesson, false);
+
   school.lessons.unshift(lesson);
   saveSchoolData(schools);
   return lesson;
 }
 
 async function listLessons(schoolId, query = {}, actor = {}) {
-  const schools = loadSchoolData();
-  const school = findSchoolBySchoolId(schools, schoolId);
+  const firebaseMode = firebaseCore.isFirebaseCoreMode();
+  const school = firebaseMode ? await firebaseCore.getSchoolAggregate(schoolId) : findSchoolBySchoolId(loadSchoolData(), schoolId);
   if (!school) throw new Error('School not found');
   if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
   ensureSchoolEntities(school);
 
-  const items = (Array.isArray(school.lessons) ? school.lessons : []).filter((entry) => !query.teacherId || String(entry.teacherId || entry.createdBy || '').trim() === String(query.teacherId || '').trim());
+  const lessons = firebaseMode ? await firebaseCore.listBySchool('lessons', schoolId) : school.lessons;
+  const items = (Array.isArray(lessons) ? lessons : []).filter((entry) => !query.teacherId || String(entry.teacherId || entry.createdBy || '').trim() === String(query.teacherId || '').trim());
   return { schoolId, items, total: items.length };
 }
 
 async function listLessonsForStudent(schoolId, query = {}, actor = {}) {
-  const schools = loadSchoolData();
-  const school = findSchoolBySchoolId(schools, schoolId);
+  const firebaseMode = firebaseCore.isFirebaseCoreMode();
+  const school = firebaseMode ? await firebaseCore.getSchoolAggregate(schoolId) : findSchoolBySchoolId(loadSchoolData(), schoolId);
   if (!school) throw new Error('School not found');
   if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
   ensureSchoolEntities(school);
@@ -3052,7 +3450,8 @@ async function listLessonsForStudent(schoolId, query = {}, actor = {}) {
   if (!student) return { schoolId, items: [], total: 0 };
 
   const classKeys = resolveStudentClassKeys(school, student);
-  const items = (Array.isArray(school.lessons) ? school.lessons : []).filter((entry) => {
+  const lessons = firebaseMode ? await firebaseCore.listBySchool('lessons', schoolId) : school.lessons;
+  const items = (Array.isArray(lessons) ? lessons : []).filter((entry) => {
     const matchesClassId = classKeys.has(String(entry.classId || '').trim().toLowerCase());
     const matchesClassName = classKeys.has(String(entry.className || '').trim().toLowerCase());
     const matchesSubject = !query.subject || String(entry.subject || '').trim().toLowerCase() === String(query.subject || '').trim().toLowerCase();
@@ -3062,14 +3461,16 @@ async function listLessonsForStudent(schoolId, query = {}, actor = {}) {
 }
 
 async function updateLesson(schoolId, lessonId, updates = {}, actor = {}) {
-  const schools = loadSchoolData();
-  const school = findSchoolBySchoolId(schools, schoolId);
+  const firebaseMode = firebaseCore.isFirebaseCoreMode();
+  const schools = firebaseMode ? null : loadSchoolData();
+  const school = firebaseMode ? await firebaseCore.getSchoolAggregate(schoolId) : findSchoolBySchoolId(schools, schoolId);
   if (!school) throw new Error('School not found');
   if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
   ensureSchoolEntities(school);
 
   const roles = getUserRoleList(actor);
-  const lesson = (Array.isArray(school.lessons) ? school.lessons : []).find((entry) => entry.id === lessonId);
+  const lessons = firebaseMode ? await firebaseCore.listBySchool('lessons', schoolId) : school.lessons;
+  const lesson = (Array.isArray(lessons) ? lessons : []).find((entry) => entry.id === lessonId);
   if (!lesson) throw new Error('Lesson not found');
   if (roles.includes('student')) throw new Error('Students are not permitted to modify learning materials');
   if (!roles.includes('teacher') && !roles.includes('school_authority') && !roles.includes('super_admin')) {
@@ -3088,11 +3489,23 @@ async function updateLesson(schoolId, lessonId, updates = {}, actor = {}) {
     subject: updates.subject || lesson.subject,
     updatedAt: new Date().toISOString(),
   });
+  if (firebaseMode) return firebaseCore.saveById('lessons', `${schoolId}:${lesson.id}`, lesson);
   saveSchoolData(schools);
   return lesson;
 }
 
 async function updateWorkspaceMessage(schoolId, messageId, updates = {}, actor = {}) {
+  if (firebaseCore.isFirebaseCoreMode()) {
+    const roles = getMessagingRoles(actor);
+    if (roles.length && !isTenantMatch(actor, schoolId)) throw new Error('School access denied');
+    const current = await firebaseCore.getById('messages', `${schoolId}:${messageId}`);
+    if (!current || current.schoolId !== schoolId) throw new Error('Message not found');
+    const actorId = normalizeMessagingIdentifier(actor.userId || actor.username || actor.email);
+    if (roles.length && current.recipientId && normalizeMessagingIdentifier(current.recipientId) !== actorId) throw new Error('Message access denied');
+    const allowedUpdates = roles.length ? { unread: updates.unread === false ? false : current.unread, readAt: updates.unread === false ? new Date().toISOString() : current.readAt } : updates;
+    return firebaseCore.saveById('messages', `${schoolId}:${messageId}`, { ...current, ...allowedUpdates, id: messageId });
+  }
+
   if (prisma && prisma.__stub) {
     const schools = loadSchoolData();
     const school = findSchoolBySchoolId(schools, schoolId);
@@ -3115,6 +3528,17 @@ async function updateWorkspaceMessage(schoolId, messageId, updates = {}, actor =
 }
 
 async function deleteWorkspaceMessage(schoolId, messageId, actor = {}) {
+  if (firebaseCore.isFirebaseCoreMode()) {
+    const roles = getMessagingRoles(actor);
+    if (roles.length && !isTenantMatch(actor, schoolId)) throw new Error('School access denied');
+    const current = await firebaseCore.getById('messages', `${schoolId}:${messageId}`);
+    if (!current || current.schoolId !== schoolId) throw new Error('Message not found');
+    const actorId = normalizeMessagingIdentifier(actor.userId || actor.username || actor.email);
+    if (roles.length && current.recipientId && ![current.recipientId, current.senderId].map(normalizeMessagingIdentifier).includes(actorId)) throw new Error('Message access denied');
+    await firebaseCore.deleteById('messages', `${schoolId}:${messageId}`);
+    return current;
+  }
+
   if (prisma && prisma.__stub) {
     const schools = loadSchoolData();
     const school = findSchoolBySchoolId(schools, schoolId);
@@ -3135,6 +3559,38 @@ async function deleteWorkspaceMessage(schoolId, messageId, actor = {}) {
 }
 
 async function listWorkspaceMessages(schoolId, query = {}, actor = {}) {
+  if (firebaseCore.isFirebaseCoreMode()) {
+    const school = await firebaseCore.getSchoolAggregate(schoolId);
+    if (!school) throw new Error('School not found');
+    if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
+    ensureSchoolEntities(school);
+    const messages = await firebaseCore.listBySchool('messages', schoolId);
+    const folder = query.folder || '';
+    const actorId = normalizeMessagingIdentifier(actor.userId || actor.username || actor.email);
+    const roles = getMessagingRoles(actor);
+    const actorRecord = getMessagingActor(school, actor) || {};
+    const actorRole = String(actorRecord.role || roles[0] || '').toLowerCase();
+    const legacyInboxVisible = (item) => {
+      const target = String(item.recipientType || item.audience || item.recipient || 'all').trim().toLowerCase();
+      return ['all', 'everyone', actorRole, `${actorRole}s`].includes(target);
+    };
+    let items = messages.filter((item) => !roles.length
+      || (item.recipientId
+        ? [item.recipientId, item.senderId].map(normalizeMessagingIdentifier).includes(actorId)
+        : legacyInboxVisible(item)));
+    if (folder) {
+      const normalizedFolder = String(folder).toLowerCase();
+      items = items.filter((item) => item.recipientId && roles.length
+        ? (normalizedFolder === 'sent' ? normalizeMessagingIdentifier(item.senderId) === actorId : normalizeMessagingIdentifier(item.recipientId) === actorId)
+        : normalizedFolder === 'sent' ? (!roles.length && String(item.folder || '').toLowerCase() === normalizedFolder) : String(item.folder || '').toLowerCase() === normalizedFolder);
+    }
+    if (query.search) {
+      const term = String(query.search).trim().toLowerCase();
+      items = items.filter((item) => `${item.subject || ''} ${item.body || ''} ${item.from || ''} ${item.to || ''}`.toLowerCase().includes(term));
+    }
+    return { schoolId, items, total: items.length };
+  }
+
   if (prisma && prisma.__stub) {
     const schools = loadSchoolData();
     const school = findSchoolBySchoolId(schools, schoolId);
@@ -3239,13 +3695,14 @@ async function getDashboardSummary(schoolId) {
     const tenant = await firebaseCore.getSchoolAggregate(schoolId);
     if (!tenant) throw new Error('School not found');
     const users = Array.isArray(tenant.users) ? tenant.users : [];
-    const teacherUsers = users.filter((user) => String(user.role || user.roles?.[0] || '').toLowerCase() === 'teacher');
-    const studentUsers = users.filter((user) => String(user.role || user.roles?.[0] || '').toLowerCase() === 'student');
+    const teacherUsers = getSchoolRoleRecords(tenant, 'teacher');
+    const studentUsers = getSchoolRoleRecords(tenant, 'student');
     const totalUsers = users.length;
     const tenantId = tenant.id;
     const teacherCounts = teacherUsers.reduce(
       (acc, user) => {
         const status = String(user.status || 'active').toLowerCase();
+        if (status === 'archived') return acc;
         const leaveStatus = String(user.metadata?.leaveStatus || '').toLowerCase();
         acc.total += 1;
         if (leaveStatus === 'on leave' || leaveStatus === 'sick leave' || leaveStatus === 'annual leave' || leaveStatus === 'emergency leave' || leaveStatus === 'study leave') {
@@ -3306,7 +3763,7 @@ async function getDashboardSummary(schoolId) {
       teacherDepartmentCount: teacherDepartments.size,
       teacherAssignedClassesCount: assignedClassSet.size,
       teacherAssignedSubjectsCount: assignedSubjectSet.size,
-      studentCount: studentUsers.length,
+      studentCount: countSchoolUsers(tenant, 'student'),
       activeStudents: statusCounts.active,
       graduatedStudents: statusCounts.graduated,
       transferredStudents: statusCounts.transferred,

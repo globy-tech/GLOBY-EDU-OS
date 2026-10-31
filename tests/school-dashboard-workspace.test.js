@@ -30,11 +30,40 @@ describe('school authority workspace', () => {
     expect(dashboardSource).toContain('Add Teacher');
   });
 
+  it('reserves attendance submission for teachers, not School Authority', () => {
+    const roleDashboardSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'role-dashboards.js'), 'utf8');
+    const schoolAttendanceModule = roleDashboardSource.match(/function renderAttendanceModule\(\) \{[\s\S]*?\n\}/)?.[0] || '';
+
+    expect(schoolAttendanceModule).toContain('Attendance records are submitted by authorized teachers');
+    expect(schoolAttendanceModule).not.toContain('data-school-section-action="record-attendance"');
+    expect(roleDashboardSource).toContain('data-teacher-action="record-attendance"');
+  });
+
+  it('routes both quick and finance payment actions through the validated fee endpoint', () => {
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
+
+    expect(mainSource).not.toContain("appendSchoolCollectionData(token, schoolId, 'payments'");
+    expect(mainSource.match(/createFeePayment\(token, schoolId/g)).toHaveLength(3);
+    expect(mainSource).toContain("{ name: 'reference', label: 'External reference (optional)' }");
+    expect(mainSource).toContain("{ name: 'studentId', label: 'Student', type: 'select', options: studentOptions, required: true }");
+  });
+
+  it('keeps school dashboard content usable on phones and tablets', () => {
+    const dashboardSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js'), 'utf8');
+    const styles = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'styles.css'), 'utf8');
+
+    expect(dashboardSource).toContain('max-w-7xl px-0 py-4 sm:px-2 sm:py-6 lg:px-8 lg:py-8');
+    expect(dashboardSource).toContain('sm:grid-cols-2 lg:gap-6 lg:grid-cols-4');
+    expect(dashboardSource).toContain('min-w-3xl');
+    expect(dashboardSource).toContain('aria-label="Student directory table" tabindex="0"');
+    expect(dashboardSource).toContain('aria-label="Teacher directory table" tabindex="0"');
+    expect(styles).toMatch(/\[data-school-student-action\],[\s\n]*\[data-school-teacher-action\]\s*\{[^}]*min-height:\s*44px;/);
+  });
+
   it('routes school-authority messages navigation to the canonical workspace section', () => {
     const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
 
-    expect(mainSource).toContain("if (id === 'messages') {");
-    expect(mainSource).toContain("location.hash = '#/school/messages';");
+    expect(mainSource).toContain("{ id: 'messages', label: 'Messaging', path: '#/school/messages'");
   });
 
   it('preserves the selected school-authority section when refreshing summary state', () => {
@@ -59,8 +88,7 @@ describe('school authority workspace', () => {
     const actionsSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'utils', 'school-dashboard-actions.cjs'), 'utf8');
 
     expect(mainSource).not.toContain('National ID / Passport');
-    expect(mainSource).toContain("id === 'classes'");
-    expect(mainSource).toContain("location.hash = '#/school/classes'");
+    expect(mainSource).toContain("{ id: 'classes', label: 'Class Management', path: '#/school/classes'");
     expect(mainSource).toContain('RME');
     expect(mainSource).toContain("{ label: 'Nursery 1', value: 'Nursery 1' }");
     expect(mainSource).toContain('[1, 2, 3, 4, 5, 6].map');

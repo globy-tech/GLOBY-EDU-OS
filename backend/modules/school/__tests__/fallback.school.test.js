@@ -478,11 +478,20 @@ test('Firebase student photo updates persist to Firestore student and user recor
 
   const updated = await schoolService.updateEntity('school-live', 'students', 'STD-1', {
     profilePhoto: 'https://images.example.test/student.png',
+    profilePhotoPath: 'schools/school-live/students/STD-1/profile.png',
   }, { roles: ['school_authority'] });
 
   expect(updated.profilePhoto).toBe('https://images.example.test/student.png');
-  expect(saveById).toHaveBeenCalledWith('students', 'school-live:STD-1', expect.objectContaining({ profilePhoto: updated.profilePhoto }), true);
-  expect(saveById).toHaveBeenCalledWith('users', 'school-live:student@live.test', expect.objectContaining({ profilePhoto: updated.profilePhoto }), true);
+  expect(updated.profilePhotoPath).toBe('schools/school-live/students/STD-1/profile.png');
+  expect(saveById).toHaveBeenCalledWith('students', 'school-live:STD-1', expect.objectContaining({
+    profilePhoto: updated.profilePhoto,
+    profilePhotoPath: updated.profilePhotoPath,
+  }), true);
+  expect(saveById).toHaveBeenCalledWith('users', 'school-live:student@live.test', expect.objectContaining({
+    profilePhoto: updated.profilePhoto,
+    profilePhotoPath: updated.profilePhotoPath,
+    metadata: expect.objectContaining({ profilePhotoPath: updated.profilePhotoPath }),
+  }), true);
 });
 
 test('createSchool assigns a normalized, collision-safe subdomain and persists it', async () => {

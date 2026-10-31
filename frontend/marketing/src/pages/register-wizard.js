@@ -2,6 +2,7 @@
 // Enterprise-grade multi-step registration wizard for creating a school tenant.
 
 import { register as apiRegister } from '../api/auth.js';
+import { validateImageUpload } from '../utils/file-upload-validation.js';
 
 const COUNTRY_OPTIONS = [
   'Ghana', 'Nigeria', 'Kenya', 'Uganda', 'South Africa', 'United Kingdom', 'United States', 'Canada', 'India', 'Australia', 'Rwanda', 'Tanzania', 'Zambia', 'Egypt', 'Morocco',
@@ -153,7 +154,7 @@ export function RegisterWizardPage() {
                   <button type="button" id="logo-skip" class="rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50">Skip</button>
                 </div>
                 <div id="logo-preview" class="mt-5 flex justify-center"></div>
-                <p id="logo-message" class="mt-4 text-sm text-slate-500">Recommended: PNG or JPG up to 2MB.</p>
+                <p id="logo-message" class="mt-4 text-sm text-slate-500">Recommended: PNG or JPG.</p>
               </div>
               <div class="mt-4 grid gap-4 lg:grid-cols-2">
                 <label class="block text-sm text-slate-700">Academic Calendar<input id="academic-calendar" class="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100" placeholder="e.g. Term dates, semester system" /></label>
@@ -233,14 +234,22 @@ export function attachRegisterWizardHandlers() {
   let current = 0;
   let logoDataUrl = '';
 
-  async function uploadSchoolBrandAsset(file) {
+  async function uploadSchoolBrandAsset(file, schoolId) {
+    const validationError = validateImageUpload(file);
+    if (validationError) throw new Error(validationError);
     const token = localStorage.getItem('globyedu_accessToken');
-    if (!token) return '';
+    if (!token) throw new Error('Your session has expired. Please sign in again.');
 
     const safeName = String(file.name || 'school-logo.png').replace(/\\/g, '/').split('/').pop().replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'school-logo.png';
     const storagePath = `school-branding/${Date.now()}-${safeName}`;
 
-    const uploadResponse = await fetch(`/api/v1/files/upload?filename=${encodeURIComponent(storagePath)}`, {
+    const uploadQuery = new URLSearchParams({
+      filename: storagePath,
+      ownerType: 'school',
+      ownerId: schoolId || '',
+      ownerField: 'logoPath',
+    });
+    const uploadResponse = await fetch(`/api/v1/files/upload?${uploadQuery.toString()}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -253,6 +262,7 @@ export function attachRegisterWizardHandlers() {
     if (!uploadResponse.ok || uploadData?.status !== 'ok') {
       throw new Error(uploadData?.message || 'Unable to upload the school logo to cloud storage.');
     }
+    if (!uploadData.path) throw new Error('The uploaded school logo path could not be saved.');
 
     const signedUrlResponse = await fetch(`/api/v1/files/${encodeURIComponent(storagePath)}?expiresIn=86400`, {
       method: 'GET',
@@ -264,7 +274,7 @@ export function attachRegisterWizardHandlers() {
       throw new Error(signedUrlData?.message || 'The uploaded school logo could not be published.');
     }
 
-    return signedUrlData.url;
+    return { url: signedUrlData.url, path: uploadData.path };
   }
 
   function renderProgress(index = 0) {
@@ -288,7 +298,7 @@ export function attachRegisterWizardHandlers() {
           <div><p class="text-xs uppercase tracking-[0.3em] text-slate-500">School</p><p class="mt-2 font-semibold text-slate-900">${values.schoolName || '—'}</p><p class="mt-1 text-slate-600">${values.schoolType || '—'} • ${values.country || '—'}</p></div>
           <div><p class="text-xs uppercase tracking-[0.3em] text-slate-500">Authority</p><p class="mt-2 font-semibold text-slate-900">${values.head.fullName || '—'}</p><p class="mt-1 text-slate-600">${values.head.email || '—'}</p></div>
           <div><p class="text-xs uppercase tracking-[0.3em] text-slate-500">Location</p><p class="mt-2 font-semibold text-slate-900">${values.city || '—'}, ${values.state || '—'}</p><p class="mt-1 text-slate-600">${values.address || '—'}</p></div>
-          <div><p class="text-xs uppercase tracking-[0.3em] text-slate-500">Trial</p><p class="mt-2 font-semibold text-slate-900">5-Day Trial</p><p class="mt-1 text-slate-600">Your tenant will be activated immediately.</p></div>
+          <div><p class="text-xs uppercase tracking-[0.3em] text-slate-500">Trial</p><p class="mt-2 font-semibold text-slate-900">14-Day Trial</p><p class="mt-1 text-slate-600">Your tenant will be activated immediately.</p></div>
         </div>`;
     }
   }
@@ -355,8 +365,9 @@ export function attachRegisterWizardHandlers() {
       logoMessage.textContent = 'A polished placeholder logo will be used if you skip uploads.';
       return;
     }
-    if (file.size > 2 * 1024 * 1024) {
-      logoMessage.innerHTML = '<span class="text-rose-600">Image is too large. Please choose a file smaller than 2MB.</span>';
+    const validationError = validateImageUpload(file);
+    if (validationError) {
+      logoMessage.innerHTML = `<span class="text-rose-600">${validationError}</span>`;
       return;
     }
 
@@ -503,20 +514,20 @@ export function attachRegisterWizardHandlers() {
       localStorage.setItem('globyedu_schoolId', result.data.schoolId || '');
       localStorage.setItem('globyedu_schoolName', values.schoolName);
       localStorage.setItem('globyedu_trialEnds', result.data.trialEndsAt || '');
-      localStorage.setItem('globyedu_trialStatus', result.data.trialStatus || '5-Day Trial');
+      localStorage.setItem('globyedu_trialStatus', result.data.trialStatus || '14-Day Trial');
       localStorage.setItem('globyedu_accountStatus', result.data.accountStatus || 'trial');
       sessionStorage.setItem('globyedu_sessionActive', 'true');
       let logoUploadWarning = '';
       if (selectedLogoFile) {
         try {
-          const uploadedLogoUrl = await uploadSchoolBrandAsset(selectedLogoFile);
+          const uploadedLogo = await uploadSchoolBrandAsset(selectedLogoFile, result.data.schoolId);
           const logoResponse = await fetch(`/api/v1/schools/${encodeURIComponent(result.data.schoolId || '')}`, {
             method: 'PUT',
             headers: {
               Authorization: `Bearer ${result.data.accessToken || ''}`,
               'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ logo: uploadedLogoUrl }),
+            body: JSON.stringify({ logo: uploadedLogo.url, logoPath: uploadedLogo.path }),
           });
           const logoData = await logoResponse.json().catch(() => null);
           if (!logoResponse.ok || logoData?.status !== 'ok') throw new Error(logoData?.message || 'Unable to save the school logo.');
@@ -528,11 +539,11 @@ export function attachRegisterWizardHandlers() {
         <div class="w-full max-w-lg rounded-[2rem] border border-white/10 bg-white p-8 text-center shadow-2xl">
           <div class="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-emerald-100 text-3xl">✓</div>
           <h3 class="mt-6 text-2xl font-semibold text-slate-900">Welcome to GlobyEdu</h3>
-          <p class="mt-2 text-sm text-slate-600">Your school has been created successfully. A 5-day trial is now active.</p>
+          <p class="mt-2 text-sm text-slate-600">Your school has been created successfully. A 14-day trial is now active.</p>
           <div class="mt-6 rounded-2xl bg-slate-50 p-4 text-left text-sm text-slate-700">
             <p><span class="font-semibold">School:</span> ${values.schoolName}</p>
             <p class="mt-2"><span class="font-semibold">School ID:</span> ${result.data.schoolId || 'GLB-2026-00001'}</p>
-            <p class="mt-2"><span class="font-semibold">Trial expiry:</span> ${result.data.trialEndsAt ? new Date(result.data.trialEndsAt).toLocaleDateString() : '5 days from now'}</p>
+            <p class="mt-2"><span class="font-semibold">Trial expiry:</span> ${result.data.trialEndsAt ? new Date(result.data.trialEndsAt).toLocaleDateString() : '14 days from now'}</p>
           </div>
           <p class="mt-6 text-sm text-slate-500">Taking you to your dashboard now.</p>
           ${logoUploadWarning ? `<p class="mt-3 text-sm text-amber-700">${logoUploadWarning}</p>` : ''}

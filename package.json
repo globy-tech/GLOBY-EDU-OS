@@ -10,6 +10,8 @@
   ],
   "scripts": {
     "start": "node backend/server.js",
+    "qa:provision": "node scripts/provision-local-qa.js",
+    "qa:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-local-qa.ps1",
     "build": "node scripts/build-production.js",
     "bootstrap:super-admin": "node backend/scripts/bootstrap-super-admin.js",
     "recover:orphaned-super-admin": "node backend/scripts/recover-orphaned-super-admin.js",

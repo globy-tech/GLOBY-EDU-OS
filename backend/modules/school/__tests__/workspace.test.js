@@ -131,15 +131,16 @@ describe('workspace messaging and support', () => {
     school.attendanceRecords = [
       { date: today, status: 'present', studentName: 'Student 1' },
       { date: today, status: 'present', studentName: 'Student 2' },
+      { date: today, status: 'late', studentName: 'Student 3' },
+      { date: today, status: 'excused', studentName: 'Student 4' },
       { date: yesterday, status: 'absent', studentName: 'Student 3' },
     ];
     global.__workspaceSnapshot = snapshot;
 
     const result = await schoolService.getDashboardSummary(schoolId);
 
-    expect(result.attendanceSummary.counts.present).toBe(2);
-    expect(result.attendanceSummary.counts.absent).toBe(0);
-    expect(result.attendanceSummary.attendanceToday).toBe('100%');
+    expect(result.attendanceSummary.counts).toEqual({ present: 3, absent: 1 });
+    expect(result.attendanceSummary.attendanceToday).toBe('75%');
   });
 
   it('persists class relationships, teacher assignment, and suspension state in the tenant snapshot', async () => {
@@ -243,7 +244,7 @@ describe('workspace messaging and support', () => {
     school.teachers = [{ teacherId: 'T001', username: 'T001', fullName: 'Test Teacher', className: 'JHS 3' }];
     school.classes = [{ classId: 'JHS-3A', name: 'JHS 3A', grade: 'JHS 3', teacher: 'T001', status: 'active' }];
     school.students = [{ studentId: 'STU001', fullName: 'Assigned Student', className: 'JHS 3' }, { studentId: 'STU002', fullName: 'Other Student', className: 'JHS 2' }];
-    school.attendanceRecords = [{ date: '2026-09-05', className: 'JHS 2', studentId: 'STU002', status: 'absent' }];
+    school.attendanceRecords = [{ date: '2026-09-05', className: 'JHS 2', studentId: 'STU002', status: 'excused' }];
     school.examResults = [{ studentId: 'STU002', student: 'Other Student', className: 'JHS 2', subject: 'Math', exam: 'Quiz 1', mark: 2, maxMarks: 10 }];
     global.__workspaceSnapshot = snapshot;
 
@@ -258,11 +259,19 @@ describe('workspace messaging and support', () => {
       examResults: [{ studentId: 'STU001', student: 'Assigned Student', className: 'JHS 3', subject: 'Math', exam: 'Quiz 1', mark: 9, maxMarks: 10 }],
     });
     schoolService.updateTeacherWorkspace(first, user, {
+      attendanceRecords: [
+        { date: '2026-09-06', className: 'JHS 3', studentId: 'STU001', studentName: 'Assigned Student', status: 'absent' },
+        { date: '2026-09-07', className: 'JHS 3', studentId: 'STU001', studentName: 'Assigned Student', status: 'unknown' },
+        { date: 'not-a-date', className: 'JHS 3', studentId: 'STU001', studentName: 'Assigned Student', status: 'present' },
+      ],
+    });
+    schoolService.updateTeacherWorkspace(first, user, {
       attendanceRecords: [{ date: '2026-09-05', className: 'JHS 2', studentId: 'STU002', studentName: 'Other Student', status: 'present' }],
     });
 
-    expect(first.attendanceRecords).toHaveLength(2);
-    expect(first.attendanceRecords.find((entry) => entry.studentId === 'STU001').status).toBe('late');
+    expect(first.attendanceRecords).toHaveLength(3);
+    expect(first.attendanceRecords.find((entry) => entry.studentId === 'STU001' && entry.date === '2026-09-05').status).toBe('present');
+    expect(first.attendanceRecords.find((entry) => entry.studentId === 'STU001' && entry.date === '2026-09-06').status).toBe('absent');
     expect(first.attendanceRecords.find((entry) => entry.studentId === 'STU002').status).toBe('absent');
     expect(first.examResults).toHaveLength(2);
     expect(first.examResults.find((entry) => entry.studentId === 'STU001').mark).toBe(9);

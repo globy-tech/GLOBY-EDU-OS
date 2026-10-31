@@ -2,6 +2,12 @@
 // Lightweight frontend API wrapper for auth endpoints.
 // This file performs client-side requests to the backend auth routes.
 
+function dispatchMaintenanceMode(response, data) {
+  if (response.status === 503 && data?.code === 'MAINTENANCE_MODE' && typeof document !== 'undefined') {
+    document.dispatchEvent(new CustomEvent('globyedu-maintenance-mode', { detail: data }));
+  }
+}
+
 async function postJson(url, body) {
   const res = await fetch(url, {
     method: 'POST',
@@ -10,6 +16,7 @@ async function postJson(url, body) {
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => null);
+  dispatchMaintenanceMode(res, data);
   return { ok: res.ok, status: res.status, data };
 }
 
@@ -18,6 +25,7 @@ async function getJson(url, token) {
   if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(url, { method: 'GET', headers, credentials: 'include' });
   const data = await res.json().catch(() => null);
+  dispatchMaintenanceMode(res, data);
   return { ok: res.ok, status: res.status, data };
 }
 
@@ -101,6 +109,7 @@ async function postJsonWithToken(url, body, token) {
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => null);
+  dispatchMaintenanceMode(res, data);
   return { ok: res.ok, status: res.status, data };
 }
 

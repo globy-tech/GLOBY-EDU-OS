@@ -44,10 +44,26 @@ function isR2PublicUrlConfigured() {
   }
 }
 
-function isR2Configured() {
+function getR2ConfigurationStatus() {
   const { accountId, endpoint, accessKeyId, secretAccessKey, bucket } = getR2Config();
-  const endpointMatchesAccount = !accountId || endpoint === `https://${accountId}.r2.cloudflarestorage.com`;
-  return Boolean(accountId && endpointMatchesAccount && accessKeyId && secretAccessKey && bucket);
+  const missingVariables = [];
+  if (!accountId) missingVariables.push('CLOUDFLARE_R2_ACCOUNT_ID');
+  if (!endpoint) missingVariables.push('CLOUDFLARE_R2_ENDPOINT');
+  if (!accessKeyId) missingVariables.push('CLOUDFLARE_R2_ACCESS_KEY_ID');
+  if (!secretAccessKey) missingVariables.push('CLOUDFLARE_R2_SECRET_ACCESS_KEY');
+  if (!bucket) missingVariables.push('CLOUDFLARE_R2_BUCKET');
+
+  const endpointMatchesAccount = !accountId || !endpoint || endpoint === `https://${accountId}.r2.cloudflarestorage.com`;
+  const invalidVariables = endpointMatchesAccount ? [] : ['CLOUDFLARE_R2_ENDPOINT'];
+  return {
+    configured: missingVariables.length === 0 && invalidVariables.length === 0,
+    missingVariables,
+    invalidVariables,
+  };
+}
+
+function isR2Configured() {
+  return getR2ConfigurationStatus().configured;
 }
 
 function getSchoolFilePublicUrl(filePath) {
@@ -105,6 +121,7 @@ async function uploadSchoolFile(filePath, file, options = {}) {
       Key: filePath,
       Body: file,
       ContentType: options.contentType || 'application/octet-stream',
+      ...(options.upsert === true ? {} : { IfNoneMatch: '*' }),
     }));
     return filePath;
   }
@@ -165,6 +182,7 @@ module.exports = {
   getSupabaseClient,
   getR2Client,
   isR2Configured,
+  getR2ConfigurationStatus,
   isR2PublicUrlConfigured,
   getSchoolFilePublicUrl,
   getR2Config,

@@ -32,7 +32,7 @@ export function Hero(cms = {}) {
             <button data-action="request-demo" class="btn btn-secondary">Book a demo</button>
           </div>
 
-          <div class="mt-8 flex gap-6 text-sm text-muted">
+          <div class="mt-8 flex flex-wrap gap-x-4 gap-y-3 text-sm text-muted">
             ${values.map((v) => `<div class="flex items-center gap-3"><svg class="icon" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#10B981" stroke-width="1.6"></circle></svg><span>${v}</span></div>`).join('')}
           </div>
         </div>
