@@ -217,6 +217,10 @@ describe('Super Admin school archive service', () => {
         { studentId: 'STU-A', subject: 'Math', mark: 95 },
         { studentId: 'STU-B', subject: 'Math', mark: 60 },
       ],
+      examRecords: [
+        { id: 'exam-a', studentId: 'STU-A', className: 'Class A', subject: 'Math' },
+        { id: 'exam-b', studentId: 'STU-B', className: 'Class B', subject: 'Math' },
+      ],
     };
 
     const studentView = schoolService.getStudentSchoolView(school, {
@@ -229,6 +233,7 @@ describe('Super Admin school archive service', () => {
     expect(studentView.student.studentId).toBe('STU-A');
     expect(studentView.attendanceRecords).toEqual([school.attendanceRecords[0]]);
     expect(studentView.examResults).toEqual([school.examResults[0]]);
+    expect(studentView.examRecords).toEqual([school.examRecords[0]]);
   });
 
   it('removes signed file URLs from school and profile responses while preserving paths and public URLs', () => {
@@ -365,6 +370,148 @@ describe('Super Admin school archive service', () => {
     expect(bothClassesView.examResults).toEqual([
       { id: 'result-a', studentId: 'STU-A', className: 'Class A', subject: 'Math', mark: 95 },
     ]);
+  });
+
+  it('limits teacher exam records to assigned classes and subjects in dashboard and entity-list APIs', async () => {
+    const school = {
+      ...createSchool(),
+      teachers: [{
+        teacherId: 'T-A',
+        username: 'T-A',
+        fullName: 'Teacher Alpha',
+        assignedClasses: ['class-a'],
+        assignedSubjects: ['Math'],
+      }],
+      classes: [
+        { classId: 'class-a', name: 'Class A', teacherId: 'T-A' },
+        { classId: 'class-b', name: 'Class B', teacherId: 'T-B' },
+      ],
+      examRecords: [
+        { id: 'exam-authorized', classId: 'class-a', className: 'Class A', subject: 'Math', teacherId: 'T-A' },
+        { id: 'exam-without-owner', classId: 'class-a', className: 'Class A', subject: 'Math' },
+        { id: 'exam-other-teacher', classId: 'class-a', className: 'Class A', subject: 'Math', teacherId: 'T-B' },
+        { id: 'exam-unassigned-class', classId: 'class-b', className: 'Class B', subject: 'Math', teacherId: 'T-A' },
+        { id: 'exam-unassigned-subject', classId: 'class-a', className: 'Class A', subject: 'Science', teacherId: 'T-A' },
+        { id: 'exam-missing-class', subject: 'Math', teacherId: 'T-A' },
+      ],
+    };
+    global.__workspaceSnapshot = [school];
+    const teacher = { userId: `${SCHOOL_ID}:T-A`, schoolId: SCHOOL_ID, roles: ['teacher'] };
+    const teacherView = schoolService.getTeacherSchoolView(school, teacher);
+
+    expect(teacherView.examRecords.map((record) => record.id)).toEqual([
+      'exam-authorized',
+      'exam-without-owner',
+    ]);
+    expect((await schoolService.getEntities(SCHOOL_ID, 'examRecords', {}, teacher)).items)
+      .toEqual(teacherView.examRecords);
+    expect((await schoolService.getEntities(SCHOOL_ID, 'examRecords', {}, {
+      ...teacher,
+      schoolId: 'another-school',
+      tenantId: 'another-school',
+    })).items).toEqual([]);
+    expect((await schoolService.getEntities(SCHOOL_ID, 'examRecords', {}, {
+      roles: ['school_authority'],
+      schoolId: SCHOOL_ID,
+    })).items).toEqual(school.examRecords);
+    expect((await schoolService.getEntities(SCHOOL_ID, 'examRecords', {}, {
+      roles: ['super_admin'],
+    })).items).toEqual(school.examRecords);
+  });
+
+  it('persists stable profile-photo paths instead of signed URLs', async () => {
+    const signedUrl = 'https://files.example.test/student.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=temporary';
+    const updatedProfilePath = 'student-profile/current.png';
+    const school = {
+      schoolId: SCHOOL_ID,
+      students: [{
+        studentId: 'STU-A',
+        email: 'student-a@example.test',
+        profilePhoto: signedUrl,
+        profilePhotoPath: 'student-profile/old.png',
+        metadata: { profilePhoto: signedUrl, profilePhotoPath: 'student-profile/old.png' },
+      }],
+      teachers: [],
+      classes: [],
+      users: [],
+    };
+    jest.spyOn(firebaseCore, 'isFirebaseCoreMode').mockReturnValue(true);
+    jest.spyOn(firebaseCore, 'getSchoolAggregate').mockResolvedValue(school);
+    const saveById = jest.spyOn(firebaseCore, 'saveById').mockResolvedValue({});
+
+    const updated = await schoolService.updateEntity(SCHOOL_ID, 'students', 'STU-A', {
+      profilePhoto: signedUrl,
+      profilePhotoPath: updatedProfilePath,
+    }, { roles: ['school_authority'] });
+
+    expect(updated.profilePhoto).toBeNull();
+    expect(updated.profilePhotoPath).toBe(updatedProfilePath);
+    expect(updated.metadata.profilePhoto).toBeNull();
+    expect(updated.metadata.profilePhotoPath).toBe(updatedProfilePath);
+    expect(saveById).toHaveBeenCalledWith('students', `${SCHOOL_ID}:STU-A`, expect.objectContaining({
+      profilePhoto: null,
+      profilePhotoPath: updatedProfilePath,
+      metadata: expect.objectContaining({
+        profilePhoto: null,
+        profilePhotoPath: updatedProfilePath,
+      }),
+    }), true);
+    expect(saveById).toHaveBeenCalledWith('users', `${SCHOOL_ID}:student-a@example.test`, expect.objectContaining({
+      profilePhoto: null,
+      profilePhotoPath: updatedProfilePath,
+      metadata: expect.objectContaining({
+        profilePhoto: null,
+        profilePhotoPath: updatedProfilePath,
+      }),
+    }), true);
+  });
+
+  it('keeps fallback profile-photo references stable on update and teacher workspace save', async () => {
+    const signedUrl = 'https://files.example.test/profile.png?X-Amz-Signature=temporary';
+    const profilePath = 'student-profile/stable.png';
+    const school = {
+      ...createSchool(),
+      teachers: [{
+        teacherId: 'T-A',
+        username: 'T-A',
+        assignedClasses: ['class-a'],
+        assignedSubjects: ['Math'],
+        profilePhoto: signedUrl,
+        profilePhotoPath: 'teacher-profile/old.png',
+      }],
+      students: [{
+        studentId: 'STU-A',
+        email: 'student-a@example.test',
+        profilePhoto: signedUrl,
+        profilePhotoPath: 'student-profile/old.png',
+      }],
+      classes: [{ classId: 'class-a', name: 'Class A', teacherId: 'T-A' }],
+    };
+    global.__workspaceSnapshot = [school];
+
+    await schoolService.updateEntity(SCHOOL_ID, 'students', 'STU-A', {
+      profilePhoto: signedUrl,
+      profilePhotoPath: profilePath,
+    }, { roles: ['school_authority'] });
+    const updatedSchool = schoolService.updateTeacherWorkspace(school, {
+      userId: `${SCHOOL_ID}:T-A`,
+      roles: ['teacher'],
+    }, {
+      teacherProfile: {
+        profilePhoto: signedUrl,
+        profilePhotoPath: 'teacher-profile/stable.png',
+      },
+    });
+
+    expect(updatedSchool.students[0]).toMatchObject({
+      profilePhoto: null,
+      profilePhotoPath: profilePath,
+    });
+    expect(updatedSchool.teachers[0]).toMatchObject({
+      profilePhoto: null,
+      profilePhotoPath: 'teacher-profile/stable.png',
+    });
+    expect(updatedSchool.users).toEqual(createSchool().users);
   });
 
   it('rejects exam results that pair an assigned student with another assigned class without changing existing results', () => {

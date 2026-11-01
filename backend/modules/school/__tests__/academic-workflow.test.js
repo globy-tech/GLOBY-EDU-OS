@@ -1,6 +1,10 @@
 const schoolService = require('../school.service');
 const { ensureDemoSchool, loadSchoolData, saveSchoolData } = require('../fallback.school');
 
+function getFutureDueDate() {
+  return new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+}
+
 describe('academic workflow', () => {
   const schoolId = 'globy-school';
 
@@ -27,7 +31,7 @@ describe('academic workflow', () => {
       description: 'Solve the first five algebra questions.',
       classId: 'JHS-3A',
       subject: 'Mathematics',
-      dueDate: '2026-09-20T17:00:00.000Z',
+      dueDate: getFutureDueDate(),
       teacherId: 'T001',
       createdBy: 'T001',
     }, teacher);
@@ -44,7 +48,7 @@ describe('academic workflow', () => {
       description: 'This should fail.',
       classId: 'JHS-3A',
       subject: 'Mathematics',
-      dueDate: '2026-09-20T17:00:00.000Z',
+      dueDate: getFutureDueDate(),
       teacherId: 'T999',
       createdBy: 'T999',
     }, teacher)).rejects.toThrow('not authorized');
@@ -89,7 +93,7 @@ describe('academic workflow', () => {
       description: 'Read chapters 1-3.',
       classId: 'JHS-3A',
       subject: 'History',
-      dueDate: '2026-09-20T17:00:00.000Z',
+      dueDate: getFutureDueDate(),
       status: 'assigned',
       teacherId: 'T001',
       createdBy: 'T001',
@@ -120,7 +124,7 @@ describe('academic workflow', () => {
       description: 'Do this.',
       classId: 'JHS-3A',
       subject: 'Science',
-      dueDate: '2026-09-20T17:00:00.000Z',
+      dueDate: getFutureDueDate(),
       teacherId: 'T001',
       createdBy: 'T001',
       submissions: [],

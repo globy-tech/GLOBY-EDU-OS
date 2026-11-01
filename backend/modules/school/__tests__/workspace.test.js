@@ -73,18 +73,21 @@ describe('workspace messaging and support', () => {
       { teacherId: 'T-002', fullName: 'Teacher 2', status: 'active' },
     ];
     school.classes = [{ classId: 'class-1', name: 'JHS 1', status: 'active' }, { classId: 'class-2', name: 'JHS 2', status: 'active' }];
+    const today = new Date();
+    const todayDate = today.toISOString().slice(0, 10);
+    const upcomingEventDate = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     school.attendanceRecords = [
-      { date: '2026-08-23', status: 'present', studentName: 'Student 1' },
-      { date: '2026-08-23', status: 'present', studentName: 'Student 2' },
-      { date: '2026-08-23', status: 'absent', studentName: 'Student 3' },
+      { date: todayDate, status: 'present', studentName: 'Student 1' },
+      { date: todayDate, status: 'present', studentName: 'Student 2' },
+      { date: todayDate, status: 'absent', studentName: 'Student 3' },
     ];
     school.payments = [
-      { amount: 1500, status: 'received', createdAt: '2026-08-23T09:00:00.000Z' },
-      { amount: 2500, status: 'received', createdAt: '2026-08-23T10:00:00.000Z' },
-      { amount: 1000, status: 'pending', createdAt: '2026-08-23T11:00:00.000Z' },
+      { amount: 1500, status: 'received', createdAt: today.toISOString() },
+      { amount: 2500, status: 'received', createdAt: today.toISOString() },
+      { amount: 1000, status: 'pending', createdAt: today.toISOString() },
     ];
     school.recentActivities = [{ title: 'Student created', detail: 'Student 1 added.' }];
-    school.events = [{ title: 'Open Day', detail: 'Parents invited.', date: '2026-08-30' }];
+    school.events = [{ title: 'Open Day', detail: 'Parents invited.', date: upcomingEventDate }];
     school.announcements = [{ title: 'Welcome', detail: 'School reopened.' }];
     global.__workspaceSnapshot = snapshot;
 
@@ -270,7 +273,7 @@ describe('workspace messaging and support', () => {
     });
 
     expect(first.attendanceRecords).toHaveLength(3);
-    expect(first.attendanceRecords.find((entry) => entry.studentId === 'STU001' && entry.date === '2026-09-05').status).toBe('present');
+    expect(first.attendanceRecords.find((entry) => entry.studentId === 'STU001' && entry.date === '2026-09-05').status).toBe('late');
     expect(first.attendanceRecords.find((entry) => entry.studentId === 'STU001' && entry.date === '2026-09-06').status).toBe('absent');
     expect(first.attendanceRecords.find((entry) => entry.studentId === 'STU002').status).toBe('absent');
     expect(first.examResults).toHaveLength(2);

@@ -518,7 +518,7 @@ test('hostname resolution resolves the tenant from a valid subdomain and rejects
   expect(resolveTenantFromHostname('globyedu.com', schools)).toBeNull();
 });
 
-test('new schools receive a 5-day free trial and persist the trial expiry date', async () => {
+test('new schools receive a 14-day free trial and persist the trial expiry date', async () => {
   fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
 
   const created = await schoolService.createSchool({
@@ -534,8 +534,8 @@ test('new schools receive a 5-day free trial and persist the trial expiry date',
   const expiry = new Date(created.trialEndsAt).getTime();
   const now = Date.now();
   expect(expiry).toBeGreaterThan(now);
-  expect(expiry - now).toBeGreaterThanOrEqual(4 * 24 * 60 * 60 * 1000);
-  expect(expiry - now).toBeLessThanOrEqual(5 * 24 * 60 * 60 * 1000 + 60000);
+  expect(expiry - now).toBeGreaterThanOrEqual(13 * 24 * 60 * 60 * 1000);
+  expect(expiry - now).toBeLessThanOrEqual(14 * 24 * 60 * 60 * 1000 + 60000);
 });
 
 test('expired trial changes subscription state without changing operational school status', async () => {

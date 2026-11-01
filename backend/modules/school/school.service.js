@@ -1023,6 +1023,12 @@ function sanitizeSignedUrlFields(record = {}, fields = []) {
   return safeRecord;
 }
 
+function sanitizeProfilePhotoPayload(entityType, payload = {}) {
+  return ['teachers', 'students'].includes(entityType)
+    ? sanitizeSignedUrlFields(payload, PROFILE_PHOTO_URL_FIELDS)
+    : payload;
+}
+
 function sanitizeSchoolAssetUrls(school = {}) {
   const safeSchool = sanitizeSignedUrlFields(school, SCHOOL_ASSET_URL_FIELDS);
   if (safeSchool.branding && typeof safeSchool.branding === 'object' && !Array.isArray(safeSchool.branding)) {
@@ -1043,7 +1049,7 @@ function sanitizeStudentRecord(record = {}) {
 
 function normalizeAttendanceStatus(status) {
   const normalized = String(status || '').trim().toLowerCase();
-  if (normalized === 'late' || normalized === 'present') return 'present';
+  if (normalized === 'late' || normalized === 'present') return normalized;
   if (normalized === 'absent' || normalized === 'excused') return 'absent';
   return '';
 }
@@ -1368,7 +1374,7 @@ function getTeacherSchoolView(school, user = {}) {
   const users = Array.isArray(school.users) ? school.users : [];
   const teacher = [...teachers, ...users].find((entry) => [entry.teacherId, entry.username, entry.email, entry.userId]
     .some((value) => String(value || '').trim().toLowerCase() === identifier));
-  const teacherIdentifiers = new Set([identifier, teacher?.teacherId, teacher?.username, teacher?.email]
+  const teacherIdentifiers = new Set([identifier, teacher?.teacherId, teacher?.username, teacher?.email, teacher?.fullName, teacher?.name]
     .filter(Boolean).map((value) => String(value).trim().toLowerCase()));
   const schoolClasses = Array.isArray(school.classes) ? school.classes : [];
   const assignedNames = new Set([
@@ -1420,10 +1426,22 @@ function getTeacherSchoolView(school, user = {}) {
   const subjects = Array.isArray(teacher?.assignedSubjects) ? teacher.assignedSubjects : [];
   const subjectNames = new Set(subjects.map((value) => String(value).trim().toLowerCase()).filter(Boolean));
   const exams = (Array.isArray(school.examRecords) ? school.examRecords : []).filter((entry) => {
+    const examClassId = String(entry.classId || '').trim().toLowerCase();
     const examClass = String(entry.className || entry.class || entry.classroom || '').trim().toLowerCase();
-    const examTeacher = String(entry.teacher || entry.teacherId || '').trim().toLowerCase();
     const examSubject = String(entry.subject || '').trim().toLowerCase();
-    return classNames.has(examClass) || teacherIdentifiers.has(examTeacher) || (subjectNames.size > 0 && subjectNames.has(examSubject));
+    const examClassRecord = examClassId
+      ? schoolClasses.find((item) => getClassId(item) === examClassId)
+      : null;
+    const classAuthorized = examClassId
+      ? isAuthorizedClassId(examClassId)
+        && (!examClass || Boolean(examClassRecord && getClassAliases(examClassRecord).includes(examClass)))
+      : isAuthorizedClassAlias(examClass);
+    const examOwnerIdentifiers = [entry.teacherId, entry.teacher]
+      .filter(Boolean)
+      .map((value) => String(value).trim().toLowerCase());
+    const ownerAuthorized = !examOwnerIdentifiers.length
+      || examOwnerIdentifiers.every((value) => teacherIdentifiers.has(value));
+    return classAuthorized && subjectNames.has(examSubject) && ownerAuthorized;
   });
   const results = (Array.isArray(school.examResults) ? school.examResults : []).filter((entry) => {
     const resultStudent = String(entry.studentId || entry.student || '').trim().toLowerCase();
@@ -1493,6 +1511,15 @@ function getTeacherSchoolView(school, user = {}) {
 function updateTeacherWorkspace(school, user = {}, updates = {}) {
   const teacherView = getTeacherSchoolView(school, user);
   if (!teacherView?.teacherProfile) throw new Error('Teacher profile not found');
+  const teacherIdentifiers = [teacherView.teacherProfile.teacherId, teacherView.teacherProfile.username, teacherView.teacherProfile.email]
+    .filter(Boolean)
+    .map((value) => String(value).trim().toLowerCase());
+  [ ...(Array.isArray(school.teachers) ? school.teachers : []), ...(Array.isArray(school.users) ? school.users : []) ].forEach((entry) => {
+    if ([entry.teacherId, entry.username, entry.email]
+      .some((value) => teacherIdentifiers.includes(String(value || '').trim().toLowerCase()))) {
+      Object.assign(entry, sanitizeSignedUrlFields(entry, PROFILE_PHOTO_URL_FIELDS));
+    }
+  });
   const allowedStudentIds = new Set(teacherView.students.map((entry) => String(entry.studentId || entry.id || entry.email || '').trim().toLowerCase()).filter(Boolean));
   const allowedSubjectNames = new Set(normalizeArray(teacherView.teacherProfile.assignedSubjects)
     .map((value) => String(value).trim().toLowerCase()).filter(Boolean));
@@ -1575,11 +1602,23 @@ function updateTeacherWorkspace(school, user = {}, updates = {}) {
   }
   if (updates.teacherProfile && typeof updates.teacherProfile === 'object') {
     const allowedFields = ['fullName', 'email', 'phone', 'department', 'position', 'qualification', 'profilePhoto', 'profilePhotoPath'];
-    const profileUpdates = Object.fromEntries(allowedFields.filter((field) => updates.teacherProfile[field] !== undefined).map((field) => [field, updates.teacherProfile[field]]));
+    const profileUpdates = sanitizeSignedUrlFields(
+      Object.fromEntries(allowedFields.filter((field) => updates.teacherProfile[field] !== undefined).map((field) => [field, updates.teacherProfile[field]])),
+      PROFILE_PHOTO_URL_FIELDS
+    );
+    if (profileUpdates.profilePhoto !== undefined || profileUpdates.profilePhotoPath !== undefined) {
+      profileUpdates.metadata = {
+        ...(teacherView.teacherProfile.metadata || {}),
+        ...(profileUpdates.profilePhoto !== undefined ? { profilePhoto: profileUpdates.profilePhoto } : {}),
+        ...(profileUpdates.profilePhotoPath !== undefined ? { profilePhotoPath: profileUpdates.profilePhotoPath } : {}),
+      };
+    }
     Object.assign(teacherView.teacherProfile, profileUpdates);
     const identifiers = [teacherView.teacherProfile.teacherId, teacherView.teacherProfile.username, teacherView.teacherProfile.email].filter(Boolean).map((value) => String(value).toLowerCase());
     [ ...(Array.isArray(school.teachers) ? school.teachers : []), ...(Array.isArray(school.users) ? school.users : []) ].forEach((entry) => {
-      if ([entry.teacherId, entry.username, entry.email].some((value) => identifiers.includes(String(value || '').toLowerCase()))) Object.assign(entry, profileUpdates);
+      if ([entry.teacherId, entry.username, entry.email].some((value) => identifiers.includes(String(value || '').toLowerCase()))) {
+        Object.assign(entry, sanitizeSignedUrlFields(entry, PROFILE_PHOTO_URL_FIELDS), profileUpdates);
+      }
     });
   }
   return school;
@@ -2014,7 +2053,7 @@ function calculateAttendanceMetrics(records = []) {
   const counts = { present: 0, absent: 0 };
   selectedEntries.forEach((entry) => {
     const normalizedStatus = normalizeAttendanceStatus(entry.status);
-    if (normalizedStatus === 'present') counts.present += 1;
+    if (normalizedStatus === 'present' || normalizedStatus === 'late') counts.present += 1;
     else if (normalizedStatus === 'absent') counts.absent += 1;
   });
 
@@ -2242,11 +2281,14 @@ function applyActorEntityScope(school, field, items = [], actor = {}, schoolId =
   if (field === 'students') return authorizedItems;
   if (field === 'teachers') return authorizedItems;
   if (field === 'classes') return authorizedSource?.classes || [];
+  if (field === 'examRecords' || field === 'examResults') return authorizedItems;
   return items;
 }
 
 async function getEntities(schoolId, entityType, query = {}, actor = {}) {
-  const field = normalizeEntityType(entityType);
+  const field = ['examRecords', 'examResults'].includes(entityType)
+    ? entityType
+    : normalizeEntityType(entityType);
   if (!field) {
     throw new Error('Unsupported entity type');
   }
@@ -2298,7 +2340,14 @@ async function getEntities(schoolId, entityType, query = {}, actor = {}) {
     items = tenant[field] || [];
   }
 
-  const scoped = applyActorEntityScope({ ...tenant, teachers: items.filter((entry) => entry.role === 'teacher' || entry.teacherId || entry.email), students: items.filter((entry) => entry.role === 'student' || entry.studentId || entry.email) }, field, items, actor, schoolId);
+  const authorizationSchool = ['teachers', 'students'].includes(field)
+    ? {
+        ...tenant,
+        teachers: field === 'teachers' ? items : tenant.teachers,
+        students: field === 'students' ? items : tenant.students,
+      }
+    : tenant;
+  const scoped = applyActorEntityScope(authorizationSchool, field, items, actor, schoolId);
   const filtered = buildSearchFilter(scoped, query.search, query.status);
   const safeItems = field === 'teachers'
     ? filtered.map(sanitizeTeacherRecord)
@@ -2467,6 +2516,7 @@ async function createEntity(schoolId, entityType, payload, actor = {}) {
   if (!field) {
     throw new Error('Unsupported entity type');
   }
+  payload = sanitizeProfilePhotoPayload(field, payload);
 
   const actorRoles = getUserRoleList(actor);
   const hasExplicitActorRole = actorRoles.length > 0;
@@ -2685,6 +2735,7 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
   if (!field) {
     throw new Error('Unsupported entity type');
   }
+  updates = sanitizeProfilePhotoPayload(field, updates);
 
   const actorRoles = getUserRoleList(actor);
   const hasExplicitActorRole = actorRoles.length > 0;
@@ -2740,11 +2791,28 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
         delete safeUpdates.metadata.signature;
       }
     }
-    const updated = { ...record, ...safeUpdates, schoolId };
+    const updatedMetadata = {
+      ...(record.metadata || {}),
+      ...(safeUpdates.metadata || {}),
+      ...(safeUpdates.profilePhoto !== undefined ? { profilePhoto: safeUpdates.profilePhoto } : {}),
+      ...(safeUpdates.profilePhotoPath !== undefined ? { profilePhotoPath: safeUpdates.profilePhotoPath } : {}),
+    };
+    const updated = sanitizeProfilePhotoPayload(field, {
+      ...record,
+      ...safeUpdates,
+      ...(['teachers', 'students'].includes(field) ? { metadata: updatedMetadata } : {}),
+      schoolId,
+    });
     const identifier = record.teacherId || record.studentId || record.classId || record.id || record.email || record.username;
     await firebaseCore.saveById(field, `${schoolId}:${identifier}`, updated, true);
     if (field === 'teachers' || field === 'students') {
       const userIdentifier = record.email || record.username || identifier;
+      const userMetadata = sanitizeSignedUrlFields({
+        ...(record.metadata || {}),
+        ...(safeUpdates.metadata || {}),
+        ...(safeUpdates.profilePhoto !== undefined ? { profilePhoto: safeUpdates.profilePhoto } : {}),
+        ...(safeUpdates.profilePhotoPath !== undefined ? { profilePhotoPath: safeUpdates.profilePhotoPath } : {}),
+      }, PROFILE_PHOTO_URL_FIELDS);
       await firebaseCore.saveById('users', `${schoolId}:${userIdentifier}`, {
         schoolId,
         tenantId: schoolId,
@@ -2756,12 +2824,7 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
         studentId: record.studentId || null,
         profilePhoto: updated.profilePhoto || null,
         profilePhotoPath: updated.profilePhotoPath || null,
-        metadata: {
-          ...(record.metadata || {}),
-          ...(safeUpdates.metadata || {}),
-          ...(safeUpdates.profilePhoto !== undefined ? { profilePhoto: safeUpdates.profilePhoto } : {}),
-          ...(safeUpdates.profilePhotoPath !== undefined ? { profilePhotoPath: safeUpdates.profilePhotoPath } : {}),
-        },
+        metadata: userMetadata,
         ...(safeUpdates.profilePhoto !== undefined ? { profilePhoto: safeUpdates.profilePhoto } : {}),
         ...(safeUpdates.profilePhotoPath !== undefined ? { profilePhotoPath: safeUpdates.profilePhotoPath } : {}),
         ...(safeUpdates.fullName ? { fullName: safeUpdates.fullName } : {}),
@@ -2834,22 +2897,31 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
       : safeUpdates;
     const updated = updateSchoolEntity(school, field, entityId, validatedUpdates);
     if (!updated) throw new Error('Entity not found');
+    const updatedMetadata = {
+      ...(updated.metadata || {}),
+      ...(updates.profilePhoto !== undefined ? { profilePhoto: updates.profilePhoto } : {}),
+      ...(updates.profilePhotoPath !== undefined ? { profilePhotoPath: updates.profilePhotoPath } : {}),
+    };
+    const persistedUpdated = sanitizeProfilePhotoPayload(field, {
+      ...updated,
+      ...(['teachers', 'students'].includes(field) ? { metadata: updatedMetadata } : {}),
+    });
     if (field === 'teachers') {
       const teacherIndex = school.teachers.findIndex((item) => String(item.teacherId || item.username || item.email) === String(entityId));
-      if (teacherIndex !== -1) school.teachers[teacherIndex] = { ...school.teachers[teacherIndex], ...updated };
+      if (teacherIndex !== -1) school.teachers[teacherIndex] = { ...school.teachers[teacherIndex], ...persistedUpdated };
       const userIndex = school.users.findIndex((item) => String(item.teacherId || item.username || item.email) === String(entityId));
-      if (userIndex !== -1) school.users[userIndex] = { ...school.users[userIndex], ...updated };
+      if (userIndex !== -1) school.users[userIndex] = { ...school.users[userIndex], ...persistedUpdated };
     }
     if (field === 'students') {
       const studentIndex = school.students.findIndex((item) => [item.studentId, item.id, item.email].filter(Boolean).some((value) => String(value).toLowerCase() === String(entityId).toLowerCase()));
-      if (studentIndex !== -1) school.students[studentIndex] = { ...school.students[studentIndex], ...updated };
+      if (studentIndex !== -1) school.students[studentIndex] = { ...school.students[studentIndex], ...persistedUpdated };
     }
     saveSchoolData(schools);
     return field === 'students'
-      ? sanitizeStudentRecord(updated)
+      ? sanitizeStudentRecord(persistedUpdated)
       : field === 'teachers'
-        ? sanitizeTeacherRecord(updated)
-        : updated;
+        ? sanitizeTeacherRecord(persistedUpdated)
+        : persistedUpdated;
   }
 
   const tenant = await prisma.tenant.findUnique({ where: { schoolId } });
@@ -2888,7 +2960,10 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
     }
     const sanitizedUpdates = restrictNonAuthorityUpdates(field, updates || {}, actor);
     const { password, passwordHash, studentPasswordHash, passwordNeedsReset, ...safeUpdates } = sanitizedUpdates;
-    const updatesWithEmail = { ...safeUpdates };
+    const updatesWithEmail = sanitizeProfilePhotoPayload(field, { ...safeUpdates });
+    if (isSignedFileUrl(user.profilePhoto) && updatesWithEmail.profilePhoto === undefined) {
+      updatesWithEmail.profilePhoto = null;
+    }
     if (field === 'teachers') {
       delete updatesWithEmail.nationalId;
       delete updatesWithEmail.nationalIdNumber;
@@ -2905,7 +2980,7 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
     }
 
     const metadata = {
-      ...(user.metadata || {}),
+      ...sanitizeSignedUrlFields(user.metadata || {}, PROFILE_PHOTO_URL_FIELDS),
       ...(updatesWithEmail.metadata || {}),
     };
 

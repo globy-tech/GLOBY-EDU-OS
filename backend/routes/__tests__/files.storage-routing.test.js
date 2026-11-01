@@ -228,7 +228,14 @@ describe('production file storage routing', () => {
     const response = await runRequest('POST', '/files/upload?filename=student-profile/photo.png', png);
 
     expect(response.status).toBe(201);
-    expect(storage.uploadSchoolFile).toHaveBeenCalledWith('school-a/student-profile/photo.png', png, expect.any(Object));
+    expect(storage.uploadSchoolFile).toHaveBeenCalledTimes(1);
+    expect(storage.uploadSchoolFile).toHaveBeenCalledWith('school-a/student-profile/photo.png', expect.any(Buffer), expect.objectContaining({
+      contentType: 'image/png',
+      upsert: false,
+    }));
+    const uploadedBuffer = storage.uploadSchoolFile.mock.calls[0][1];
+    expect(uploadedBuffer).toHaveLength(png.length);
+    expect(Buffer.compare(uploadedBuffer, png)).toBe(0);
   });
 
   test('rejects unsupported profile image content types', async () => {
