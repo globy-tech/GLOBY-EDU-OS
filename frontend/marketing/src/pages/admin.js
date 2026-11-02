@@ -2292,6 +2292,7 @@ function attachSchoolEditForm(token, schoolId, onSuccess) {
   const form = document.getElementById('school-edit-form');
   if (!form) return;
   let isSubmitting = false;
+  const originalHeadEmail = String(form.querySelector('[name="headEmail"]')?.value || '').trim().toLowerCase();
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -2316,6 +2317,7 @@ function attachSchoolEditForm(token, schoolId, onSuccess) {
         region: formData.get('region'),
         description: formData.get('description'),
       };
+      const updatedHeadEmail = String(updateData.headEmail || '').trim().toLowerCase();
 
       if (formData.get('grantPaymentGracePeriod') === 'on') {
         const gracePeriodDate = String(formData.get('gracePeriodEndsAt') || '').trim();
@@ -2340,17 +2342,19 @@ function attachSchoolEditForm(token, schoolId, onSuccess) {
         throw new Error(`Server error: ${response.status}`);
       }
 
-      const credentialResponse = await fetch(`/api/v1/schools/${encodeURIComponent(schoolId)}/credentials`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ email: updateData.headEmail, updatePassword: false })
-      });
-      if (!credentialResponse.ok) {
-        const credentialError = await credentialResponse.json().catch(() => ({}));
-        throw new Error(credentialError.message || `Credential update failed: ${credentialResponse.status}`);
+      if (updatedHeadEmail !== originalHeadEmail) {
+        const credentialResponse = await fetch(`/api/v1/schools/${encodeURIComponent(schoolId)}/credentials`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({ email: updateData.headEmail, updatePassword: false })
+        });
+        if (!credentialResponse.ok) {
+          const credentialError = await credentialResponse.json().catch(() => ({}));
+          throw new Error(credentialError.message || `Credential update failed: ${credentialResponse.status}`);
+        }
       }
 
       if (statusDiv) {

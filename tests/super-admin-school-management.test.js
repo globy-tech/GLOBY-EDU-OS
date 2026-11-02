@@ -128,6 +128,17 @@ describe('Super Admin school directory filters', () => {
     expect(schoolActions).toContain("if (document.getElementById('school-modal-cancel'))");
   });
 
+  it('does not request a school credential update when the head email is unchanged', () => {
+    const adminSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'admin.js'), 'utf8');
+    const editHandler = adminSource.match(/function attachSchoolEditForm\(token, schoolId, onSuccess\) \{([\s\S]*?)\n\}/)?.[1] || '';
+    const credentialUpdate = editHandler.match(/if \(updatedHeadEmail !== originalHeadEmail\) \{([\s\S]*?)\n      \}/)?.[1] || '';
+
+    expect(editHandler).toContain("const originalHeadEmail = String(form.querySelector('[name=\"headEmail\"]')?.value || '').trim().toLowerCase();");
+    expect(editHandler).toContain("const updatedHeadEmail = String(updateData.headEmail || '').trim().toLowerCase();");
+    expect(credentialUpdate).toContain("fetch(`/api/v1/schools/${encodeURIComponent(schoolId)}/credentials`");
+    expect(credentialUpdate).toContain("JSON.stringify({ email: updateData.headEmail, updatePassword: false })");
+  });
+
   it('binds the primary create button once while preserving the quick-action create flow', () => {
     const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
     const adminSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'admin.js'), 'utf8');
