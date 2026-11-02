@@ -771,6 +771,9 @@ function renderEditSchoolModal(school) {
   const headName = school.headName || '';
   const headEmail = school.headEmail || '';
   const subscriptionPlan = school.subscriptionPlan || 'trial';
+  const expiresAt = school.expiresAt && !Number.isNaN(new Date(school.expiresAt).getTime())
+    ? new Date(school.expiresAt).toISOString().slice(0, 10)
+    : '';
   const region = school.region || '';
   const description = school.description || '';
   
@@ -812,6 +815,18 @@ function renderEditSchoolModal(school) {
             <option value="enterprise" ${subscriptionPlan === 'enterprise' ? 'selected' : ''}>Enterprise (Custom)</option>
           </select>
         </label>
+
+        <div class="rounded-3xl border border-sky-200 bg-sky-50 p-4">
+          <label class="flex items-start gap-3 text-sm font-medium text-sky-950">
+            <input type="checkbox" name="grantPaymentGracePeriod" class="mt-1" />
+            <span>Grant or extend temporary access while payment is due</span>
+          </label>
+          <label class="mt-3 block">
+            <span class="text-sm font-medium text-slate-700">Access extension ends (UTC)</span>
+            <input type="date" name="gracePeriodEndsAt" value="${expiresAt}" class="mt-2 w-full rounded-3xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100" />
+          </label>
+          <p class="mt-2 text-xs text-slate-600">This does not record a payment. The school can sign in until the selected expiry date.</p>
+        </div>
         
         <label class="block">
           <span class="text-sm font-medium text-slate-700">Region/Country</span>
@@ -2301,6 +2316,16 @@ function attachSchoolEditForm(token, schoolId, onSuccess) {
         region: formData.get('region'),
         description: formData.get('description'),
       };
+
+      if (formData.get('grantPaymentGracePeriod') === 'on') {
+        const gracePeriodDate = String(formData.get('gracePeriodEndsAt') || '').trim();
+        const gracePeriodEnd = gracePeriodDate ? new Date(`${gracePeriodDate}T23:59:59.999Z`) : null;
+        if (!gracePeriodEnd || Number.isNaN(gracePeriodEnd.getTime()) || gracePeriodEnd.getTime() <= Date.now()) {
+          throw new Error('Choose a future access-extension date before granting payment grace.');
+        }
+        updateData.subscriptionStatus = 'active';
+        updateData.expiresAt = gracePeriodEnd.toISOString();
+      }
 
       const response = await fetch(`/api/v1/schools/${schoolId}`, {
         method: 'PUT',

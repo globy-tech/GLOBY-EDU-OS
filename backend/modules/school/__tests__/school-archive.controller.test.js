@@ -162,6 +162,32 @@ describe('Super Admin school archive routes', () => {
     }));
   });
 
+  it('allows only a platform administrator to extend school access through a future expiry date', async () => {
+    const school = { ...SCHOOL, id: 'grace-period-tenant-id', archivedAt: null };
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    jest.spyOn(schoolService, 'getSchoolBySchoolId').mockResolvedValue(school);
+    const updateSchool = jest.spyOn(schoolService, 'updateSchool').mockResolvedValue({
+      ...school,
+      subscriptionStatus: 'active',
+      expiresAt,
+    });
+    const handlers = routeHandlers('put', '/:schoolId');
+    const req = {
+      ...createRequest(),
+      user: PLATFORM_ADMIN,
+      body: { subscriptionStatus: 'active', expiresAt },
+    };
+    const res = createResponse();
+
+    await handlers[handlers.length - 1].handle(req, res);
+
+    expect(updateSchool).toHaveBeenCalledWith(school.id, req.body);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'ok',
+      school: expect.objectContaining({ subscriptionStatus: 'active', expiresAt }),
+    }));
+  });
+
   it('records valid payments through the dedicated fee-payment route', async () => {
     const payment = { id: 'PMT-2026-000001', schoolId: SCHOOL_ID, studentId: 'STU-SYNTHETIC', reference: 'SYNTHETIC-REF' };
     const receipt = { receiptNumber: 'RCPT-2026-000001', paymentId: payment.id, schoolId: SCHOOL_ID };
