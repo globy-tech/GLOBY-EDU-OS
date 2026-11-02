@@ -6,6 +6,8 @@ const crypto = require('crypto');
 const prisma = require('../../config/prisma.client');
 const config = require('../../config/auth.config');
 const firebaseCore = require('../../firebase.core');
+const firebaseAdmin = require('../../firebase.admin');
+const { sendEmail, teacherAccountSetupTemplate } = require('../auth/utils/email');
 const { listPricingPlans } = require('../pricing/pricing.service');
 const { DEFAULT_TRIAL_LABEL, createTrialEndDate } = require('./trial-period');
 const { generateSchoolSubdomain } = require('./tenant-hostname');
@@ -50,6 +52,124 @@ const TEACHER_ASSIGNABLE_CLASSES = new Set([
 function normalizeTeacherAssignedClasses(value) {
   const classes = normalizeArray(value);
   return classes;
+}
+
+async function createFirebaseTeacherAccount(schoolId, school, payload) {
+  const email = String(payload.email || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error('A valid teacher email address is required.');
+  }
+  const duplicateInSchool = [...(school.users || []), ...(school.teachers || [])]
+    .some((user) => String(user.email || '').trim().toLowerCase() === email);
+  if (duplicateInSchool) {
+    throw new Error('A teacher with that email already exists in this school.');
+  }
+
+  let existingAuthUser = null;
+  try {
+    existingAuthUser = await firebaseAdmin.getUserByEmail(email);
+  } catch (error) {
+    if (error.code !== 'auth/user-not-found') throw error;
+  }
+  if (existingAuthUser) {
+    throw new Error('This email already has a Firebase Authentication account. Verify its school association before retrying.');
+  }
+
+  const temporaryPassword = crypto.randomBytes(32).toString('base64url');
+  const passwordHash = await bcrypt.hash(temporaryPassword, config.bcrypt.saltRounds);
+  const created = createTeacherRecord(school, {
+    ...payload,
+    email,
+    passwordHash,
+    passwordNeedsReset: true,
+    emailVerified: false,
+  });
+  const teacherId = String(created.teacherId || created.username || email);
+  const teacherDocumentId = `${schoolId}:${teacherId}`;
+  const userDocumentId = `${schoolId}:${email}`;
+  let firebaseUid = '';
+  let teacherDocumentCreated = false;
+  let userDocumentCreated = false;
+
+  try {
+    const authUser = await firebaseAdmin.createUser({
+      email,
+      password: temporaryPassword,
+      displayName: created.fullName,
+      emailVerified: false,
+    });
+    firebaseUid = String(authUser.uid || '');
+    if (!firebaseUid) throw new Error('Firebase did not return the created account ID.');
+
+    const verificationLink = await firebaseAdmin.generateEmailVerificationLink(email);
+    const passwordResetLink = await firebaseAdmin.generatePasswordResetLink(email);
+    const teacherRecord = sanitizeTeacherRecord({ ...created, schoolId });
+    await firebaseCore.createById('teachers', teacherDocumentId, teacherRecord);
+    teacherDocumentCreated = true;
+    await firebaseCore.createById('users', userDocumentId, {
+      schoolId,
+      tenantId: schoolId,
+      username: email,
+      email,
+      fullName: created.fullName,
+      role: 'teacher',
+      roles: ['teacher'],
+      teacherId,
+      firebaseUid,
+      passwordHash,
+      passwordNeedsReset: true,
+      isVerified: false,
+      emailVerified: false,
+      status: created.status || 'active',
+    });
+    userDocumentCreated = true;
+    await firebaseCore.saveById('roles', `${schoolId}:teacher`, { schoolId, name: 'teacher' }, true);
+
+    const delivery = await sendEmail(
+      email,
+      'Set up your GlobyEdu teacher account',
+      teacherAccountSetupTemplate({
+        fullName: created.fullName,
+        schoolName: school.name,
+        schoolId,
+        verificationLink,
+        passwordResetLink,
+      }),
+    );
+    if (!delivery || delivery.ok !== true) {
+      throw new Error(`Account setup email delivery failed${delivery?.reason ? ` (${delivery.reason})` : ''}.`);
+    }
+
+    return teacherRecord;
+  } catch (error) {
+    const cleanupFailures = [];
+    if (userDocumentCreated) {
+      try {
+        await firebaseCore.deleteById('users', userDocumentId);
+      } catch (cleanupError) {
+        cleanupFailures.push(`user record (${cleanupError.code || 'cleanup error'})`);
+      }
+    }
+    if (teacherDocumentCreated) {
+      try {
+        await firebaseCore.deleteById('teachers', teacherDocumentId);
+      } catch (cleanupError) {
+        cleanupFailures.push(`teacher record (${cleanupError.code || 'cleanup error'})`);
+      }
+    }
+    if (firebaseUid) {
+      try {
+        await firebaseAdmin.deleteUser(firebaseUid);
+      } catch (cleanupError) {
+        cleanupFailures.push(`Firebase account (${cleanupError.code || 'cleanup error'})`);
+      }
+    }
+    const failure = cleanupFailures.length
+      ? new Error(`Teacher account setup failed and rollback was incomplete: ${cleanupFailures.join(', ')}. Check the school records before retrying.`)
+      : new Error(`Teacher account setup failed: ${error.message}`);
+    failure.cause = error;
+    throw failure;
+  }
 }
 
 function normalizeEntityType(entityType) {
@@ -2539,6 +2659,9 @@ async function createEntity(schoolId, entityType, payload, actor = {}) {
       const classRecord = school.classes.find((item) => String(item.classId || item.id) === String(payload.classId));
       if (!classRecord) throw new Error('Class does not belong to this school');
       if (roles.includes('teacher') && !resolveTeacherAuthorization(school, actor, payload.classId)) throw new Error('Teacher is not authorized for this class');
+    }
+    if (field === 'teachers') {
+      return createFirebaseTeacherAccount(schoolId, school, payload);
     }
 
     const temporaryPassword = payload.password || `TempPass!${Math.random().toString(36).slice(2, 8)}`;

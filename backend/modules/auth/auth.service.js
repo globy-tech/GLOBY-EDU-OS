@@ -385,6 +385,9 @@ async function loginWithFirebaseIdToken(idToken, tenantId, options = {}) {
   if (!tenant) throw new Error('Tenant not found.');
 
   const firebaseMode = firebaseData.isFirebaseDataConfigured();
+  if (firebaseMode && decoded.email_verified !== true) {
+    throw new Error('Email must be verified before signing in.');
+  }
   let user = firebaseMode
     ? await findFirebaseUserForLogin(tenantId, decoded, options)
     : await findUserByEmail(decoded.email);
@@ -392,6 +395,15 @@ async function loginWithFirebaseIdToken(idToken, tenantId, options = {}) {
     throw new Error('Google account not recognized. Contact your administrator.');
   }
   if (user.passwordSyncPending === true) throw new Error('Password update is still being synchronized.');
+  if (firebaseMode && user.isVerified !== true) {
+    const updates = {
+      isVerified: true,
+      emailVerified: true,
+      firebaseUid: decoded.uid,
+    };
+    await firebaseCore.saveById('users', user.id, updates, true);
+    Object.assign(user, updates);
+  }
 
   if (!firebaseMode && tenant.id !== user.tenantId) {
     throw new Error('User does not belong to the requested tenant.');

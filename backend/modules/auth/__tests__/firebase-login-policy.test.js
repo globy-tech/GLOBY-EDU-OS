@@ -121,6 +121,64 @@ describe('Firebase login account-linking policy', () => {
       .rejects.toThrow('Password update is still being synchronized.');
   });
 
+  test('does not issue a Firebase session until the Auth email is verified', async () => {
+    mockFirebaseSchoolLogin({
+      schoolId: 'globy-school',
+      schoolStatus: 'active',
+      subscriptionStatus: 'active',
+    }, { firebaseUid: 'firebase-user-1' });
+    const firebaseAdmin = require('../../../firebase.admin');
+    const saveById = jest.spyOn(firebaseCore, 'saveById');
+    firebaseAdmin.verifyIdToken.mockResolvedValueOnce({
+      uid: 'firebase-user-1',
+      email: 'linked@globy.test',
+      email_verified: false,
+    });
+
+    await expect(authService.loginWithFirebaseIdToken('firebase-token', 'globy-school', {
+      identifier: 'linked@globy.test',
+    }))
+      .rejects.toThrow('Email must be verified before signing in.');
+    expect(saveById).not.toHaveBeenCalled();
+  });
+
+  test('marks a newly verified Firebase teacher record verified before issuing a session', async () => {
+    const { userRecord } = mockFirebaseSchoolLogin({
+      schoolId: 'globy-school',
+      schoolStatus: 'active',
+      subscriptionStatus: 'active',
+    }, {
+      role: 'teacher',
+      roles: ['teacher'],
+      isVerified: false,
+      emailVerified: false,
+      firebaseUid: 'firebase-user-1',
+    });
+    const firebaseAdmin = require('../../../firebase.admin');
+    const saveById = jest.spyOn(firebaseCore, 'saveById').mockImplementation(async (collection, id, updates) => {
+      Object.assign(userRecord, updates);
+      return { id, ...userRecord };
+    });
+    firebaseAdmin.verifyIdToken.mockResolvedValueOnce({
+      uid: 'firebase-user-1',
+      email: 'linked@globy.test',
+      email_verified: true,
+    });
+
+    const result = await authService.loginWithFirebaseIdToken('firebase-token', 'globy-school');
+
+    expect(saveById).toHaveBeenCalledWith('users', 'school-user-1', {
+      isVerified: true,
+      emailVerified: true,
+      firebaseUid: 'firebase-user-1',
+    }, true);
+    expect(result.user).toMatchObject({
+      role: 'teacher',
+      isVerified: true,
+      emailVerified: true,
+    });
+  });
+
   test('allows an active subscription when an old trial end date remains on the tenant', async () => {
     mockFirebaseSchoolLogin({
       schoolId: 'globy-school',

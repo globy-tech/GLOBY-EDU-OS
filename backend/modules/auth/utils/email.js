@@ -158,6 +158,20 @@ function verificationTemplate(verificationLink) {
   `;
 }
 
+function teacherAccountSetupTemplate({ fullName, schoolName, schoolId, verificationLink, passwordResetLink }) {
+  const safeName = String(fullName || 'Teacher').replace(/[<>&"]/g, '');
+  const safeSchoolName = String(schoolName || 'your school').replace(/[<>&"]/g, '');
+  const safeSchoolId = String(schoolId || '').replace(/[<>&"]/g, '');
+  return `
+    <p>Hi ${safeName},</p>
+    <p>Your teacher account for <strong>${safeSchoolName}</strong> has been created.</p>
+    <p>Your School ID is <strong>${safeSchoolId}</strong>.</p>
+    <p><a href="${verificationLink}">Verify your email address</a></p>
+    <p><a href="${passwordResetLink}">Set your account password</a></p>
+    <p>Both steps are required before signing in.</p>
+  `;
+}
+
 function resetTemplate(token, appUrl) {
   return `
     <p>You requested a password reset for your GlobyEdu account.</p>
@@ -172,6 +186,7 @@ module.exports = {
   isBrevoConfigured,
   sendEmail,
   verificationTemplate,
+  teacherAccountSetupTemplate,
   resetTemplate,
   welcomeTemplate,
 };

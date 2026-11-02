@@ -242,6 +242,14 @@ async function saveById(collectionName, id, data, merge = true) {
   return { id: documentId, ...payload };
 }
 
+async function createById(collectionName, id, data) {
+  const documentId = String(id || '').trim();
+  if (!documentId) throw new Error('A Firebase document ID is required.');
+  const payload = { ...data, updatedAt: new Date().toISOString() };
+  await collectionRef(collectionName).doc(documentId).create(payload);
+  return { id: documentId, ...payload };
+}
+
 async function deleteById(collectionName, id) {
   await collectionRef(collectionName).doc(String(id)).delete();
 }
@@ -295,6 +303,7 @@ module.exports = {
   listBySchool,
   getById,
   saveById,
+  createById,
   deleteById,
   getMaintenanceMode,
   setMaintenanceMode,
