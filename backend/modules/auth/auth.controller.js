@@ -365,7 +365,11 @@ router.post('/firebase-login', async (req, res) => {
       user: { id: result.user.id, email: result.user.email, displayName: result.user.displayName, roles: result.user.roles },
     });
   } catch (err) {
-    return res.status(401).json({ status: 'error', message: err.message });
+    const isTeacherLogin = String(req.body?.loginType || '').trim().toLowerCase() === 'teacher';
+    return res.status(401).json({
+      status: 'error',
+      message: isTeacherLogin ? 'Unable to sign in. Please check your details.' : err.message,
+    });
   }
 });
 
@@ -412,16 +416,34 @@ router.post('/logout', authMiddleware, async (req, res) => {
 // POST /api/v1/auth/forgot-password
 router.post('/forgot-password', async (req, res) => {
   try {
-    const { email } = req.body || {};
-    const token = await authService.forgotPassword(email);
-    if (token) {
-      // send email (stub)
-      const appUrl = getAppUrl();
-      await sendEmail(email, 'Password reset', resetTemplate(token, appUrl));
+    const { email, loginType = 'school' } = req.body || {};
+    const appUrl = getAppUrl();
+    const result = await authService.forgotPassword(email, {
+      loginType,
+      deliverResetToken: async (token) => {
+        const delivery = await sendEmail(email, 'Reset your GlobyEdu password', resetTemplate(token, appUrl));
+        if (!delivery || delivery.ok !== true) {
+          throw new Error('Password reset email could not be delivered.');
+        }
+      },
+    });
+    if (!firebaseData.isFirebaseDataConfigured() && result) {
+      const delivery = await sendEmail(email, 'Reset your GlobyEdu password', resetTemplate(result, appUrl));
+      if (!delivery || delivery.ok !== true) {
+        throw new Error('Password reset email could not be delivered.');
+      }
     }
     return res.json({ status: 'ok' });
   } catch (err) {
-    return res.status(500).json({ status: 'error', message: err.message });
+    const errorCode = String(err?.code || '').replace(/[^A-Za-z0-9._/-]/g, '').slice(0, 80);
+    await recordAuditEvent({
+      req,
+      action: 'auth.password_reset_request_failed',
+      resourceType: 'user',
+      success: false,
+      metadata: { errorCode: errorCode || 'REQUEST_FAILED' },
+    });
+    return res.json({ status: 'ok' });
   }
 });
 
@@ -429,9 +451,9 @@ router.post('/forgot-password', async (req, res) => {
 router.post('/reset-password', async (req, res) => {
   try {
     const { token, password } = req.body || {};
-    await authService.resetPassword(token, password);
+    const result = await authService.resetPassword(token, password);
     await recordAuditEvent({ req, action: 'auth.password_reset', resourceType: 'user', metadata: { initiatedBy: 'recovery_token' } });
-    return res.json({ status: 'ok' });
+    return res.json({ status: 'ok', ...(result && typeof result === 'object' ? result : {}) });
   } catch (err) {
     await recordAuditEvent({ req, action: 'auth.password_reset_failed', resourceType: 'user', success: false });
     return res.status(400).json({ status: 'error', message: err.message });

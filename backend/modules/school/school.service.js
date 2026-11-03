@@ -7,7 +7,12 @@ const prisma = require('../../config/prisma.client');
 const config = require('../../config/auth.config');
 const firebaseCore = require('../../firebase.core');
 const firebaseAdmin = require('../../firebase.admin');
+const { getAppUrl } = require('../../config/app-url.config');
 const { sendEmail, teacherAccountSetupTemplate } = require('../auth/utils/email');
+const {
+  createTeacherInvitationPasswordToken,
+  revokeTeacherInvitationPasswordToken,
+} = require('../auth/auth.service');
 const { listPricingPlans } = require('../pricing/pricing.service');
 const { DEFAULT_TRIAL_LABEL, createTrialEndDate } = require('./trial-period');
 const { generateSchoolSubdomain } = require('./tenant-hostname');
@@ -54,6 +59,100 @@ function normalizeTeacherAssignedClasses(value) {
   return classes;
 }
 
+function generateTeacherId(school) {
+  const existingIds = new Set(
+    [...(school.users || []), ...(school.teachers || [])]
+      .map((teacher) => String(teacher.teacherId || '').trim().toLowerCase())
+      .filter(Boolean),
+  );
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const teacherId = `T-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    if (!existingIds.has(teacherId.toLowerCase())) return teacherId;
+  }
+  throw new Error('Unable to allocate a unique teacher ID. Please try again.');
+}
+
+async function sendTeacherSetupEmail({ email, fullName, schoolName, schoolId, userId, teacherId, emailVerified = false }) {
+  let passwordSetupToken = '';
+  try {
+    const appUrl = getAppUrl().replace(/\/+$/, '');
+    const actionCodeSettings = { url: `${appUrl}/#/login` };
+    const [resolvedSchoolName, verificationLink] = await Promise.all([
+      Promise.resolve(schoolName),
+      emailVerified ? Promise.resolve('') : firebaseAdmin.generateEmailVerificationLink(email, actionCodeSettings),
+    ]);
+    passwordSetupToken = await createTeacherInvitationPasswordToken({
+      userId,
+      schoolId,
+      teacherId,
+      email,
+    });
+    const passwordResetLink = `${appUrl}/#/reset-password?type=teacher&token=${encodeURIComponent(passwordSetupToken)}`;
+    const delivery = await sendEmail(
+      email,
+      'Set up your GlobyEdu teacher account',
+      teacherAccountSetupTemplate({
+        fullName,
+        schoolName: resolvedSchoolName,
+        schoolId,
+        verificationLink,
+        passwordResetLink,
+      }),
+    );
+    if (!delivery || delivery.ok !== true) {
+      await revokeTeacherInvitationPasswordToken(passwordSetupToken);
+    }
+    return delivery;
+  } catch (error) {
+    if (passwordSetupToken) await revokeTeacherInvitationPasswordToken(passwordSetupToken);
+    console.error('[teacher-invitation] Setup email could not be prepared or sent.', {
+      reason: 'INVITATION_SETUP_FAILED',
+    });
+    return { ok: false, reason: 'INVITATION_SETUP_FAILED' };
+  }
+}
+
+function getTeacherInvitationState(delivery, attemptedAt = new Date()) {
+  if (delivery?.ok === true) {
+    const expiresAt = new Date(attemptedAt.getTime() + config.tokens.emailTokenMinutes * 60 * 1000);
+    return {
+      invitationStatus: 'pending',
+      invitationSentAt: attemptedAt.toISOString(),
+      invitationExpiresAt: expiresAt.toISOString(),
+      invitationEmailStatus: 'provider_accepted',
+      invitationEmailDeliveryStatus: 'unconfirmed',
+      invitationEmailAcceptedAt: attemptedAt.toISOString(),
+      invitationEmailFailedAt: null,
+      invitationEmailFailureReason: null,
+      invitationEmailProvider: ['brevo', 'resend'].includes(delivery.provider) ? delivery.provider : null,
+      invitationEmailMessageId: typeof delivery.messageId === 'string' ? delivery.messageId : null,
+    };
+  }
+
+  const reason = typeof delivery?.reason === 'string' && /^[A-Z0-9_]+$/.test(delivery.reason)
+    ? delivery.reason
+    : 'EMAIL_SEND_FAILED';
+  return {
+    invitationStatus: 'failed',
+    invitationSentAt: null,
+    invitationExpiresAt: null,
+    invitationEmailStatus: 'failed',
+    invitationEmailDeliveryStatus: 'not_sent',
+    invitationEmailAcceptedAt: null,
+    invitationEmailFailedAt: attemptedAt.toISOString(),
+    invitationEmailFailureReason: reason,
+    invitationEmailProvider: ['brevo', 'resend'].includes(delivery?.provider) ? delivery.provider : null,
+    invitationEmailMessageId: null,
+  };
+}
+
+async function persistTeacherInvitationState(user, teacher, invitationState) {
+  await Promise.all([
+    firebaseCore.saveById('users', user.id, invitationState, true),
+    firebaseCore.saveById('teachers', teacher.id, invitationState, true),
+  ]);
+}
+
 async function createFirebaseTeacherAccount(schoolId, school, payload) {
   const email = String(payload.email || '').trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -77,19 +176,21 @@ async function createFirebaseTeacherAccount(schoolId, school, payload) {
 
   const temporaryPassword = crypto.randomBytes(32).toString('base64url');
   const passwordHash = await bcrypt.hash(temporaryPassword, config.bcrypt.saltRounds);
+  const teacherId = generateTeacherId(school);
   const created = createTeacherRecord(school, {
     ...payload,
     email,
+    teacherId,
     passwordHash,
     passwordNeedsReset: true,
     emailVerified: false,
   });
-  const teacherId = String(created.teacherId || created.username || email);
   const teacherDocumentId = `${schoolId}:${teacherId}`;
   const userDocumentId = `${schoolId}:${email}`;
   let firebaseUid = '';
   let teacherDocumentCreated = false;
   let userDocumentCreated = false;
+  let teacherRecord;
 
   try {
     const authUser = await firebaseAdmin.createUser({
@@ -101,9 +202,14 @@ async function createFirebaseTeacherAccount(schoolId, school, payload) {
     firebaseUid = String(authUser.uid || '');
     if (!firebaseUid) throw new Error('Firebase did not return the created account ID.');
 
-    const verificationLink = await firebaseAdmin.generateEmailVerificationLink(email);
-    const passwordResetLink = await firebaseAdmin.generatePasswordResetLink(email);
-    const teacherRecord = sanitizeTeacherRecord({ ...created, schoolId });
+    teacherRecord = sanitizeTeacherRecord({
+      ...created,
+      id: teacherDocumentId,
+      schoolId,
+      firebaseUid,
+      invitationStatus: 'created',
+      invitationEmailStatus: 'unknown',
+    });
     await firebaseCore.createById('teachers', teacherDocumentId, teacherRecord);
     teacherDocumentCreated = true;
     await firebaseCore.createById('users', userDocumentId, {
@@ -120,27 +226,12 @@ async function createFirebaseTeacherAccount(schoolId, school, payload) {
       passwordNeedsReset: true,
       isVerified: false,
       emailVerified: false,
+      invitationStatus: 'created',
+      invitationEmailStatus: 'unknown',
       status: created.status || 'active',
     });
     userDocumentCreated = true;
     await firebaseCore.saveById('roles', `${schoolId}:teacher`, { schoolId, name: 'teacher' }, true);
-
-    const delivery = await sendEmail(
-      email,
-      'Set up your GlobyEdu teacher account',
-      teacherAccountSetupTemplate({
-        fullName: created.fullName,
-        schoolName: school.name,
-        schoolId,
-        verificationLink,
-        passwordResetLink,
-      }),
-    );
-    if (!delivery || delivery.ok !== true) {
-      throw new Error(`Account setup email delivery failed${delivery?.reason ? ` (${delivery.reason})` : ''}.`);
-    }
-
-    return teacherRecord;
   } catch (error) {
     const cleanupFailures = [];
     if (userDocumentCreated) {
@@ -170,6 +261,101 @@ async function createFirebaseTeacherAccount(schoolId, school, payload) {
     failure.cause = error;
     throw failure;
   }
+
+  const attemptedAt = new Date();
+  const delivery = await sendTeacherSetupEmail({
+    email,
+    fullName: created.fullName,
+    schoolName: school.name,
+    schoolId,
+    userId: userDocumentId,
+    teacherId,
+  });
+  const invitationState = getTeacherInvitationState(delivery, attemptedAt);
+  const userRecord = { id: userDocumentId };
+  await persistTeacherInvitationState(userRecord, teacherRecord, invitationState);
+  return { ...teacherRecord, ...invitationState };
+}
+
+async function resendFirebaseTeacherInvitation(schoolId, teacherIdentifier, actor = {}) {
+  if (!firebaseCore.isFirebaseCoreMode()) {
+    throw new Error('Teacher invitations are only available for Firebase-backed schools.');
+  }
+  const roles = getUserRoleList(actor);
+  const canManageTeachers = roles.some((role) => ['school_authority', 'school_head', 'super_admin'].includes(role));
+  if (!canManageTeachers) throw new Error('Only School Authority can resend teacher invitations.');
+  if (!roles.includes('super_admin') && String(actor.tenantId || actor.schoolId || '') !== String(schoolId)) {
+    throw new Error('School does not match the authenticated account.');
+  }
+
+  const [users, teachers] = await Promise.all([
+    firebaseCore.listBySchool('users', schoolId),
+    firebaseCore.listBySchool('teachers', schoolId),
+  ]);
+  const normalizedIdentifier = String(teacherIdentifier || '').trim().toLowerCase();
+  const teacher = teachers.find((record) => (
+    [record.id, record.teacherId, record.email].some((value) => String(value || '').trim().toLowerCase() === normalizedIdentifier)
+  ));
+  const user = users.find((record) => (
+    String(record.role || '').toLowerCase() === 'teacher' &&
+    (Array.isArray(record.roles) ? record.roles : []).includes('teacher') &&
+    String(record.teacherId || '').trim().toLowerCase() === String(teacher?.teacherId || '').trim().toLowerCase()
+  ));
+  if (!teacher || !user || teacher.schoolId !== schoolId || user.schoolId !== schoolId ||
+      !user.firebaseUid || user.firebaseUid !== teacher.firebaseUid) {
+    throw new Error('Linked teacher account was not found in this school.');
+  }
+  if (String(teacher.status || user.status || '').toLowerCase() !== 'active' || user.status !== 'active') {
+    throw new Error('Only active teacher accounts can receive invitations.');
+  }
+
+  const authUser = await firebaseAdmin.getUser(user.firebaseUid);
+  if (authUser.uid !== user.firebaseUid || String(authUser.email || '').trim().toLowerCase() !== String(user.email || '').trim().toLowerCase()) {
+    throw new Error('Teacher Firebase identity does not match the school record.');
+  }
+  if (authUser.disabled) throw new Error('This teacher account is disabled.');
+  if (authUser.emailVerified && user.passwordNeedsReset !== true && teacher.passwordNeedsReset !== true) {
+    const activatedAt = new Date().toISOString();
+    const updates = {
+      isVerified: true,
+      emailVerified: true,
+      invitationStatus: 'activated',
+      invitationActivatedAt: teacher.invitationActivatedAt || activatedAt,
+    };
+    await Promise.all([
+      firebaseCore.saveById('users', user.id, updates, true),
+      firebaseCore.saveById('teachers', teacher.id, updates, true),
+    ]);
+    return { teacherId: teacher.teacherId, invitationStatus: 'activated' };
+  }
+
+  const attemptedAt = new Date();
+  const delivery = await sendTeacherSetupEmail({
+    email: user.email,
+    fullName: teacher.fullName || user.fullName,
+    schoolName: firebaseCore.getTenant(schoolId).then((tenant) => tenant?.name),
+    schoolId,
+    userId: user.id,
+    teacherId: teacher.teacherId,
+    emailVerified: authUser.emailVerified === true,
+  });
+  const invitationState = {
+    ...getTeacherInvitationState(delivery, attemptedAt),
+    ...(authUser.emailVerified === true ? { isVerified: true, emailVerified: true } : {}),
+    invitationActivatedAt: null,
+  };
+  await persistTeacherInvitationState(user, teacher, invitationState);
+  if (delivery?.ok !== true) {
+    throw new Error(`Teacher invitation email failed${invitationState.invitationEmailFailureReason ? ` (${invitationState.invitationEmailFailureReason})` : ''}. The teacher account remains available for a safe retry.`);
+  }
+
+  return {
+    teacherId: teacher.teacherId,
+    invitationStatus: invitationState.invitationStatus,
+    invitationEmailStatus: invitationState.invitationEmailStatus,
+    invitationEmailDeliveryStatus: invitationState.invitationEmailDeliveryStatus,
+    invitationExpiresAt: invitationState.invitationExpiresAt,
+  };
 }
 
 function normalizeEntityType(entityType) {
@@ -245,10 +431,6 @@ function splitFullName(fullName) {
     firstName: parts.slice(0, -1).join(' ') || parts[0],
     lastName: parts.length > 1 ? parts[parts.length - 1] : null,
   };
-}
-
-function generateTeacherId() {
-  return `TCH-${Date.now().toString().slice(-6)}-${Math.random().toString(36).slice(2, 4).toUpperCase()}`;
 }
 
 function normalizeArray(value) {
@@ -2655,6 +2837,14 @@ async function createEntity(schoolId, entityType, payload, actor = {}) {
     ensureSchoolEntities(school);
     const roles = getUserRoleList(actor);
     if (roles.includes('teacher') && field !== 'students') throw new Error('Teachers can only manage students here');
+    if (field === 'teachers') {
+      if (!roles.some((role) => ['school_authority', 'school_head', 'super_admin'].includes(role))) {
+        throw new Error('Only School Authority can create teacher accounts.');
+      }
+      if (!roles.includes('super_admin') && String(actor.tenantId || actor.schoolId || '') !== String(schoolId)) {
+        throw new Error('School does not match the authenticated account.');
+      }
+    }
     if (field === 'students' && payload.classId) {
       const classRecord = school.classes.find((item) => String(item.classId || item.id) === String(payload.classId));
       if (!classRecord) throw new Error('Class does not belong to this school');
@@ -4240,6 +4430,7 @@ module.exports = {
   getStudentSchoolView,
   getTeacherSchoolView,
   createFeePayment,
+  resendFirebaseTeacherInvitation,
   updateTeacherWorkspace,
   updateSchool,
   updateSchoolCredentials,

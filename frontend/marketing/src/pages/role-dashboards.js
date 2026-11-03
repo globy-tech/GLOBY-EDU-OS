@@ -77,7 +77,7 @@ function renderSchoolOverview(schoolName, schoolId, students, teachers, classes)
           <p class="text-sm font-semibold text-slate-900">Quick Actions</p>
           <div class="mt-4 grid gap-2">
             <button data-school-action="add-student" class="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">+ Add Student</button>
-            <button data-school-action="add-teacher" class="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">+ Add Teacher</button>
+            <button data-school-action="add-teacher" class="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">+ Invite Teacher</button>
             <button data-school-action="new-announcement" class="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">📣 New Announcement</button>
             <button data-school-action="export-data" class="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">⬇️ Export Data</button>
           </div>
@@ -160,7 +160,7 @@ function renderTeachersModule(teachers) {
           <p class="mt-1 text-sm text-slate-600">Manage teacher profiles and assignments</p>
         </div>
         <div class="flex gap-3">
-          <button data-school-section-action="create-teacher" class="rounded-full bg-sky-600 px-5 py-2 text-sm font-semibold text-white">+ Create</button>
+          <button data-school-section-action="create-teacher" class="rounded-full bg-sky-600 px-5 py-2 text-sm font-semibold text-white">+ Invite Teacher</button>
           <button data-school-section-action="export-teachers" class="rounded-full border border-slate-200 bg-white px-5 py-2 text-sm font-semibold text-slate-700">Export</button>
         </div>
       </div>
@@ -197,7 +197,7 @@ function renderTeachersModule(teachers) {
         </div>
       ` : `
         <div class="mt-6 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-slate-600">
-          <p>No teachers found. <button class="font-semibold text-sky-600 hover:underline" data-school-section-action="create-teacher">Create one now</button></p>
+          <p>No teachers found. <button class="font-semibold text-sky-600 hover:underline" data-school-section-action="create-teacher">Invite a teacher now</button></p>
         </div>
       `}
     </div>

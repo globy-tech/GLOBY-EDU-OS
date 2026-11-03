@@ -20,9 +20,9 @@ import { matchesAdminSchoolFilter } from './utils/school-management-filters.mjs'
 import { getAdminState } from './pages/admin-state.js';
 import { PlatformAdminPage } from './pages/platform-admin.js';
 import { SchoolDashboardPage, SchoolAuthorityDashboard, TeacherDashboard, StudentDashboard } from './pages/school-dashboard.js';
-import { fetchSchoolSummary, fetchSchoolDetails, updateSchoolDetails, createFeePayment, searchSchoolData, fetchSchoolEntities, createSchoolEntity, updateSchoolEntity, deleteSchoolEntity, fetchAdminDashboardSummary, fetchPlatformAuditLogs, fetchSchoolActivity, fetchAdminSchoolList, fetchArchivedAdminSchools, createAdminSchool, updateAdminSchool, deleteAdminSchool, activateAdminSchool, fetchWorkspaceMessages, fetchMessageRecipients, createWorkspaceMessage, updateWorkspaceMessage, deleteWorkspaceMessage, fetchSupportTickets, createSupportTicket, updateSupportTicket, deleteSupportTicket, fetchAssignments, fetchLessons, createAssignment, createLesson, submitAssignment } from './api/school.js';
-import { studentLogin, teacherLogin, schoolAuthorityLogin, schoolLogin as apiLogin, firebaseLogin as apiFirebaseLogin, linkFirebaseIdentity, platformAdminLogin, logout as apiLogout, forgotPassword as apiForgot, register as apiRegister, confirmFirebasePasswordReset, changePassword as apiChangePassword } from './api/auth.js';
-import { isFirebaseConfigured, firebaseSignInWithGoogle, firebaseLinkGoogle, firebaseApplyActionCode } from './firebase/firebase-client.js';
+import { fetchSchoolSummary, fetchSchoolDetails, updateSchoolDetails, createFeePayment, searchSchoolData, fetchSchoolEntities, createSchoolEntity, resendTeacherInvitation, updateSchoolEntity, deleteSchoolEntity, fetchAdminDashboardSummary, fetchPlatformAuditLogs, fetchSchoolActivity, fetchAdminSchoolList, fetchArchivedAdminSchools, createAdminSchool, updateAdminSchool, deleteAdminSchool, activateAdminSchool, fetchWorkspaceMessages, fetchMessageRecipients, createWorkspaceMessage, updateWorkspaceMessage, deleteWorkspaceMessage, fetchSupportTickets, createSupportTicket, updateSupportTicket, deleteSupportTicket, fetchAssignments, fetchLessons, createAssignment, createLesson, submitAssignment } from './api/school.js';
+import { studentLogin, schoolAuthorityLogin, schoolLogin as apiLogin, firebaseLogin as apiFirebaseLogin, linkFirebaseIdentity, platformAdminLogin, logout as apiLogout, forgotPassword as apiForgot, register as apiRegister, confirmFirebasePasswordReset, changePassword as apiChangePassword } from './api/auth.js';
+import { isFirebaseConfigured, firebaseSignInWithEmail, firebaseSignInWithGoogle, firebaseLinkGoogle, firebaseApplyActionCode, firebaseSignOutUser } from './firebase/firebase-client.js';
 import { buildChangedFieldsPayload, buildSchoolCollectionPayload, buildSchoolEntityPayload, normalizeAttendanceStatus, buildAttendanceRoster, replaceAttendanceSession } from './utils/school-dashboard-actions.js?v=20261022-attendance-history';
 import { showGlobalPwaNotice } from './utils/pwa-notifications.js';
 import { MAX_FILE_UPLOAD_BYTES, validateImageUpload } from './utils/file-upload-validation.js';
@@ -2380,9 +2380,9 @@ async function handleQuickAction(action) {
   }
 
   if (action === 'add-teacher') {
-    const formData = await showAdminForm('Register teacher', [
+    const formData = await showAdminForm('Invite a teacher', [
       { name: 'fullName', label: 'Full name', placeholder: 'Teacher name', required: true },
-      { name: 'email', label: 'Email', placeholder: 'teacher@example.com', type: 'email', required: true },
+      { name: 'email', label: 'Teacher email (invitation sent here)', placeholder: 'teacher@example.com', type: 'email', required: true },
       { name: 'phone', label: 'Phone', placeholder: '+233000000000' },
       { name: 'gender', label: 'Gender', type: 'select', options: [
         { label: 'Male', value: 'male' },
@@ -2409,7 +2409,7 @@ async function handleQuickAction(action) {
       { name: 'assignedSubjects', label: 'Assigned subjects', placeholder: 'Comma-separated values' },
       { name: 'employeeNumber', label: 'Employee number', placeholder: 'e.g. EMP-5482' },
       { name: 'profilePhoto', label: 'Profile photo', type: 'file', accept: 'image/*' },
-    ]);
+    ], { submitLabel: 'Send Invitation' });
     if (!formData) return;
     const result = await createSchoolEntity(token, schoolId, 'teachers', buildSchoolEntityPayload('teachers', {
       fullName: formData.fullName || '',
@@ -2433,13 +2433,20 @@ async function handleQuickAction(action) {
       alert(result.data?.message || 'Unable to create teacher record.');
       return;
     }
+    const createdTeacher = result.data?.entity || {};
     try {
-      await uploadCreatedEntityProfilePhoto(formData.profilePhoto, 'teachers', result.data.entity, token, schoolId);
+      await uploadCreatedEntityProfilePhoto(formData.profilePhoto, 'teachers', createdTeacher, token, schoolId);
     } catch (error) {
       alert(error.message || 'Teacher created, but the profile photo could not be saved.');
       return;
     }
-    alert('Teacher record created successfully.');
+    alert(createdTeacher.invitationEmailStatus === 'failed'
+      ? 'Teacher account created, but the invitation could not be sent. The account is saved; resolve the issue, then use Resend invite.'
+      : createdTeacher.invitationEmailStatus === 'provider_accepted'
+        ? createdTeacher.invitationEmailDeliveryStatus === 'unconfirmed'
+          ? 'Invitation request accepted by the email provider; actual delivery is unconfirmed. The teacher must verify their email and set a password before signing in.'
+          : 'Invitation request accepted by the email provider, but delivery status is not confirmed. Check the invitation status before asking the teacher to activate.'
+        : 'Teacher record created, but invitations are unavailable in this storage mode; no invitation email was sent. Switch to Firebase-backed storage before onboarding this teacher.');
     document.getElementById('school-entity-refresh')?.click();
     return;
   }
@@ -3387,9 +3394,9 @@ function attachSchoolHandlers() {
           { label: 'School Administrator', value: 'School Administrator' },
         ];
 
-        const formData = await showAdminForm('Create teacher', [
+        const formData = await showAdminForm('Invite a teacher', [
           { name: 'fullName', label: 'Full name', placeholder: 'First and last name', required: true },
-          { name: 'email', label: 'Email', type: 'email', placeholder: 'teacher@example.com', required: true },
+          { name: 'email', label: 'Teacher email (invitation sent here)', type: 'email', placeholder: 'teacher@example.com', required: true },
           { name: 'profilePhoto', label: 'Profile photo', type: 'file', accept: 'image/*' },
           { name: 'gender', label: 'Gender', type: 'select', options: [
             { label: 'Male', value: 'male' },
@@ -3413,7 +3420,7 @@ function attachSchoolHandlers() {
             { label: 'Contract', value: 'contract' },
             { label: 'Part-time', value: 'part-time' },
           ] },
-        ], { submitLabel: 'Create Teacher' });
+        ], { submitLabel: 'Send Invitation' });
         if (!formData) return;
 
         const normalizedAssignedClasses = formData.assignedClasses ? [formData.assignedClasses] : [];
@@ -3442,7 +3449,13 @@ function attachSchoolHandlers() {
           alert(error.message || 'Teacher created, but the profile photo could not be saved.');
           return;
         }
-        alert('Teacher created successfully. The teacher must use the password reset flow before first login.');
+        alert(createdTeacher.invitationEmailStatus === 'failed'
+          ? 'Teacher account created, but the invitation could not be sent. The account is saved; resolve the issue, then use Resend invite.'
+          : createdTeacher.invitationEmailStatus === 'provider_accepted'
+            ? createdTeacher.invitationEmailDeliveryStatus === 'unconfirmed'
+              ? 'Invitation request accepted by the email provider; actual delivery is unconfirmed. The teacher must verify their email and set a password before signing in.'
+              : 'Invitation request accepted by the email provider, but delivery status is not confirmed. Check the invitation status before asking the teacher to activate.'
+            : 'Teacher record created, but invitations are unavailable in this storage mode; no invitation email was sent. Switch to Firebase-backed storage before onboarding this teacher.');
         renderSchoolDashboardPage('teachers');
         return;
       }
@@ -3991,6 +4004,24 @@ function attachSchoolHandlers() {
       const teacherRecord = currentSchoolTeachers.find((teacher) => teacher.id === teacherId || teacher.email === teacherId || teacher.teacherId === teacherId || teacher.employeeNumber === teacherId);
       if (!teacherRecord) {
         alert('Unable to find the selected teacher record. Refresh the page and try again.');
+        return;
+      }
+
+      if (action === 'resend-invitation') {
+        button.disabled = true;
+        const result = await resendTeacherInvitation(token, schoolId, teacherRecord.teacherId);
+        if (!result.ok || result.data?.status !== 'ok') {
+          alert(result.data?.message || 'Unable to resend the teacher invitation.');
+          button.disabled = false;
+          await renderSchoolDashboardPage('teachers');
+          return;
+        }
+        alert(result.data.invitationStatus === 'activated'
+          ? 'This teacher account is already activated.'
+          : result.data.invitationEmailStatus === 'provider_accepted' && result.data.invitationEmailDeliveryStatus === 'unconfirmed'
+            ? 'The email provider accepted the invitation request, but actual delivery is unconfirmed. The teacher must verify their email and set a password.'
+            : 'The invitation status was updated, but email-provider acceptance is not confirmed. Check the status before asking the teacher to activate.');
+        await renderSchoolDashboardPage('teachers');
         return;
       }
 
@@ -5817,6 +5848,9 @@ function clearAuthenticationState() {
   localStorage.removeItem('globyedu_sessionRemembered');
   localStorage.removeItem('globyedu_schoolDirectory');
   sessionStorage.removeItem('globyedu_sessionActive');
+  if (isFirebaseConfigured()) {
+    firebaseSignOutUser().catch(() => console.error('Firebase sign-out failed while clearing the session.'));
+  }
 }
 
 // Attach handlers for the dedicated platform admin login page.
@@ -5941,12 +5975,12 @@ function attachLoginHandlers() {
     },
     teacher: {
       title: 'Teacher',
-      description: 'Use your School ID, Teacher ID, and Password to manage classes and learners.',
+      description: 'Use your School ID, email address, and Password to manage classes and learners.',
       badge: 'Teacher',
-      identifierLabel: 'Teacher ID',
-      identifierPlaceholder: 'T001',
+      identifierLabel: 'Email address',
+      identifierPlaceholder: 'teacher@school.edu',
       showSchoolId: true,
-      googleEnabled: true,
+      googleEnabled: false,
     },
     student: {
       title: 'Student',
@@ -5973,12 +6007,14 @@ function attachLoginHandlers() {
     if (usernameInput) {
       usernameInput.placeholder = config.identifierPlaceholder;
       usernameInput.setAttribute('aria-label', config.identifierLabel);
+      usernameInput.setAttribute('type', role === 'teacher' ? 'email' : 'text');
     }
     if (fieldSchoolIdGroup) {
       fieldSchoolIdGroup.classList.toggle('hidden', !config.showSchoolId);
     }
     if (forgotPasswordLink) {
-      forgotPasswordLink.setAttribute('href', role === 'platform_admin' ? '#/forgot?type=platform_admin' : '#/forgot');
+      const resetType = ['platform_admin', 'teacher', 'student'].includes(role) ? role : 'school';
+      forgotPasswordLink.setAttribute('href', `#/forgot?type=${encodeURIComponent(resetType)}`);
     }
     roleButtons.forEach((button) => {
       const isSelected = button.dataset.loginRole === role;
@@ -6051,6 +6087,7 @@ function attachLoginHandlers() {
       return;
     }
 
+    let firebaseTeacherSignedIn = false;
     try {
       let response;
       if (role === 'platform_admin') {
@@ -6058,7 +6095,31 @@ function attachLoginHandlers() {
       } else if (role === 'school_authority') {
         response = await schoolAuthorityLogin(schoolId, username, password);
       } else if (role === 'teacher') {
-        response = await teacherLogin(schoolId, username, password);
+        if (!isFirebaseConfigured()) {
+          throw new Error('Teacher sign-in is currently unavailable. Please try again later.');
+        }
+        const credential = await firebaseSignInWithEmail(username, password);
+        firebaseTeacherSignedIn = true;
+        if (!credential?.user?.emailVerified) {
+          await firebaseSignOutUser();
+          firebaseTeacherSignedIn = false;
+          throw new Error('Unable to sign in. Please check your details.');
+        }
+        const idToken = await credential.user.getIdToken();
+        response = await apiFirebaseLogin(idToken, schoolId, false, {
+          identifier: username,
+          loginType: 'teacher',
+        });
+        if (response.ok && response.data?.status === 'ok' &&
+            !response.data.user?.roles?.includes('teacher')) {
+          await firebaseSignOutUser();
+          firebaseTeacherSignedIn = false;
+          throw new Error('Unable to sign in. Please check your details.');
+        }
+        if (!response.ok || response.data?.status !== 'ok') {
+          await firebaseSignOutUser();
+          firebaseTeacherSignedIn = false;
+        }
       } else {
         response = await studentLogin(schoolId, username, password);
       }
@@ -6120,7 +6181,10 @@ function attachLoginHandlers() {
         }
       }
     } catch (error) {
-      messageSlot.innerHTML = `<div class="rounded-3xl border border-rose-100 bg-rose-50 p-4 text-rose-800">Unable to sign in. Try again later.</div>`;
+      if (firebaseTeacherSignedIn) {
+        await firebaseSignOutUser();
+      }
+      messageSlot.innerHTML = `<div class="rounded-3xl border border-rose-100 bg-rose-50 p-4 text-rose-800">${error.message || 'Unable to sign in. Try again later.'}</div>`;
     }
 
     if (submitButton) submitButton.disabled = false;
@@ -6351,7 +6415,10 @@ function attachResetPasswordHandlers(token = '', loginType = 'school') {
       if (!result.ok || result.data?.status !== 'ok') {
         throw new Error(result.data?.message || 'Unable to reset password.');
       }
-      messageSlot.innerHTML = `<div class="rounded-3xl border border-emerald-100 bg-emerald-50 p-4 text-emerald-800">Your password has been updated. You can now sign in.</div>`;
+      const completionMessage = loginType === 'teacher' && result.data.emailVerified !== true
+        ? 'Your password has been set. Verify your email using the separate verification link before signing in.'
+        : 'Your password has been updated. You can now sign in.';
+      messageSlot.innerHTML = `<div class="rounded-3xl border border-emerald-100 bg-emerald-50 p-4 text-emerald-800">${completionMessage}</div>`;
     } catch (error) {
       messageSlot.innerHTML = `<div class="rounded-3xl border border-rose-100 bg-rose-50 p-4 text-rose-800">Unable to reset password. Please try again.</div>`;
     }

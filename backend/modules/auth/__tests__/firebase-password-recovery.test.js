@@ -9,7 +9,11 @@ function collectionRecords(name) {
 }
 
 function documentReference(collection, id) {
-  return { collection, id: String(id) };
+  return {
+    collection,
+    id: String(id),
+    get: async () => snapshot({ collection, id: String(id) }, collectionRecords(collection).get(String(id))),
+  };
 }
 
 function snapshot(reference, record) {
@@ -62,6 +66,7 @@ jest.mock('../../../firebase.data', () => ({
 }));
 jest.mock('../../../firebase.admin', () => ({
   getUserByEmail: jest.fn(async () => ({ uid: 'firebase-user-001', email: 'teacher@example.test' })),
+  getUser: jest.fn(async () => ({ uid: 'firebase-user-001', email: 'teacher@example.test', emailVerified: false })),
   updateUser: jest.fn(async () => ({})),
   revokeRefreshTokens: jest.fn(async () => undefined),
 }));
@@ -84,6 +89,7 @@ function seedUser(overrides = {}) {
     username: USER_EMAIL,
     schoolId: 'school-a',
     tenantId: 'school-a',
+    teacherId: 'T-001',
     roles: ['teacher'],
     role: 'teacher',
     status: 'active',
@@ -97,6 +103,17 @@ function seedUser(overrides = {}) {
     userId: USER_ID,
     revoked: false,
     expiresAt: Date.now() + 60_000,
+  });
+  collectionRecords('teachers').set('school-a:T-001', {
+    id: 'school-a:T-001',
+    schoolId: 'school-a',
+    teacherId: 'T-001',
+    email: USER_EMAIL,
+    firebaseUid: 'firebase-user-001',
+    role: 'teacher',
+    roles: ['teacher'],
+    status: 'active',
+    passwordNeedsReset: true,
   });
 }
 
@@ -177,6 +194,150 @@ describe('Firebase password recovery with Prisma unavailable', () => {
     await expect(authService.resetPassword(deliveredToken, 'AnotherStrong!Pass4'))
       .rejects.toThrow('Invalid or expired token');
     expect(collectionRecords('users').get(USER_ID).passwordHash).toBe('bcrypt:ResetStrong!Pass3');
+  });
+
+  test('teacher invitation password setup is school-bound, one-use, and synchronized with Firebase', async () => {
+    seedUser();
+    const rawToken = await authService.createTeacherInvitationPasswordToken({
+      userId: USER_ID,
+      schoolId: 'school-a',
+      teacherId: 'T-001',
+      email: USER_EMAIL,
+    });
+    const tokenHash = hashToken(rawToken);
+    expect(collectionRecords('teacherInvitationTokens').get(tokenHash)).toMatchObject({
+      userId: USER_ID,
+      schoolId: 'school-a',
+      teacherId: 'T-001',
+      firebaseUid: 'firebase-user-001',
+      email: USER_EMAIL,
+      used: false,
+    });
+    expect(JSON.stringify(collectionRecords('teacherInvitationTokens').get(tokenHash))).not.toContain(rawToken);
+    expect(collectionRecords('users').get(USER_ID).activeInvitationTokenHash).toBe(tokenHash);
+
+    await expect(authService.resetPassword(rawToken, 'TeacherStrong!Pass4')).resolves.toMatchObject({
+      invitationStatus: 'pending',
+      emailVerified: false,
+    });
+
+    expect(collectionRecords('users').get(USER_ID)).toMatchObject({
+      passwordHash: 'bcrypt:TeacherStrong!Pass4',
+      passwordNeedsReset: false,
+      passwordSyncPending: false,
+      invitationStatus: 'pending',
+    });
+    expect(collectionRecords('teachers').get('school-a:T-001')).toMatchObject({
+      passwordHash: 'bcrypt:TeacherStrong!Pass4',
+      passwordNeedsReset: false,
+      invitationStatus: 'pending',
+    });
+    expect(collectionRecords('teacherInvitationTokens').get(tokenHash)).toMatchObject({ used: true });
+    expect(require('../../../firebase.admin').updateUser).toHaveBeenCalledWith(
+      'firebase-user-001',
+      { password: 'TeacherStrong!Pass4' },
+    );
+    await expect(authService.resetPassword(rawToken, 'AnotherStrong!Pass5'))
+      .rejects.toThrow('Invalid or expired token');
+  });
+
+  test('teacher invitation password setup activates only after Firebase email verification', async () => {
+    seedUser();
+    const rawToken = await authService.createTeacherInvitationPasswordToken({
+      userId: USER_ID,
+      schoolId: 'school-a',
+      teacherId: 'T-001',
+      email: USER_EMAIL,
+    });
+    require('../../../firebase.admin').getUser.mockResolvedValueOnce({
+      uid: 'firebase-user-001',
+      email: USER_EMAIL,
+      emailVerified: true,
+    });
+
+    await expect(authService.resetPassword(rawToken, 'TeacherStrong!Pass4')).resolves.toMatchObject({
+      invitationStatus: 'activated',
+      emailVerified: true,
+    });
+    expect(collectionRecords('users').get(USER_ID)).toMatchObject({
+      emailVerified: true,
+      invitationStatus: 'activated',
+      passwordNeedsReset: false,
+    });
+    expect(collectionRecords('teachers').get('school-a:T-001')).toMatchObject({
+      emailVerified: true,
+      invitationStatus: 'activated',
+    });
+  });
+
+  test('teacher invitation tokens expire and become invalid when a resend issues a newer token', async () => {
+    seedUser();
+    const firstToken = await authService.createTeacherInvitationPasswordToken({
+      userId: USER_ID,
+      schoolId: 'school-a',
+      teacherId: 'T-001',
+      email: USER_EMAIL,
+    });
+    const secondToken = await authService.createTeacherInvitationPasswordToken({
+      userId: USER_ID,
+      schoolId: 'school-a',
+      teacherId: 'T-001',
+      email: USER_EMAIL,
+    });
+    expect(collectionRecords('teacherInvitationTokens').get(hashToken(firstToken))).toMatchObject({
+      revoked: true,
+    });
+    await expect(authService.resetPassword(firstToken, 'TeacherStrong!Pass4'))
+      .rejects.toThrow('Invalid or expired token');
+
+    const secondTokenHash = hashToken(secondToken);
+    collectionRecords('teacherInvitationTokens').get(secondTokenHash).expiresAt = Date.now() - 1;
+    await expect(authService.resetPassword(secondToken, 'TeacherStrong!Pass4'))
+      .rejects.toThrow('Invalid or expired token');
+    expect(collectionRecords('users').get(USER_ID).passwordHash).toBe('existing-hash');
+  });
+
+  test('rejects invitation activation when teacher or user school association changes', async () => {
+    seedUser();
+    const rawToken = await authService.createTeacherInvitationPasswordToken({
+      userId: USER_ID,
+      schoolId: 'school-a',
+      teacherId: 'T-001',
+      email: USER_EMAIL,
+    });
+    collectionRecords('teachers').get('school-a:T-001').schoolId = 'school-b';
+
+    await expect(authService.resetPassword(rawToken, 'TeacherStrong!Pass4'))
+      .rejects.toThrow('Invalid or expired token');
+    expect(collectionRecords('users').get(USER_ID).passwordHash).toBe('existing-hash');
+    expect(collectionRecords('teacherInvitationTokens').get(hashToken(rawToken)).used).toBe(false);
+  });
+
+  test('does not issue teacher setup tokens for a non-teacher identity', async () => {
+    seedUser({ role: 'student', roles: ['student'] });
+
+    await expect(authService.createTeacherInvitationPasswordToken({
+      userId: USER_ID,
+      schoolId: 'school-a',
+      teacherId: 'T-001',
+      email: USER_EMAIL,
+    })).rejects.toThrow(/does not match this invitation/i);
+    expect(collectionRecords('teacherInvitationTokens').size).toBe(0);
+  });
+
+  test('rejects weak passwords for teacher invitation setup without consuming the token', async () => {
+    seedUser();
+    const rawToken = await authService.createTeacherInvitationPasswordToken({
+      userId: USER_ID,
+      schoolId: 'school-a',
+      teacherId: 'T-001',
+      email: USER_EMAIL,
+    });
+
+    await expect(authService.resetPassword(rawToken, 'weak'))
+      .rejects.toThrow(/at least 8 characters/);
+    expect(collectionRecords('users').get(USER_ID).passwordHash).toBe('existing-hash');
+    expect(collectionRecords('teacherInvitationTokens').get(hashToken(rawToken)).used).toBe(false);
   });
 
   test('revokes the hashed reset token when email delivery fails', async () => {

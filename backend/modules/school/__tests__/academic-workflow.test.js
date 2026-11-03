@@ -1,3 +1,5 @@
+const useIsolatedSchoolStore = require('./isolated-school-store');
+const cleanupIsolatedSchoolStore = useIsolatedSchoolStore();
 const schoolService = require('../school.service');
 const { ensureDemoSchool, loadSchoolData, saveSchoolData } = require('../fallback.school');
 
@@ -7,6 +9,10 @@ function getFutureDueDate() {
 
 describe('academic workflow', () => {
   const schoolId = 'globy-school';
+
+  afterAll(() => {
+    cleanupIsolatedSchoolStore();
+  });
 
   beforeEach(() => {
     ensureDemoSchool();

@@ -506,7 +506,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
             <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Quick Actions</p>
             <div class="mt-4 grid gap-3 sm:grid-cols-2">
               ${renderQuickAction('Add Student', 'add-student')}
-              ${renderQuickAction('Add Teacher', 'add-teacher')}
+              ${renderQuickAction('Invite Teacher', 'add-teacher')}
               ${renderQuickAction('Create Announcement', 'create-announcement')}
               ${renderQuickAction('Send Message', 'send-message')}
               ${renderQuickAction('Create Class', 'create-class')}
@@ -674,10 +674,10 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
             <div>
               <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Teacher Management</p>
               <h2 class="mt-2 text-2xl font-semibold text-slate-900">Profiles, subjects, classes, assignments and performance</h2>
-              <p class="mt-2 text-sm text-slate-600">Manage teacher records, class and subject assignments, qualifications, and employment information.</p>
+              <p class="mt-2 text-sm text-slate-600">Manage teacher records and assignments. Invite teachers by email; they verify their email and set their own password before signing in.</p>
             </div>
             <div class="flex flex-wrap gap-3">
-              <button type="button" data-school-section-action="create-teacher" class="rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Create teacher</button>
+              <button type="button" data-school-section-action="create-teacher" class="rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Invite Teacher</button>
               <button type="button" data-school-export="teachers" class="rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700">Export CSV</button>
             </div>
           </div>
@@ -712,12 +712,26 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
                     <th class="px-4 py-3 text-left font-semibold">Position</th>
                     <th class="px-4 py-3 text-left font-semibold">Subjects</th>
                     <th class="px-4 py-3 text-left font-semibold">Status</th>
+                    <th class="px-4 py-3 text-left font-semibold">Account access</th>
                     <th class="px-4 py-3 text-left font-semibold">Actions</th>
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-200 bg-white">
                   ${teachers.map((teacher) => {
                     const subjects = Array.isArray(teacher.assignedSubjects) ? teacher.assignedSubjects.join(', ') : (teacher.assignedSubjects || '—');
+                    const verified = teacher.emailVerified === true || teacher.isVerified === true;
+                    const invitationExpired = teacher.invitationExpiresAt && Date.parse(teacher.invitationExpiresAt) <= Date.now();
+                    const invitationLabel = verified
+                      ? 'Account activated'
+                      : teacher.invitationEmailStatus === 'failed' || teacher.invitationStatus === 'failed'
+                        ? 'Invitation email failed'
+                        : teacher.invitationEmailStatus === 'provider_accepted'
+                          ? 'Provider accepted; delivery unconfirmed'
+                          : invitationExpired
+                            ? 'Invitation expired'
+                            : teacher.invitationStatus === 'pending'
+                              ? 'Email verification pending'
+                              : 'Not invited';
                     return `
                       <tr class="${teacher.status === 'archived' ? 'opacity-60' : ''}">
                         <td class="px-4 py-4 font-semibold text-slate-900">${escapeHtml(teacher.fullName || teacher.name || teacher.email || 'Teacher')}</td>
@@ -726,7 +740,9 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
                         <td class="px-4 py-4">${escapeHtml(teacher.position || '—')}</td>
                         <td class="px-4 py-4">${escapeHtml(subjects)}</td>
                         <td class="px-4 py-4"><span class="inline-flex rounded-full ${teacher.status === 'archived' ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'} px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em]">${escapeHtml(teacher.status || 'active')}</span></td>
+                        <td class="px-4 py-4">${escapeHtml(invitationLabel)}</td>
                         <td class="px-4 py-4 space-x-1">
+                          ${teacher.invitationStatus && !verified && teacher.status === 'active' ? `<button type="button" data-school-teacher-action="resend-invitation" data-school-teacher-id="${escapeHtml(teacher.teacherId || '')}" class="rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-xs font-semibold text-violet-700 hover:bg-violet-100">Resend invite</button>` : ''}
                           <button type="button" data-school-teacher-action="edit" data-school-teacher-id="${escapeHtml(teacher.id || teacher.email || teacher.teacherId || '')}" class="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-semibold text-sky-700 hover:bg-sky-100">Edit</button>
                           ${teacher.status === 'active' ? `<button type="button" data-school-teacher-action="archive" data-school-teacher-id="${escapeHtml(teacher.id || teacher.email || teacher.teacherId || '')}" class="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-100">Archive</button>` : `<button type="button" data-school-teacher-action="restore" data-school-teacher-id="${escapeHtml(teacher.id || teacher.email || teacher.teacherId || '')}" class="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-100">Restore</button><button type="button" data-school-teacher-action="delete" data-school-teacher-id="${escapeHtml(teacher.id || teacher.email || teacher.teacherId || '')}" class="rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100">Delete</button>`}
                         </td>

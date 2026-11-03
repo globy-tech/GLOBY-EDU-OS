@@ -206,6 +206,10 @@ export async function createSchoolEntity(token, schoolId, entityType, payload) {
   return postJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/entities/${encodeURIComponent(entityType)}`, payload, token);
 }
 
+export async function resendTeacherInvitation(token, schoolId, teacherId) {
+  return postJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/teachers/${encodeURIComponent(teacherId)}/resend-invitation`, {}, token);
+}
+
 export async function updateSchoolEntity(token, schoolId, entityType, entityId, payload) {
   return putJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`, payload, token);
 }

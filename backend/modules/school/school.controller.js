@@ -484,6 +484,31 @@ router.post('/:schoolId/entities/:entityType', authMiddleware, tenantMiddleware,
   }
 });
 
+router.post('/:schoolId/teachers/:teacherId/resend-invitation', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const result = await schoolService.resendFirebaseTeacherInvitation(
+      req.params.schoolId,
+      req.params.teacherId,
+      req.user,
+    );
+    await auditSchoolAction(req, {
+      action: 'teacher.invitation_resent',
+      resourceType: 'teacher',
+      resourceId: result.teacherId,
+      metadata: { invitationStatus: result.invitationStatus },
+    });
+    return res.json({
+      status: 'ok',
+      invitationStatus: result.invitationStatus,
+      invitationEmailStatus: result.invitationEmailStatus,
+      invitationEmailDeliveryStatus: result.invitationEmailDeliveryStatus,
+      expiresAt: result.invitationExpiresAt || null,
+    });
+  } catch (err) {
+    return res.status(400).json({ status: 'error', message: err.message });
+  }
+});
+
 // PUT /api/v1/schools/:schoolId/entities/:entityType/:entityId - Tenant-scoped edit entity
 router.put('/:schoolId/entities/:entityType/:entityId', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'teacher', 'student', 'super_admin']), async (req, res) => {
   try {

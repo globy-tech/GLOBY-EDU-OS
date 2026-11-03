@@ -6,6 +6,7 @@ const path = require('path');
 describe('login experience', () => {
   it('renders the required school authority, teacher, and student login fields while preserving the secure-session option', () => {
     const loginSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'login.js'), 'utf8');
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
 
     expect(loginSource).toContain('School Authority');
     expect(loginSource).toContain('Teacher');
@@ -13,8 +14,9 @@ describe('login experience', () => {
     expect(loginSource).not.toContain('super-admin-portal');
     expect(loginSource).not.toContain('Super Admin Login');
     expect(loginSource).toContain('School ID');
-    expect(loginSource).toContain('Teacher ID');
-    expect(loginSource).toContain('Student ID');
+    expect(mainSource).toContain("identifierLabel: 'Email address'");
+    expect(mainSource).toContain("identifierPlaceholder: 'teacher@school.edu'");
+    expect(mainSource).toContain("identifierLabel: 'Student ID'");
     expect(loginSource).not.toContain('Student name');
     expect(loginSource).not.toContain('Teacher name');
     expect(loginSource).not.toContain('School Name');

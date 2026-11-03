@@ -7,9 +7,11 @@ describe('Firebase-backed school login route', () => {
   let firebaseCore;
   let fallbackSchool;
   const originalDataStoreMode = process.env.DATA_STORE_MODE;
+  const originalQaMode = process.env.GLOBY_QA_MODE;
 
   beforeAll(async () => {
     process.env.DATA_STORE_MODE = 'firebase';
+    process.env.GLOBY_QA_MODE = 'true';
     jest.resetModules();
     jest.doMock('../../firebase.data', () => ({ isFirebaseDataConfigured: () => true }));
     jest.doMock('../../firebase.core', () => ({
@@ -53,10 +55,14 @@ describe('Firebase-backed school login route', () => {
     });
   });
 
+  beforeEach(() => jest.clearAllMocks());
+
   afterAll(async () => {
     if (server) await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     if (originalDataStoreMode === undefined) delete process.env.DATA_STORE_MODE;
     else process.env.DATA_STORE_MODE = originalDataStoreMode;
+    if (originalQaMode === undefined) delete process.env.GLOBY_QA_MODE;
+    else process.env.GLOBY_QA_MODE = originalQaMode;
     jest.dontMock('../../firebase.data');
     jest.dontMock('../../firebase.core');
     jest.dontMock('../../modules/auth/auth.service');
@@ -65,21 +71,33 @@ describe('Firebase-backed school login route', () => {
     jest.resetModules();
   });
 
-  test('authenticates through the tenant-scoped Firebase service and preserves the role response', async () => {
+  test('authenticates School Authority through the tenant-scoped password service', async () => {
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/auth/school-login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ schoolId: 'globy-school', username: 'T001', password: 'test-only-password', loginType: 'teacher' }),
+      body: JSON.stringify({ schoolId: 'globy-school', username: 'head@school.test', password: 'test-only-password', loginType: 'school_authority' }),
     });
     const payload = await response.json();
 
     expect(response.status).toBe(200);
-    expect(payload).toMatchObject({ status: 'ok', role: 'teacher', schoolId: 'globy-school', schoolName: 'Globy School' });
+    expect(payload).toMatchObject({ status: 'ok', role: 'school_authority', schoolId: 'globy-school', schoolName: 'Globy School' });
     expect(payload.accessToken).toBe('test-access-token');
     expect(payload.refreshToken).toBeUndefined();
     expect(response.headers.get('set-cookie')).toMatch(/globyedu_refresh_token=.*HttpOnly/i);
-    expect(authService.login).toHaveBeenCalledWith('globy-school', 'T001', 'test-only-password', { loginType: 'teacher' });
+    expect(authService.login).toHaveBeenCalledWith('globy-school', 'head@school.test', 'test-only-password', { loginType: 'school_authority' });
     expect(firebaseCore.getTenant).toHaveBeenCalledWith('globy-school');
+  });
+
+  test('rejects password-only teacher login without calling the password authentication service', async () => {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/auth/school-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ schoolId: 'globy-school', username: 'teacher@school.test', password: 'test-only-password', loginType: 'teacher' }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ status: 'error', message: 'Unable to sign in. Please check your details.' });
+    expect(authService.login).not.toHaveBeenCalled();
   });
 
   test('returns Firestore-backed schools with the existing dropdown response shape', async () => {

@@ -27,7 +27,7 @@ describe('school authority workspace', () => {
     expect(dashboardSource).toContain('Create Class');
     expect(dashboardSource).toContain('Generate Report');
     expect(dashboardSource).toContain('Add Student');
-    expect(dashboardSource).toContain('Add Teacher');
+    expect(dashboardSource).toContain('Invite Teacher');
   });
 
   it('reserves attendance submission for teachers, not School Authority', () => {
@@ -96,7 +96,7 @@ describe('school authority workspace', () => {
     expect(mainSource).toContain('[1, 2, 3].map((level) => ({ label: `SHS ${level}`, value: `SHS ${level}` }))');
     expect(mainSource).toContain('Principal');
     expect(mainSource).not.toContain('Is house master?');
-    expect(mainSource).toContain("showAdminForm('Register teacher'");
+    expect(mainSource).toContain("showAdminForm('Invite a teacher'");
     expect(mainSource).toContain("{ name: 'gender', label: 'Gender', type: 'select'");
     expect(mainSource).toContain("{ name: 'dateOfBirth', label: 'Date of birth (optional)'");
     expect(mainSource).toContain("{ name: 'profilePhoto', label: 'Profile photo', type: 'file'");

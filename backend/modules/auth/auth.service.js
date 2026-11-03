@@ -253,6 +253,7 @@ async function findFirebaseUserForLogin(tenantId, decoded, options = {}) {
     identifierMatchesUser(candidate, identifier) &&
     String(candidate.email || '').trim().toLowerCase() === email
   ));
+  if (options.requireLinkedFirebaseUid === true) return null;
   if (!matched) return null;
   if (isPlatformAdminIdentity(matched)) {
     throw new Error('Platform administrators cannot be linked through tenant Firebase login.');
@@ -310,6 +311,9 @@ async function login(tenantId, identifier, password, options = {}) {
 
   let user = await validateUserByEmail(tenantId, identifier, password);
   if (!user) throw new Error('Invalid credentials');
+  if (normalizeRoles(user).some((role) => String(role).trim().toLowerCase() === 'teacher')) {
+    throw new Error('Invalid credentials');
+  }
   if (user.passwordSyncPending === true) throw new Error('Password update is still being synchronized.');
   if (user.status !== 'active' || !roleMatchesLoginType(user, options.loginType)) throw new Error('Invalid credentials');
   if (firebaseData.isFirebaseDataConfigured() && user.isVerified !== true) {
@@ -384,25 +388,79 @@ async function loginWithFirebaseIdToken(idToken, tenantId, options = {}) {
   const tenant = await findTenantBySchoolId(tenantId);
   if (!tenant) throw new Error('Tenant not found.');
 
+  if (options.loginType === 'teacher' && !decoded.uid) {
+    throw new Error('Invalid Firebase ID token.');
+  }
+
   const firebaseMode = firebaseData.isFirebaseDataConfigured();
+  const teacherLogin = options.loginType === 'teacher';
+  let linkedTeacher = null;
+  if (teacherLogin && !firebaseMode) {
+    throw new Error('Firebase-backed school authentication is required for teacher sign-in.');
+  }
   if (firebaseMode && decoded.email_verified !== true) {
     throw new Error('Email must be verified before signing in.');
   }
   let user = firebaseMode
-    ? await findFirebaseUserForLogin(tenantId, decoded, options)
+    ? await findFirebaseUserForLogin(tenantId, decoded, {
+      ...options,
+      ...(teacherLogin ? { requireLinkedFirebaseUid: true } : {}),
+    })
     : await findUserByEmail(decoded.email);
   if (!user) {
     throw new Error('Google account not recognized. Contact your administrator.');
   }
   if (user.passwordSyncPending === true) throw new Error('Password update is still being synchronized.');
-  if (firebaseMode && user.isVerified !== true) {
+  if (teacherLogin) {
+    const userSchoolId = String(user.schoolId || user.tenantId || '');
+    if (userSchoolId !== String(tenantId) ||
+        String(user.email || '').trim().toLowerCase() !== String(decoded.email || '').trim().toLowerCase() ||
+        !normalizeRoles(user).some((role) => String(role).toLowerCase() === 'teacher') ||
+        String(user.status || '').toLowerCase() !== 'active') {
+      throw new Error('Active teacher account not found in this school.');
+    }
+
+    const teacherRecords = await firebaseCore.listBySchool('teachers', tenantId);
+    linkedTeacher = teacherRecords.find((record) => (
+      record.firebaseUid === decoded.uid &&
+      String(record.teacherId || '').trim().toLowerCase() === String(user.teacherId || '').trim().toLowerCase() &&
+      String(record.email || '').trim().toLowerCase() === String(decoded.email || '').trim().toLowerCase()
+    ));
+    if (!linkedTeacher || String(linkedTeacher.status || '').toLowerCase() !== 'active') {
+      throw new Error('Active teacher account not found in this school.');
+    }
+    if (user.passwordNeedsReset === true) {
+      throw new Error('Set your account password using the teacher invitation link before signing in.');
+    }
+    if (typeof firebaseAdmin.getUser === 'function') {
+      const authUser = await firebaseAdmin.getUser(decoded.uid);
+      if (authUser.disabled || authUser.emailVerified !== true ||
+          String(authUser.email || '').trim().toLowerCase() !== String(decoded.email || '').trim().toLowerCase()) {
+        throw new Error('Teacher account is disabled or its email is not verified.');
+      }
+    }
+  }
+  if (firebaseMode && (user.isVerified !== true ||
+      (teacherLogin && (user.emailVerified !== true || user.passwordNeedsReset === true || user.invitationStatus !== 'activated')))) {
     const updates = {
       isVerified: true,
       emailVerified: true,
       firebaseUid: decoded.uid,
     };
+    if (teacherLogin) {
+      updates.invitationStatus = 'activated';
+      updates.invitationActivatedAt = user.invitationActivatedAt || new Date().toISOString();
+    }
     await firebaseCore.saveById('users', user.id, updates, true);
     Object.assign(user, updates);
+  }
+  if (teacherLogin && linkedTeacher) {
+    await firebaseCore.saveById('teachers', linkedTeacher.id, {
+      isVerified: true,
+      emailVerified: true,
+      invitationStatus: 'activated',
+      invitationActivatedAt: linkedTeacher.invitationActivatedAt || new Date().toISOString(),
+    }, true);
   }
 
   if (!firebaseMode && tenant.id !== user.tenantId) {
@@ -659,6 +717,103 @@ async function forgotPassword(email, options = {}) {
   return token; // caller should send email
 }
 
+async function createTeacherInvitationPasswordToken({ userId, schoolId, teacherId, email }) {
+  if (!firebaseData.isFirebaseDataConfigured()) {
+    throw new Error('Firebase-backed teacher account storage is required for invitation setup.');
+  }
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const normalizedSchoolId = String(schoolId || '').trim();
+  const normalizedTeacherId = String(teacherId || '').trim();
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedEmail || !normalizedSchoolId || !normalizedTeacherId || !normalizedUserId) {
+    throw new Error('Teacher invitation identity is incomplete.');
+  }
+
+  const firestore = firebaseData.getFirestore();
+  const userRef = firestore.collection('users').doc(normalizedUserId);
+  const teacherRef = firestore.collection('teachers').doc(`${normalizedSchoolId}:${normalizedTeacherId}`);
+  const [userSnapshot, teacherSnapshot] = await Promise.all([userRef.get(), teacherRef.get()]);
+  const user = userSnapshot.exists ? userSnapshot.data() : null;
+  const teacher = teacherSnapshot.exists ? teacherSnapshot.data() : null;
+  const uid = String(user?.firebaseUid || '');
+  const userRoles = normalizeRoles(user || {}).map((role) => String(role).toLowerCase());
+  if (!user || !teacher || user.status !== 'active' || teacher.status !== 'active' ||
+      !userRoles.includes('teacher') || String(user.schoolId || user.tenantId || '') !== normalizedSchoolId ||
+      teacher.schoolId !== normalizedSchoolId || user.teacherId !== normalizedTeacherId ||
+      teacher.teacherId !== normalizedTeacherId || !uid || teacher.firebaseUid !== uid ||
+      String(user.email || '').trim().toLowerCase() !== normalizedEmail ||
+      String(teacher.email || '').trim().toLowerCase() !== normalizedEmail ||
+      user.passwordSyncPending === true) {
+    throw new Error('The active teacher account does not match this invitation.');
+  }
+
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashToken(rawToken);
+  const tokenRef = firestore.collection('teacherInvitationTokens').doc(tokenHash);
+  const now = Date.now();
+  const expiresAt = now + config.tokens.emailTokenMinutes * 60 * 1000;
+
+  await firestore.runTransaction(async (transaction) => {
+    const [currentUserSnapshot, currentTeacherSnapshot] = await Promise.all([
+      transaction.get(userRef),
+      transaction.get(teacherRef),
+    ]);
+    const currentUser = currentUserSnapshot.exists ? currentUserSnapshot.data() : null;
+    const currentTeacher = currentTeacherSnapshot.exists ? currentTeacherSnapshot.data() : null;
+    const previousTokenHash = String(currentUser?.activeInvitationTokenHash || '');
+    const previousTokenRef = previousTokenHash
+      ? firestore.collection('teacherInvitationTokens').doc(previousTokenHash)
+      : null;
+    const previousTokenSnapshot = previousTokenRef ? await transaction.get(previousTokenRef) : null;
+    if (!currentUser || !currentTeacher || currentUser.firebaseUid !== uid ||
+        currentTeacher.firebaseUid !== uid ||
+        currentUser.activeInvitationTokenHash !== user.activeInvitationTokenHash ||
+        currentTeacher.activeInvitationTokenHash !== teacher.activeInvitationTokenHash ||
+        currentTeacher.activeInvitationTokenHash !== currentUser.activeInvitationTokenHash ||
+        currentUser.status !== 'active' || currentTeacher.status !== 'active' ||
+        currentUser.schoolId !== normalizedSchoolId || currentTeacher.schoolId !== normalizedSchoolId ||
+        currentUser.teacherId !== normalizedTeacherId || currentTeacher.teacherId !== normalizedTeacherId ||
+        !normalizeRoles(currentUser).some((role) => String(role).toLowerCase() === 'teacher') ||
+        String(currentUser.email || '').trim().toLowerCase() !== normalizedEmail ||
+        String(currentTeacher.email || '').trim().toLowerCase() !== normalizedEmail ||
+        currentUser.passwordSyncPending === true) {
+      throw new Error('The active teacher account does not match this invitation.');
+    }
+
+    if (previousTokenSnapshot?.exists && previousTokenSnapshot.data()?.used !== true) {
+      transaction.update(previousTokenRef, { revoked: true, revokedAt: now });
+    }
+    transaction.create(tokenRef, {
+      userId: normalizedUserId,
+      schoolId: normalizedSchoolId,
+      teacherId: normalizedTeacherId,
+      teacherDocumentId: teacherRef.id,
+      firebaseUid: uid,
+      email: normalizedEmail,
+      createdAt: now,
+      expiresAt,
+      used: false,
+      revoked: false,
+    });
+    transaction.update(userRef, { activeInvitationTokenHash: tokenHash });
+    transaction.update(teacherRef, { activeInvitationTokenHash: tokenHash });
+  });
+
+  return rawToken;
+}
+
+async function revokeTeacherInvitationPasswordToken(token) {
+  if (!token || !firebaseData.isFirebaseDataConfigured()) return false;
+  const firestore = firebaseData.getFirestore();
+  const tokenRef = firestore.collection('teacherInvitationTokens').doc(hashToken(token));
+  return firestore.runTransaction(async (transaction) => {
+    const tokenSnapshot = await transaction.get(tokenRef);
+    if (!tokenSnapshot.exists || tokenSnapshot.data()?.used === true) return false;
+    transaction.update(tokenRef, { revoked: true, revokedAt: Date.now() });
+    return true;
+  });
+}
+
 async function verifyFirebaseIdToken(idToken) {
   if (!firebaseAdmin || !firebaseAdmin.isFirebaseConfigured()) {
     throw new Error('Firebase authentication is not configured.');
@@ -694,9 +849,129 @@ async function clearFirebasePasswordSyncPending(userId, passwordHash) {
   });
 }
 
+async function resetTeacherInvitationPassword(token, newPassword) {
+  if (!token) throw new Error('Invalid or expired token');
+  if (!isStrongPassword(newPassword)) throw new Error('New password must be at least 8 characters and include uppercase, lowercase, number, and symbol.');
+
+  const firestore = firebaseData.getFirestore();
+  const tokenHash = hashToken(token);
+  const tokenRef = firestore.collection('teacherInvitationTokens').doc(tokenHash);
+  const passwordHash = await bcrypt.hash(newPassword, config.bcrypt.saltRounds);
+  const now = Date.now();
+  const passwordChangedAt = new Date(now).toISOString();
+  let updatedUser;
+
+  await firestore.runTransaction(async (transaction) => {
+    const tokenSnapshot = await transaction.get(tokenRef);
+    const invitation = tokenSnapshot.exists ? tokenSnapshot.data() : null;
+    if (!invitation || invitation.used === true || invitation.revoked === true ||
+        Number(invitation.expiresAt) <= now || !invitation.userId || !invitation.schoolId ||
+        !invitation.teacherId || !invitation.firebaseUid) {
+      throw new Error('Invalid or expired token');
+    }
+
+    const userRef = firestore.collection('users').doc(String(invitation.userId));
+    const teacherRef = firestore.collection('teachers').doc(String(invitation.teacherDocumentId));
+    const [userSnapshot, teacherSnapshot] = await Promise.all([
+      transaction.get(userRef),
+      transaction.get(teacherRef),
+    ]);
+    const user = userSnapshot.exists ? userSnapshot.data() : null;
+    const teacher = teacherSnapshot.exists ? teacherSnapshot.data() : null;
+    const roles = normalizeRoles(user || {}).map((role) => String(role).toLowerCase());
+    const email = String(invitation.email || '').trim().toLowerCase();
+    if (!user || !teacher || user.status !== 'active' || teacher.status !== 'active' ||
+        !roles.includes('teacher') ||
+        String(user.schoolId || user.tenantId || '') !== invitation.schoolId ||
+        teacher.schoolId !== invitation.schoolId ||
+        user.teacherId !== invitation.teacherId || teacher.teacherId !== invitation.teacherId ||
+        user.firebaseUid !== invitation.firebaseUid || teacher.firebaseUid !== invitation.firebaseUid ||
+        String(user.email || '').trim().toLowerCase() !== email ||
+        String(teacher.email || '').trim().toLowerCase() !== email ||
+        user.activeInvitationTokenHash !== tokenHash ||
+        teacher.activeInvitationTokenHash !== tokenHash) {
+      throw new Error('Invalid or expired token');
+    }
+    if (user.passwordSyncPending === true) throw new Error('Password update is still being synchronized.');
+
+    const activeSessionIds = Array.isArray(user.activeSessionIds) ? user.activeSessionIds : [];
+    const activeSessionRefs = activeSessionIds.map((sessionId) => firestore.collection('authSessions').doc(String(sessionId)));
+    const activeSessionSnapshots = await Promise.all(activeSessionRefs.map((sessionRef) => transaction.get(sessionRef)));
+    activeSessionSnapshots.forEach((sessionSnapshot, index) => {
+      if (sessionSnapshot.exists && sessionSnapshot.data()?.revoked !== true) {
+        transaction.update(activeSessionRefs[index], { revoked: true, revokedAt: now });
+      }
+    });
+
+    transaction.update(userRef, {
+      passwordHash,
+      passwordNeedsReset: false,
+      passwordChangedAt,
+      passwordSyncPending: true,
+      activeSessionIds: [],
+    });
+    transaction.update(teacherRef, {
+      passwordHash,
+      passwordNeedsReset: false,
+      passwordChangedAt,
+    });
+    updatedUser = {
+      ...user,
+      id: String(invitation.userId),
+      email,
+      firebaseUid: invitation.firebaseUid,
+      passwordHash,
+      passwordSyncPending: true,
+    };
+  });
+
+  await syncFirebasePassword(updatedUser, newPassword);
+  const authUser = await firebaseAdmin.getUser(updatedUser.firebaseUid);
+  const emailVerified = authUser.emailVerified === true;
+  const activatedAt = emailVerified ? new Date().toISOString() : null;
+  await firestore.runTransaction(async (transaction) => {
+    const userRef = firestore.collection('users').doc(String(updatedUser.id));
+    const teacherRef = firestore.collection('teachers').doc(`${updatedUser.schoolId}:${updatedUser.teacherId}`);
+    const [tokenSnapshot, userSnapshot, teacherSnapshot] = await Promise.all([
+      transaction.get(tokenRef),
+      transaction.get(userRef),
+      transaction.get(teacherRef),
+    ]);
+    const user = userSnapshot.exists ? userSnapshot.data() : null;
+    const teacher = teacherSnapshot.exists ? teacherSnapshot.data() : null;
+    if (!tokenSnapshot.exists || tokenSnapshot.data()?.used === true ||
+        tokenSnapshot.data()?.revoked === true || !user || !teacher ||
+        user.passwordHash !== passwordHash || user.passwordSyncPending !== true ||
+        user.activeInvitationTokenHash !== tokenHash ||
+        teacher.activeInvitationTokenHash !== tokenHash ||
+        teacher.firebaseUid !== updatedUser.firebaseUid) {
+      throw new Error('Teacher account changed during password synchronization.');
+    }
+
+    const invitationStatus = emailVerified ? 'activated' : 'pending';
+    const updates = {
+      isVerified: emailVerified,
+      emailVerified,
+      passwordSyncPending: false,
+      invitationStatus,
+      invitationActivatedAt: emailVerified ? (user.invitationActivatedAt || activatedAt) : null,
+      activeInvitationTokenHash: null,
+    };
+    transaction.update(userRef, updates);
+    transaction.update(teacherRef, updates);
+    transaction.update(tokenRef, { used: true, usedAt: Date.now() });
+  });
+  return { invitationStatus: emailVerified ? 'activated' : 'pending', emailVerified };
+}
+
 async function resetPassword(token, newPassword) {
   if (firebaseData.isFirebaseDataConfigured()) {
     if (!token) throw new Error('Invalid or expired token');
+    const invitationSnapshot = await firebaseData.getFirestore()
+      .collection('teacherInvitationTokens')
+      .doc(hashToken(token))
+      .get();
+    if (invitationSnapshot.exists) return resetTeacherInvitationPassword(token, newPassword);
     if (!isStrongPassword(newPassword)) throw new Error('New password must be at least 8 characters and include uppercase, lowercase, number, and symbol.');
     const firestore = firebaseData.getFirestore();
     const tokenHash = hashToken(token);
@@ -759,4 +1034,18 @@ async function resetPassword(token, newPassword) {
   return true;
 }
 
-module.exports = { validateUserByEmail, login, loginPlatformAdmin, refresh, logout, changePassword, forgotPassword, resetPassword, loginWithFirebaseIdToken, verifyFirebaseIdToken, linkFirebaseIdentity };
+module.exports = {
+  validateUserByEmail,
+  login,
+  loginPlatformAdmin,
+  refresh,
+  logout,
+  changePassword,
+  forgotPassword,
+  createTeacherInvitationPasswordToken,
+  revokeTeacherInvitationPasswordToken,
+  resetPassword,
+  loginWithFirebaseIdToken,
+  verifyFirebaseIdToken,
+  linkFirebaseIdentity,
+};

@@ -1,3 +1,5 @@
+const useIsolatedSchoolStore = require('./isolated-school-store');
+const cleanupIsolatedSchoolStore = useIsolatedSchoolStore();
 const schoolService = require('../school.service');
 const { ensureDemoSchool, loadSchoolData, saveSchoolData } = require('../fallback.school');
 
@@ -8,6 +10,10 @@ describe('workspace messaging and support', () => {
     const snapshot = JSON.parse(JSON.stringify(global.__workspaceSnapshot || []));
     saveSchoolData(snapshot);
     delete global.__workspaceSnapshot;
+  });
+
+  afterAll(() => {
+    cleanupIsolatedSchoolStore();
   });
 
   beforeEach(() => {

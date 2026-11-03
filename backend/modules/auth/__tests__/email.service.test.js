@@ -1,4 +1,4 @@
-describe('Brevo email service', () => {
+describe('transactional email service', () => {
   const originalEnv = { ...process.env };
   const originalFetch = global.fetch;
 
@@ -39,8 +39,14 @@ describe('Brevo email service', () => {
         }),
       })
     );
-    expect(result.ok).toBe(true);
-    expect(result.messageId).toBe('msg_123');
+    expect(result).toMatchObject({
+      ok: true,
+      provider: 'brevo',
+      requestStatus: 'accepted',
+      deliveryStatus: 'unconfirmed',
+      status: 200,
+      messageId: 'msg_123',
+    });
   });
 
   it('skips delivery cleanly when Brevo is not configured', async () => {
@@ -78,7 +84,14 @@ describe('Brevo email service', () => {
         }),
       })
     );
-    expect(result).toMatchObject({ ok: true, status: 200, messageId: 'resend_msg_123' });
+    expect(result).toMatchObject({
+      ok: true,
+      status: 200,
+      messageId: 'resend_msg_123',
+      provider: 'resend',
+      requestStatus: 'accepted',
+      deliveryStatus: 'unconfirmed',
+    });
   });
 
   it('handles provider failures without throwing', async () => {
@@ -92,7 +105,34 @@ describe('Brevo email service', () => {
     await expect(sendEmail('student@example.com', 'Password reset', '<p>Reset</p>')).resolves.toMatchObject({
       ok: false,
       reason: 'BREVO_API_ERROR',
+      status: 401,
+      provider: 'brevo',
     });
     expect(console.error).toHaveBeenCalled();
+  });
+
+  it('does not send with a malformed sender address', async () => {
+    process.env.BREVO_SENDER_EMAIL = 'not-an-email';
+
+    const { sendEmail } = require('../utils/email');
+    const result = await sendEmail('student@example.com', 'Password reset', '<p>Reset</p>');
+
+    expect(result).toMatchObject({ ok: false, reason: 'INVALID_SENDER_ADDRESS', provider: 'brevo' });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('reports an unverified sender rejection without logging provider response details', async () => {
+    global.fetch.mockResolvedValue({
+      ok: false,
+      status: 403,
+      text: async () => JSON.stringify({ code: 'sender_not_verified', email: 'student@example.com' }),
+    });
+
+    const { sendEmail } = require('../utils/email');
+    const result = await sendEmail('student@example.com', 'Password reset', '<p>Reset</p>');
+
+    expect(result).toMatchObject({ ok: false, reason: 'BREVO_API_ERROR', status: 403, provider: 'brevo' });
+    expect(console.error.mock.calls.join(' ')).not.toContain('student@example.com');
+    expect(console.error.mock.calls.join(' ')).not.toContain('test_api_key');
   });
 });

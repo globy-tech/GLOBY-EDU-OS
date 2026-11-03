@@ -1,6 +1,7 @@
 jest.mock('../../../firebase.admin', () => ({
   isFirebaseConfigured: () => true,
   getUserByEmail: jest.fn(),
+  getUser: jest.fn(),
   verifyIdToken: jest.fn(async () => ({ email: 'linked@globy.test', email_verified: true })),
 }));
 
@@ -94,6 +95,23 @@ describe('Firebase login account-linking policy', () => {
       .rejects.toThrow(/account not recognized/i);
   });
 
+  test('does not issue teacher sessions through password-only authentication', async () => {
+    mockFirebaseSchoolLogin({
+      schoolId: 'globy-school',
+      schoolStatus: 'active',
+      subscriptionStatus: 'active',
+    }, {
+      role: 'teacher',
+      roles: ['teacher'],
+      teacherId: 'T-ABC12345',
+      isVerified: true,
+      emailVerified: true,
+    });
+
+    await expect(authService.login('globy-school', 'linked@globy.test', 'test-password'))
+      .rejects.toThrow('Invalid credentials');
+  });
+
   test('rejects a linked non-super-admin account for platform login', async () => {
     await expect(authService.loginWithFirebaseIdToken('firebase-token', 'globy-school', { platformAdminMode: true }))
       .rejects.toThrow(/dedicated platform administrator login/i);
@@ -177,6 +195,227 @@ describe('Firebase login account-linking policy', () => {
       isVerified: true,
       emailVerified: true,
     });
+  });
+
+  test('authenticates teachers only through their linked active school account', async () => {
+    const { userRecord } = mockFirebaseSchoolLogin({
+      schoolId: 'globy-school',
+      schoolStatus: 'active',
+      subscriptionStatus: 'active',
+    }, {
+      role: 'teacher',
+      roles: ['teacher'],
+      teacherId: 'T-ABC12345',
+      firebaseUid: 'firebase-user-1',
+      isVerified: false,
+      emailVerified: false,
+      passwordNeedsReset: false,
+      invitationStatus: 'pending',
+    });
+    const teacherRecord = {
+      id: 'globy-school:T-ABC12345',
+      schoolId: 'globy-school',
+      teacherId: 'T-ABC12345',
+      firebaseUid: 'firebase-user-1',
+      email: 'linked@globy.test',
+      status: 'active',
+    };
+    const firebaseAdmin = require('../../../firebase.admin');
+    firebaseAdmin.verifyIdToken.mockResolvedValueOnce({
+      uid: 'firebase-user-1',
+      email: 'linked@globy.test',
+      email_verified: true,
+    });
+    firebaseAdmin.getUser.mockResolvedValue({
+      uid: 'firebase-user-1',
+      email: 'linked@globy.test',
+      emailVerified: true,
+      disabled: false,
+    });
+    jest.spyOn(firebaseCore, 'listBySchool').mockImplementation(async (collection) => (
+      collection === 'users' ? [userRecord] : [teacherRecord]
+    ));
+    jest.spyOn(firebaseCore, 'saveById').mockImplementation(async (collection, id, updates) => {
+      Object.assign(collection === 'users' ? userRecord : teacherRecord, updates);
+      return { id, ...updates };
+    });
+
+    const result = await authService.loginWithFirebaseIdToken('firebase-token', 'globy-school', {
+      identifier: 'linked@globy.test',
+      loginType: 'teacher',
+    });
+
+    expect(result.user.roles).toEqual(['teacher']);
+    expect(userRecord).toMatchObject({
+      firebaseUid: 'firebase-user-1',
+      isVerified: true,
+      emailVerified: true,
+      passwordNeedsReset: false,
+      invitationStatus: 'activated',
+    });
+    expect(teacherRecord).toMatchObject({
+      emailVerified: true,
+      invitationStatus: 'activated',
+    });
+  });
+
+  test('does not activate or issue a teacher session before password setup is complete', async () => {
+    const { userRecord } = mockFirebaseSchoolLogin({
+      schoolId: 'globy-school',
+      schoolStatus: 'active',
+      subscriptionStatus: 'active',
+    }, {
+      role: 'teacher',
+      roles: ['teacher'],
+      teacherId: 'T-ABC12345',
+      firebaseUid: 'firebase-user-1',
+      isVerified: true,
+      emailVerified: true,
+      passwordNeedsReset: true,
+      invitationStatus: 'pending',
+    });
+    const teacherRecord = {
+      id: 'globy-school:T-ABC12345',
+      schoolId: 'globy-school',
+      teacherId: 'T-ABC12345',
+      firebaseUid: 'firebase-user-1',
+      email: 'linked@globy.test',
+      status: 'active',
+    };
+    const firebaseAdmin = require('../../../firebase.admin');
+    firebaseAdmin.verifyIdToken.mockResolvedValueOnce({
+      uid: 'firebase-user-1',
+      email: 'linked@globy.test',
+      email_verified: true,
+    });
+    firebaseAdmin.getUser.mockResolvedValue({
+      uid: 'firebase-user-1',
+      email: 'linked@globy.test',
+      emailVerified: true,
+      disabled: false,
+    });
+    const saveById = jest.spyOn(firebaseCore, 'saveById');
+    jest.spyOn(firebaseCore, 'listBySchool').mockImplementation(async (collection) => (
+      collection === 'users' ? [userRecord] : [teacherRecord]
+    ));
+
+    await expect(authService.loginWithFirebaseIdToken('firebase-token', 'globy-school', {
+      loginType: 'teacher',
+    })).rejects.toThrow(/set your account password/i);
+    expect(saveById).not.toHaveBeenCalled();
+    expect(userRecord.invitationStatus).toBe('pending');
+  });
+
+  test('rejects a teacher token with an incorrect school ID', async () => {
+    const firebaseCore = require('../../../firebase.core');
+    jest.spyOn(firebaseData, 'isFirebaseDataConfigured').mockReturnValue(true);
+    jest.spyOn(firebaseCore, 'getTenant').mockResolvedValue(null);
+    await expect(authService.loginWithFirebaseIdToken('firebase-token', 'wrong-school', {
+      loginType: 'teacher',
+    })).rejects.toThrow('Tenant not found.');
+  });
+
+  test('rejects teacher login when the Auth UID is not linked to the requested school', async () => {
+    const { userRecord } = mockFirebaseSchoolLogin({
+      schoolId: 'globy-school',
+      schoolStatus: 'active',
+      subscriptionStatus: 'active',
+    }, { role: 'teacher', roles: ['teacher'], firebaseUid: 'different-uid', teacherId: 'T-ABC12345' });
+    const firebaseAdmin = require('../../../firebase.admin');
+    firebaseAdmin.verifyIdToken.mockResolvedValueOnce({
+      uid: 'firebase-user-1',
+      email: 'linked@globy.test',
+      email_verified: true,
+    });
+    jest.spyOn(firebaseCore, 'listBySchool').mockImplementation(async (collection) => (
+      collection === 'users' ? [userRecord] : []
+    ));
+
+    await expect(authService.loginWithFirebaseIdToken('firebase-token', 'globy-school', {
+      identifier: 'linked@globy.test',
+      loginType: 'teacher',
+    })).rejects.toThrow(/account not recognized/i);
+  });
+
+  test('rejects inactive, mis-associated, and non-teacher records', async () => {
+    for (const overrides of [
+      { status: 'disabled', firebaseUid: 'firebase-user-1', role: 'teacher', roles: ['teacher'] },
+      { tenantId: 'other-school', schoolId: 'other-school', firebaseUid: 'firebase-user-1', role: 'teacher', roles: ['teacher'] },
+      { firebaseUid: 'firebase-user-1', role: 'student', roles: ['student'] },
+    ]) {
+      const { userRecord } = mockFirebaseSchoolLogin({
+        schoolId: 'globy-school',
+        schoolStatus: 'active',
+        subscriptionStatus: 'active',
+      }, { teacherId: 'T-ABC12345', ...overrides });
+      const firebaseAdmin = require('../../../firebase.admin');
+      firebaseAdmin.verifyIdToken.mockResolvedValueOnce({
+        uid: 'firebase-user-1',
+        email: 'linked@globy.test',
+        email_verified: true,
+      });
+      jest.spyOn(firebaseCore, 'listBySchool').mockImplementation(async (collection) => (
+        collection === 'users' ? [userRecord] : [{
+          id: 'globy-school:T-ABC12345',
+          schoolId: 'globy-school',
+          teacherId: 'T-ABC12345',
+          firebaseUid: 'firebase-user-1',
+          email: 'linked@globy.test',
+          status: 'active',
+        }]
+      ));
+
+      const expectedFailure = overrides.roles[0] === 'teacher'
+        ? /Active teacher account not found/i
+        : /account not recognized/i;
+      await expect(authService.loginWithFirebaseIdToken('firebase-token', 'globy-school', {
+        identifier: 'linked@globy.test',
+        loginType: 'teacher',
+      })).rejects.toThrow(expectedFailure);
+      jest.restoreAllMocks();
+    }
+  });
+
+  test('rejects disabled Firebase Auth teachers', async () => {
+    const { userRecord } = mockFirebaseSchoolLogin({
+      schoolId: 'globy-school',
+      schoolStatus: 'active',
+      subscriptionStatus: 'active',
+    }, {
+      role: 'teacher',
+      roles: ['teacher'],
+      firebaseUid: 'firebase-user-1',
+      teacherId: 'T-ABC12345',
+      isVerified: true,
+      emailVerified: true,
+    });
+    const firebaseAdmin = require('../../../firebase.admin');
+    firebaseAdmin.verifyIdToken.mockResolvedValueOnce({
+      uid: 'firebase-user-1',
+      email: 'linked@globy.test',
+      email_verified: true,
+    });
+    firebaseAdmin.getUser.mockResolvedValue({
+      uid: 'firebase-user-1',
+      email: 'linked@globy.test',
+      emailVerified: true,
+      disabled: true,
+    });
+    jest.spyOn(firebaseCore, 'listBySchool').mockImplementation(async (collection) => (
+      collection === 'users' ? [userRecord] : [{
+        id: 'globy-school:T-ABC12345',
+        schoolId: 'globy-school',
+        teacherId: 'T-ABC12345',
+        firebaseUid: 'firebase-user-1',
+        email: 'linked@globy.test',
+        status: 'active',
+      }]
+    ));
+
+    await expect(authService.loginWithFirebaseIdToken('firebase-token', 'globy-school', {
+      identifier: 'linked@globy.test',
+      loginType: 'teacher',
+    })).rejects.toThrow(/disabled or its email is not verified/i);
   });
 
   test('allows an active subscription when an old trial end date remains on the tenant', async () => {

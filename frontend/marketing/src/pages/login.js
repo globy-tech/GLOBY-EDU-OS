@@ -64,7 +64,7 @@ export function LoginPage() {
               </div>
             </div>
 
-            <div class="sr-only" aria-hidden="true">School ID Teacher ID Student ID</div>
+            <div class="sr-only" aria-hidden="true">School ID Teacher email Student ID</div>
             <div id="login-message" class="min-h-[2rem] text-sm text-slate-600"></div>
 
             <p class="text-center text-sm text-slate-500">New to GlobyEdu? <a href="#/register" class="font-semibold text-sky-600 hover:text-sky-700">Register your school</a>.</p>

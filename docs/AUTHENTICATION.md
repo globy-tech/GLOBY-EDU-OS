@@ -23,7 +23,7 @@ RBAC
 Security notes
 - Passwords are hashed with `bcrypt` (configurable rounds).
 - Tokens are signed using secrets from environment variables found in `backend/config/auth.config.js`.
-- Email sending is a stub; integrate a provider for production.
+- Transactional email uses Brevo when configured, otherwise Resend. If neither is configured, sending is skipped and reported as a failure.
 
 ## Current development login flow
 
@@ -32,6 +32,13 @@ Security notes
 - The fallback development tenant is persisted in `backend/data/schools.json`; its accounts remain available when Firebase is not configured.
 - The frontend stores the returned access token for the current development architecture. Passwords are never stored by the frontend.
 
+## Teacher invitations
+
+- The School Authority Teachers section offers an invitation form for Firebase-backed schools. It creates a Firebase Authentication account with a random temporary password and tenant-linked `users` and `teachers` records; the temporary password is never returned to the frontend.
+- The setup email contains a Firebase email-verification link and a short-lived, single-use password-setup link. The setup token is stored by hash and bound to the teacher, school, Firebase UID, and email. Resending revokes the previous unused token.
+- Invitation state is stored on both tenant-linked records. A successful provider response is recorded as `provider_accepted` with delivery `unconfirmed`; it does not claim that the message reached the recipient. Provider errors are recorded as failed, and the saved account remains available for a safe retry through **Resend invite**.
+- Duplicate school emails and emails already present in Firebase Authentication are rejected. Invitation creation and resend are restricted to the authenticated school tenant and School Authority role; cross-tenant operations are rejected.
+- Teacher invitations require Firebase-backed school storage. In JSON fallback mode, invitations are unavailable and no email is sent. Teacher password sign-in requires Firebase authentication.
 ## Firebase readiness
 
 - Firebase web configuration is loaded at runtime from `GET /config/firebase.js`, using only public web configuration values.

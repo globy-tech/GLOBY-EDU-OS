@@ -22,6 +22,16 @@ function isBrevoConfigured() {
   return Boolean(apiKey && senderEmail);
 }
 
+function getSenderAddress(value) {
+  const sender = String(value || '').trim();
+  const displayNameMatch = sender.match(/<([^<>]+)>$/);
+  return displayNameMatch ? displayNameMatch[1].trim() : sender;
+}
+
+function isValidSender(value) {
+  return /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(getSenderAddress(value));
+}
+
 async function sendEmail(to, subject, html) {
   const recipient = String(to || '').trim();
   const emailSubject = String(subject || '').trim() || 'GlobyEdu notification';
@@ -37,6 +47,13 @@ async function sendEmail(to, subject, html) {
   if (!brevoConfigured && !resendConfigured) {
     console.warn('[email] No transactional email provider is configured; email delivery was skipped.');
     return { ok: false, reason: 'EMAIL_PROVIDER_NOT_CONFIGURED' };
+  }
+
+  const provider = brevoConfigured ? 'brevo' : 'resend';
+  const sender = brevoConfigured ? getBrevoConfig().senderEmail : resendConfig.fromEmail;
+  if (!isValidSender(sender)) {
+    console.warn('[email] The configured transactional sender address is invalid.', { provider });
+    return { ok: false, reason: 'INVALID_SENDER_ADDRESS', provider };
   }
 
   if (typeof fetch !== 'function') {
@@ -69,24 +86,23 @@ async function sendEmail(to, subject, html) {
       }
 
       if (!response.ok) {
-        const errorDetail = typeof parsedResponse?.message === 'string' ? parsedResponse.message : rawResponse;
-        console.error('[email] Resend delivery failed', {
+        console.error('[email] Resend request rejected', {
           status: response.status,
-          detail: String(errorDetail || '').slice(0, 500),
         });
-        return { ok: false, reason: 'RESEND_API_ERROR', status: response.status };
+        return { ok: false, reason: 'RESEND_API_ERROR', status: response.status, provider: 'resend' };
       }
 
       return {
         ok: true,
         status: response.status,
         messageId: parsedResponse?.id || null,
+        provider: 'resend',
+        requestStatus: 'accepted',
+        deliveryStatus: 'unconfirmed',
       };
     } catch (error) {
-      console.error('[email] Resend request failed', {
-        message: error && error.message ? String(error.message).slice(0, 300) : 'Unknown error',
-      });
-      return { ok: false, reason: 'RESEND_REQUEST_FAILED' };
+      console.error('[email] Resend request failed.');
+      return { ok: false, reason: 'RESEND_REQUEST_FAILED', provider: 'resend' };
     }
   }
 
@@ -120,24 +136,23 @@ async function sendEmail(to, subject, html) {
     }
 
     if (!response.ok) {
-      const errorDetail = typeof parsedResponse?.message === 'string' ? parsedResponse.message : rawResponse;
-      console.error('[email] Brevo delivery failed', {
+      console.error('[email] Brevo request rejected', {
         status: response.status,
-        detail: String(errorDetail || '').slice(0, 500),
       });
-      return { ok: false, reason: 'BREVO_API_ERROR', status: response.status };
+      return { ok: false, reason: 'BREVO_API_ERROR', status: response.status, provider: 'brevo' };
     }
 
     return {
       ok: true,
       status: response.status,
       messageId: parsedResponse?.messageId || null,
+      provider: 'brevo',
+      requestStatus: 'accepted',
+      deliveryStatus: 'unconfirmed',
     };
   } catch (error) {
-    console.error('[email] Brevo request failed', {
-      message: error && error.message ? String(error.message).slice(0, 300) : 'Unknown error',
-    });
-    return { ok: false, reason: 'BREVO_REQUEST_FAILED' };
+    console.error('[email] Brevo request failed.');
+    return { ok: false, reason: 'BREVO_REQUEST_FAILED', provider: 'brevo' };
   }
 }
 
@@ -166,9 +181,11 @@ function teacherAccountSetupTemplate({ fullName, schoolName, schoolId, verificat
     <p>Hi ${safeName},</p>
     <p>Your teacher account for <strong>${safeSchoolName}</strong> has been created.</p>
     <p>Your School ID is <strong>${safeSchoolId}</strong>.</p>
-    <p><a href="${verificationLink}">Verify your email address</a></p>
+    ${verificationLink
+    ? `<p><a href="${verificationLink}">Verify your email address</a></p>`
+    : '<p>Your email address is already verified.</p>'}
     <p><a href="${passwordResetLink}">Set your account password</a></p>
-    <p>Both steps are required before signing in.</p>
+    <p>Verify your email and set your password before signing in.</p>
   `;
 }
 

@@ -84,6 +84,10 @@ export async function logout(accessToken) {
   return postJsonWithToken('/api/v1/auth/logout', {}, accessToken);
 }
 
+export async function refreshAuthSession() {
+  return postJson('/api/v1/auth/refresh', {});
+}
+
 export async function forgotPassword(email, loginType = 'school') {
   return postJson('/api/v1/auth/forgot-password', { email, loginType });
 }

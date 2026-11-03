@@ -335,7 +335,7 @@ if (useFallbackAuth) {
     return res.json(response);
   });
 
-  async function executeLogin({ schoolId, username, password, platformAdminMode, schoolName, studentName, className, teacherName, loginType }) {
+  async function executeLogin({ schoolId, username, password, platformAdminMode, schoolName, studentName, className, loginType }) {
     const genericAuthMessage = 'Unable to sign in. Please check your details.';
     const suspendedAccountMessage = 'Your account has been suspended. Please contact your school administrator.';
     const loginAttemptKey = getLoginAttemptKey({ schoolId, username, platformAdminMode });
@@ -452,14 +452,9 @@ if (useFallbackAuth) {
         }
       }
 
-      if (user && user.role === 'teacher') {
-        const requestedTeacherName = String(teacherName || '').trim().toLowerCase();
-        if (requestedTeacherName) {
-          const actualTeacherName = String(user.fullName || '').trim().toLowerCase();
-          if (requestedTeacherName !== actualTeacherName) {
-            return { statusCode: 401, body: { status: 'error', message: genericAuthMessage } };
-          }
-        }
+      if (user && String(user.role || '').trim().toLowerCase() === 'teacher') {
+        recordLoginFailure(loginAttemptKey);
+        return { statusCode: 401, body: { status: 'error', message: genericAuthMessage } };
       }
     }
 
@@ -542,15 +537,27 @@ if (useFallbackAuth) {
   }
 
   router.post('/school-login', async (req, res) => {
-    const { schoolId, username, password, schoolName, studentName, className, teacherName, loginType } = req.body || {};
+    const { schoolId, username, password, schoolName, studentName, className, loginType } = req.body || {};
     const firebaseMode = firebaseData.isFirebaseDataConfigured();
     const realDatabaseMode = firebaseMode || (prismaClient && !prismaClient.__stub);
-    if (realDatabaseMode) {
-      const loginAttemptKey = getLoginAttemptKey({ schoolId, username, platformAdminMode: false });
-      if (isLoginRateLimited(loginAttemptKey)) {
-        return res.status(429).json({ status: 'error', message: 'Too many failed sign-in attempts. Please try again later.' });
-      }
+    const loginAttemptKey = getLoginAttemptKey({ schoolId, username, platformAdminMode: false });
+    if (isLoginRateLimited(loginAttemptKey)) {
+      return res.status(429).json({ status: 'error', message: 'Too many failed sign-in attempts. Please try again later.' });
+    }
 
+    if (String(loginType || '').trim().toLowerCase() === 'teacher') {
+      recordLoginFailure(loginAttemptKey);
+      await recordAuditEvent({
+        req,
+        tenantId: schoolId || null,
+        action: 'auth.login_failed',
+        resourceType: 'user',
+        success: false,
+        metadata: { loginType: 'teacher', dataStore: firebaseMode ? 'firebase' : realDatabaseMode ? 'database' : 'fallback' },
+      });
+      return res.status(401).json({ status: 'error', message: 'Unable to sign in. Please check your details.' });
+    }
+    if (realDatabaseMode) {
       try {
         const session = await authService.login(schoolId, username, password, { loginType });
         setRefreshCookie(res, session.refreshToken);
@@ -603,7 +610,6 @@ if (useFallbackAuth) {
       schoolName,
       studentName,
       className,
-      teacherName,
       loginType,
     });
     await auditFallbackLogin(req, result, false);

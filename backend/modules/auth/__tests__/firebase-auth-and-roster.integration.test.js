@@ -85,7 +85,13 @@ jest.mock('../../../firebase.data', () => ({
 jest.mock('../../../firebase.admin', () => ({
   isFirebaseConfigured: () => true,
   verifyIdToken: jest.fn(async (token) => mockState.idTokens.get(token)),
-  getUser: jest.fn(async (uid) => ({ disabled: false, customClaims: mockState.claims.get(uid) || {} })),
+  getUser: jest.fn(async (uid) => ({
+    uid,
+    email: Array.from(mockState.idTokens.values()).find((record) => record.uid === uid)?.email,
+    emailVerified: true,
+    disabled: false,
+    customClaims: mockState.claims.get(uid) || {},
+  })),
   setCustomUserClaims: jest.fn(async (uid, claims) => mockState.claims.set(uid, claims)),
 }));
 jest.mock('../../../config/prisma.client', () => null);
@@ -140,9 +146,14 @@ function seedFixture() {
     schoolId: SCHOOL_ID,
     teacherId: 'T-A',
     username: 'teacher-a@example.test',
+    email: 'teacher-a@example.test',
     userId: 'release-teacher',
+    firebaseUid: 'release-uid-teacher',
     assignedClasses: ['class-a'],
     status: 'active',
+    isVerified: true,
+    emailVerified: true,
+    invitationStatus: 'activated',
   });
   collectionRecords('teachers').set(`${SCHOOL_ID}:teacher-b`, {
     schoolId: SCHOOL_ID,
@@ -182,6 +193,7 @@ function seedFixture() {
       isVerified: true,
       platformAdmin: false,
       passwordNeedsReset: false,
+      invitationStatus: account.role === 'teacher' ? 'activated' : undefined,
     };
     collectionRecords('users').set(account.id, record);
     mockState.idTokens.set(`firebase-${account.role}`, {
@@ -199,13 +211,13 @@ function seedFixture() {
   }
 }
 
-async function login(port, account) {
+async function login(port, account, schoolId = SCHOOL_ID) {
   const response = await fetch(`http://127.0.0.1:${port}/api/v1/auth/firebase-login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       idToken: `firebase-${account.role}`,
-      schoolId: SCHOOL_ID,
+      schoolId,
       identifier: account.identifier,
       loginType: account.role,
     }),
@@ -267,6 +279,13 @@ test('Firebase school routes enforce roster role and tenant boundaries', async (
 
   const unauthenticatedRoster = await listStudents(port, null);
   expect(unauthenticatedRoster.status).toBe(401);
+});
+
+test('teacher login with another valid School ID returns a generic authentication error', async () => {
+  const { response, body } = await login(server.address().port, accounts[0], OTHER_SCHOOL_ID);
+
+  expect(response.status).toBe(401);
+  expect(body).toEqual({ status: 'error', message: 'Unable to sign in. Please check your details.' });
 });
 
 test('Firebase logout revokes the old Firestore-backed access session and a new login works', async () => {

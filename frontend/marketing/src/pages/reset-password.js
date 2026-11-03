@@ -2,12 +2,26 @@
 // UI for resetting a password with a token. Supports both school and platform administrator password resets.
 
 export function ResetPasswordPage(token = '', loginType = 'school') {
-  const title = loginType === 'platform_admin' ? 'Platform Admin Reset' : 'Reset your password';
+  const safeToken = String(token || '').replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[character]));
+  const isTeacherSetup = loginType === 'teacher';
+  const title = loginType === 'platform_admin'
+    ? 'Platform Admin Reset'
+    : isTeacherSetup ? 'Set up your teacher password' : 'Reset your password';
   const description = loginType === 'platform_admin'
     ? 'Enter a new password for your Globy platform administrator account.'
-    : 'Choose a new password for your school account.';
+    : isTeacherSetup
+      ? 'Choose a secure password for your teacher account. Verify your email before signing in.'
+      : 'Choose a new password for your school account.';
   const backLink = loginType === 'platform_admin' ? '#/platform-admin' : '#/login';
-  const backLabel = loginType === 'platform_admin' ? 'Return to admin login' : 'Return to school login';
+  const backLabel = loginType === 'platform_admin'
+    ? 'Return to admin login'
+    : isTeacherSetup ? 'Return to teacher login' : 'Return to school login';
 
   return `
     <main class="max-w-3xl mx-auto px-6 py-14">
@@ -18,7 +32,7 @@ export function ResetPasswordPage(token = '', loginType = 'school') {
           <p class="mt-3 text-slate-600">${description}</p>
         </div>
         <form id="reset-password-form" class="grid gap-5">
-          <input type="hidden" id="reset-token" value="${token}" />
+          <input type="hidden" id="reset-token" value="${safeToken}" />
           <label class="block text-sm text-slate-700">
             New Password
             <input type="password" id="reset-password" required placeholder="New password" class="mt-3 w-full rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100" />
