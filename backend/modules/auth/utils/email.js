@@ -32,6 +32,57 @@ function isValidSender(value) {
   return /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(getSenderAddress(value));
 }
 
+async function sendWithResend(recipient, emailSubject, html, resendConfig, fallbackFromBrevo = false) {
+  if (!isValidSender(resendConfig.fromEmail)) {
+    console.warn('[email] The configured Resend sender address is invalid.', { fallbackFromBrevo });
+    return { ok: false, reason: 'INVALID_SENDER_ADDRESS', provider: 'resend' };
+  }
+
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${resendConfig.apiKey}`,
+      },
+      body: JSON.stringify({
+        from: resendConfig.fromEmail,
+        to: [recipient],
+        subject: emailSubject,
+        html: String(html || ''),
+      }),
+    });
+
+    const rawResponse = await response.text();
+    let parsedResponse = {};
+    try {
+      parsedResponse = rawResponse ? JSON.parse(rawResponse) : {};
+    } catch (error) {
+      parsedResponse = {};
+    }
+
+    if (!response.ok) {
+      console.error('[email] Resend request rejected', {
+        status: response.status,
+        fallbackFromBrevo,
+      });
+      return { ok: false, reason: 'RESEND_API_ERROR', status: response.status, provider: 'resend' };
+    }
+
+    return {
+      ok: true,
+      status: response.status,
+      messageId: parsedResponse?.id || null,
+      provider: 'resend',
+      requestStatus: 'accepted',
+      deliveryStatus: 'unconfirmed',
+    };
+  } catch (error) {
+    console.error('[email] Resend request failed.', { fallbackFromBrevo });
+    return { ok: false, reason: 'RESEND_REQUEST_FAILED', provider: 'resend' };
+  }
+}
+
 async function sendEmail(to, subject, html) {
   const recipient = String(to || '').trim();
   const emailSubject = String(subject || '').trim() || 'GlobyEdu notification';
@@ -49,61 +100,25 @@ async function sendEmail(to, subject, html) {
     return { ok: false, reason: 'EMAIL_PROVIDER_NOT_CONFIGURED' };
   }
 
-  const provider = brevoConfigured ? 'brevo' : 'resend';
-  const sender = brevoConfigured ? getBrevoConfig().senderEmail : resendConfig.fromEmail;
-  if (!isValidSender(sender)) {
-    console.warn('[email] The configured transactional sender address is invalid.', { provider });
-    return { ok: false, reason: 'INVALID_SENDER_ADDRESS', provider };
-  }
-
   if (typeof fetch !== 'function') {
     console.error('[email] Fetch API is unavailable in the current runtime.');
     return { ok: false, reason: 'EMAIL_TRANSPORT_UNAVAILABLE' };
   }
 
+  if (brevoConfigured && !isValidSender(getBrevoConfig().senderEmail)) {
+    console.warn('[email] The configured transactional sender address is invalid.', { provider: 'brevo' });
+    return resendConfigured
+      ? sendWithResend(recipient, emailSubject, html, resendConfig, true)
+      : { ok: false, reason: 'INVALID_SENDER_ADDRESS', provider: 'brevo' };
+  }
+
+  if (!brevoConfigured && !isValidSender(resendConfig.fromEmail)) {
+    console.warn('[email] The configured transactional sender address is invalid.', { provider: 'resend' });
+    return { ok: false, reason: 'INVALID_SENDER_ADDRESS', provider: 'resend' };
+  }
+
   if (!brevoConfigured) {
-    try {
-      const response = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${resendConfig.apiKey}`,
-        },
-        body: JSON.stringify({
-          from: resendConfig.fromEmail,
-          to: [recipient],
-          subject: emailSubject,
-          html: String(html || ''),
-        }),
-      });
-
-      const rawResponse = await response.text();
-      let parsedResponse = {};
-      try {
-        parsedResponse = rawResponse ? JSON.parse(rawResponse) : {};
-      } catch (error) {
-        parsedResponse = { raw: rawResponse };
-      }
-
-      if (!response.ok) {
-        console.error('[email] Resend request rejected', {
-          status: response.status,
-        });
-        return { ok: false, reason: 'RESEND_API_ERROR', status: response.status, provider: 'resend' };
-      }
-
-      return {
-        ok: true,
-        status: response.status,
-        messageId: parsedResponse?.id || null,
-        provider: 'resend',
-        requestStatus: 'accepted',
-        deliveryStatus: 'unconfirmed',
-      };
-    } catch (error) {
-      console.error('[email] Resend request failed.');
-      return { ok: false, reason: 'RESEND_REQUEST_FAILED', provider: 'resend' };
-    }
+    return sendWithResend(recipient, emailSubject, html, resendConfig);
   }
 
   const { apiKey, senderEmail, senderName } = getBrevoConfig();
@@ -139,7 +154,10 @@ async function sendEmail(to, subject, html) {
       console.error('[email] Brevo request rejected', {
         status: response.status,
       });
-      return { ok: false, reason: 'BREVO_API_ERROR', status: response.status, provider: 'brevo' };
+      const requestWasRejected = response.status >= 400 && response.status < 500;
+      return resendConfigured && requestWasRejected
+        ? sendWithResend(recipient, emailSubject, html, resendConfig, true)
+        : { ok: false, reason: 'BREVO_API_ERROR', status: response.status, provider: 'brevo' };
     }
 
     return {

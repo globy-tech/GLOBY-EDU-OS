@@ -135,4 +135,70 @@ describe('transactional email service', () => {
     expect(console.error.mock.calls.join(' ')).not.toContain('student@example.com');
     expect(console.error.mock.calls.join(' ')).not.toContain('test_api_key');
   });
+
+  it('falls back to Resend when Brevo rejects the configured sender', async () => {
+    process.env.RESEND_API_KEY = 'resend_test_api_key';
+    process.env.RESEND_FROM_EMAIL = 'GlobyEdu <hello@globyedu.com>';
+    global.fetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        text: async () => JSON.stringify({ code: 'sender_not_verified' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ id: 'resend_fallback_msg' }),
+      });
+
+    const { sendEmail } = require('../utils/email');
+    const result = await sendEmail('teacher@example.com', 'Set up account', '<p>Set up</p>');
+
+    expect(global.fetch).toHaveBeenNthCalledWith(
+      1,
+      'https://api.brevo.com/v3/smtp/email',
+      expect.any(Object),
+    );
+    expect(global.fetch).toHaveBeenNthCalledWith(
+      2,
+      'https://api.resend.com/emails',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer resend_test_api_key',
+        }),
+      }),
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      provider: 'resend',
+      requestStatus: 'accepted',
+      deliveryStatus: 'unconfirmed',
+      messageId: 'resend_fallback_msg',
+    });
+  });
+
+  it('does not risk duplicate delivery by falling back after a Brevo server error', async () => {
+    process.env.RESEND_API_KEY = 'resend_test_api_key';
+    process.env.RESEND_FROM_EMAIL = 'GlobyEdu <hello@globyedu.com>';
+    global.fetch.mockResolvedValue({
+      ok: false,
+      status: 503,
+      text: async () => '',
+    });
+
+    const { sendEmail } = require('../utils/email');
+    const result = await sendEmail('teacher@example.com', 'Set up account', '<p>Set up</p>');
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'BREVO_API_ERROR',
+      status: 503,
+      provider: 'brevo',
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://api.brevo.com/v3/smtp/email',
+      expect.any(Object),
+    );
+  });
 });

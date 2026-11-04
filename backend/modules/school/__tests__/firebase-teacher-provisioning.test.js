@@ -229,6 +229,63 @@ describe('Firebase teacher account provisioning', () => {
     expect(firebaseAdmin.createUser).toHaveBeenCalledTimes(1);
   });
 
+  test('records a safe Firebase-link failure and lets resend reuse the existing account', async () => {
+    const setupError = Object.assign(new Error('Sensitive provider details must not be logged'), {
+      code: 'auth/invalid-continue-uri',
+    });
+    firebaseAdmin.generateEmailVerificationLink
+      .mockRejectedValueOnce(setupError)
+      .mockResolvedValueOnce('https://firebase.test/verify');
+    const errorLog = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    const createdTeacher = await schoolService.createEntity(schoolId, 'teachers', {
+      fullName: 'Synthetic Teacher',
+      email: 'teacher@example.test',
+    }, { tenantId: schoolId, roles: ['school_authority'] });
+
+    expect(createdTeacher).toMatchObject({
+      invitationStatus: 'failed',
+      invitationEmailFailureReason: 'FIREBASE_VERIFICATION_LINK_FAILED',
+    });
+    expect(errorLog).toHaveBeenCalledWith(
+      '[teacher-invitation] Setup email could not be prepared or sent.',
+      expect.objectContaining({
+        stage: 'setup_links',
+        errorCode: 'AUTH_INVALID_CONTINUE_URI',
+      }),
+    );
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain('Sensitive provider details');
+    expect(email.sendEmail).not.toHaveBeenCalled();
+
+    const user = {
+      id: `${schoolId}:teacher@example.test`,
+      schoolId,
+      teacherId: createdTeacher.teacherId,
+      firebaseUid: createdTeacher.firebaseUid,
+      fullName: createdTeacher.fullName,
+      email: createdTeacher.email,
+      role: 'teacher',
+      roles: ['teacher'],
+      status: 'active',
+    };
+    jest.spyOn(firebaseCore, 'listBySchool').mockImplementation(async (collection) => (
+      collection === 'users' ? [user] : [createdTeacher]
+    ));
+    jest.spyOn(firebaseCore, 'getTenant').mockResolvedValue({ name: 'Test School' });
+
+    const resent = await schoolService.resendFirebaseTeacherInvitation(schoolId, createdTeacher.teacherId, {
+      tenantId: schoolId,
+      roles: ['school_authority'],
+    });
+
+    expect(resent).toMatchObject({
+      invitationStatus: 'pending',
+      invitationEmailStatus: 'provider_accepted',
+    });
+    expect(firebaseAdmin.createUser).toHaveBeenCalledTimes(1);
+    expect(email.sendEmail).toHaveBeenCalledTimes(1);
+  });
+
   test('resends an invitation for the linked pending teacher without creating another Auth user', async () => {
     const teacher = {
       id: `${schoolId}:T-ABC12345`,

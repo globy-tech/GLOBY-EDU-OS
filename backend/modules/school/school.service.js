@@ -74,13 +74,16 @@ function generateTeacherId(school) {
 
 async function sendTeacherSetupEmail({ email, fullName, schoolName, schoolId, userId, teacherId, emailVerified = false }) {
   let passwordSetupToken = '';
+  let failureStage = 'app_url';
   try {
     const appUrl = getAppUrl().replace(/\/+$/, '');
     const actionCodeSettings = { url: `${appUrl}/#/login` };
+    failureStage = 'setup_links';
     const [resolvedSchoolName, verificationLink] = await Promise.all([
       Promise.resolve(schoolName),
       emailVerified ? Promise.resolve('') : firebaseAdmin.generateEmailVerificationLink(email, actionCodeSettings),
     ]);
+    failureStage = 'password_setup_token';
     passwordSetupToken = await createTeacherInvitationPasswordToken({
       userId,
       schoolId,
@@ -88,6 +91,7 @@ async function sendTeacherSetupEmail({ email, fullName, schoolName, schoolId, us
       email,
     });
     const passwordResetLink = `${appUrl}/#/reset-password?type=teacher&token=${encodeURIComponent(passwordSetupToken)}`;
+    failureStage = 'email_provider';
     const delivery = await sendEmail(
       email,
       'Set up your GlobyEdu teacher account',
@@ -100,15 +104,43 @@ async function sendTeacherSetupEmail({ email, fullName, schoolName, schoolId, us
       }),
     );
     if (!delivery || delivery.ok !== true) {
-      await revokeTeacherInvitationPasswordToken(passwordSetupToken);
+      failureStage = 'token_cleanup';
+      try {
+        await revokeTeacherInvitationPasswordToken(passwordSetupToken);
+      } catch {
+        console.error('[teacher-invitation] Failed to invalidate an unsent password setup link.', {
+          stage: failureStage,
+        });
+      }
     }
     return delivery;
   } catch (error) {
-    if (passwordSetupToken) await revokeTeacherInvitationPasswordToken(passwordSetupToken);
+    if (passwordSetupToken) {
+      try {
+        await revokeTeacherInvitationPasswordToken(passwordSetupToken);
+      } catch {
+        console.error('[teacher-invitation] Failed to invalidate an unsent password setup link.', {
+          stage: 'token_cleanup',
+        });
+      }
+    }
+    const errorCode = String(error?.code || '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 80);
     console.error('[teacher-invitation] Setup email could not be prepared or sent.', {
-      reason: 'INVITATION_SETUP_FAILED',
+      stage: failureStage,
+      errorCode: errorCode || 'UNCLASSIFIED',
     });
-    return { ok: false, reason: 'INVITATION_SETUP_FAILED' };
+    const failureReasons = {
+      app_url: 'APP_URL_CONFIGURATION_FAILED',
+      setup_links: 'FIREBASE_VERIFICATION_LINK_FAILED',
+      password_setup_token: 'PASSWORD_SETUP_TOKEN_FAILED',
+      email_provider: 'EMAIL_PROVIDER_REQUEST_FAILED',
+      token_cleanup: 'INVITATION_TOKEN_CLEANUP_FAILED',
+    };
+    return { ok: false, reason: failureReasons[failureStage] || 'INVITATION_SETUP_FAILED' };
   }
 }
 
