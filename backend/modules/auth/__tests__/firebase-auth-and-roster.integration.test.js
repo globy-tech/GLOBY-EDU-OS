@@ -75,6 +75,7 @@ const mockFirestore = {
 
 const previousAccessSecret = process.env.JWT_ACCESS_SECRET;
 const previousRefreshSecret = process.env.JWT_REFRESH_SECRET;
+const previousRenderServiceId = process.env.RENDER_SERVICE_ID;
 process.env.JWT_ACCESS_SECRET = crypto.randomBytes(32).toString('hex');
 process.env.JWT_REFRESH_SECRET = crypto.randomBytes(32).toString('hex');
 
@@ -250,6 +251,8 @@ afterAll(async () => {
   else process.env.JWT_ACCESS_SECRET = previousAccessSecret;
   if (previousRefreshSecret === undefined) delete process.env.JWT_REFRESH_SECRET;
   else process.env.JWT_REFRESH_SECRET = previousRefreshSecret;
+  if (previousRenderServiceId === undefined) delete process.env.RENDER_SERVICE_ID;
+  else process.env.RENDER_SERVICE_ID = previousRenderServiceId;
 });
 
 test('Firebase school routes enforce roster role and tenant boundaries', async () => {
@@ -306,7 +309,7 @@ test('Firebase logout revokes the old Firestore-backed access session and a new 
   const logout = await fetch(`http://127.0.0.1:${port}/api/v1/auth/logout`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${firstToken}`,
+      Authorization: 'Bearer invalid-or-expired-access-token',
       Cookie: firstCookie,
     },
   });
@@ -325,4 +328,22 @@ test('Firebase logout revokes the old Firestore-backed access session and a new 
     headers: { Authorization: `Bearer ${secondLogin.body.accessToken}` },
   });
   expect(afterFreshLogin.status).toBe(200);
+});
+
+test('Firebase refresh cookie is secure on Render even without production NODE_ENV', async () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousRenderServiceIdForTest = process.env.RENDER_SERVICE_ID;
+  process.env.NODE_ENV = 'test';
+  process.env.RENDER_SERVICE_ID = 'render-auth-test';
+
+  try {
+    const result = await login(server.address().port, accounts[0]);
+    expect(result.response.status).toBe(200);
+    expect(result.response.headers.get('set-cookie')).toMatch(/; Secure; SameSite=Strict/i);
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousRenderServiceIdForTest === undefined) delete process.env.RENDER_SERVICE_ID;
+    else process.env.RENDER_SERVICE_ID = previousRenderServiceIdForTest;
+  }
 });

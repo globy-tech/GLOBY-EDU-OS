@@ -1,12 +1,20 @@
 // footer.js
 // Footer with branding and CMS-driven contact information.
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export function Footer(cms = {}) {
-  const companyName = cms.companyName || 'GlobyEdu OS';
-  const logoUrl = cms.logoUrl || '/src/assets/images/ui/globyedu-logo.jpg';
-  const contactEmail = cms.contactEmail || 'hello@globyedu.com';
-  const contactPhone = cms.contactPhone || '+1 (555) 123-4567';
-  const website = cms.website || 'https://globyedu.com';
+  const companyName = escapeHtml(cms.companyName || 'GlobyEdu OS');
+  const logoUrl = escapeHtml(cms.logoUrl || '/src/assets/images/ui/globyedu-logo.jpg');
+  const contactEmail = escapeHtml(cms.contactEmail || 'hello@globyedu.com');
+  const contactPhone = escapeHtml(cms.contactPhone || '+233 53 749 7607');
   const socialLinks = [
     { label: 'Facebook', url: 'https://www.facebook.com/share/18j4bKMorr/' },
     { label: 'X', url: 'https://x.com/GlobyTechndz' },
@@ -19,7 +27,7 @@ export function Footer(cms = {}) {
         <div class="grid grid-cols-1 gap-8 md:grid-cols-4">
           <div>
             <div class="flex items-center gap-3">
-              ${logoUrl ? `<img src="${logoUrl}" alt="${companyName} logo" class="h-10 w-10 rounded-full border border-slate-200 bg-white object-contain p-1" />` : '<div class="flex h-10 w-10 items-center justify-center rounded-full bg-sky-600 font-bold text-white">G</div>'}
+              ${logoUrl ? `<img src="${logoUrl}" alt="${companyName} logo" class="h-10 w-10 rounded-full border border-slate-200 bg-white object-contain p-1" onerror="this.onerror=null;this.src='/src/assets/images/ui/globyedu-logo.jpg'" />` : '<div class="flex h-10 w-10 items-center justify-center rounded-full bg-sky-600 font-bold text-white">G</div>'}
               <div>
                 <div class="font-semibold text-slate-900">${companyName}</div>
                 <div class="text-sm text-slate-500">School Operating System</div>

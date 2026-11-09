@@ -3,6 +3,7 @@ const authMiddleware = require('../modules/auth/middleware/auth.middleware');
 const tenantMiddleware = require('../modules/school/middleware/tenant.middleware');
 const schoolService = require('../modules/school/school.service');
 const firebaseData = require('../firebase.data');
+const { isProductionRuntime } = require('../config/app-url.config');
 const {
   uploadSchoolFile,
   createSchoolFileSignedUrl,
@@ -68,9 +69,12 @@ function validateProfileImage(req, filename, ownerType) {
 
 function getR2ConfigurationMessage() {
   const status = getR2ConfigurationStatus();
-  const issues = [...status.missingVariables, ...status.invalidVariables];
+  const issues = [
+    ...status.missingVariables.map((variable) => `missing ${variable}`),
+    ...status.invalidVariables.map((variable) => `invalid ${variable}`),
+  ];
   return issues.length
-    ? `Cloudflare R2 configuration is incomplete on this server. Check: ${issues.join(', ')}.`
+    ? `Cloudflare R2 configuration is unavailable on this server. Check: ${issues.join(', ')}.`
     : 'Cloudflare R2 is required for production file storage.';
 }
 
@@ -302,7 +306,7 @@ router.post('/upload', authMiddleware, parseUploadBody, tenantMiddleware, async 
       return res.status(imageError.status).json({ status: 'error', message: imageError.message });
     }
 
-    if (process.env.NODE_ENV === 'production') {
+    if (isProductionRuntime()) {
       if (!isR2Configured()) {
         return res.status(503).json({ status: 'error', message: getR2ConfigurationMessage() });
       }
@@ -332,7 +336,7 @@ router.post('/upload', authMiddleware, parseUploadBody, tenantMiddleware, async 
       tenantId: req.user.tenantId || req.user.schoolId,
     });
   } catch (error) {
-    return res.status(500).json({ status: 'error', message: error.message });
+    return res.status(500).json({ status: 'error', message: 'Unable to process the file upload.' });
   }
 });
 
@@ -352,7 +356,7 @@ router.get('/*', authMiddleware, tenantMiddleware, async (req, res) => {
       Math.max(Number(req.query.expiresIn) || MAX_SIGNED_URL_SECONDS, MIN_SIGNED_URL_SECONDS),
       MAX_SIGNED_URL_SECONDS
     );
-    const production = process.env.NODE_ENV === 'production';
+    const production = isProductionRuntime();
     if (production && !isR2Configured()) {
       return res.status(503).json({ status: 'error', message: getR2ConfigurationMessage() });
     }
@@ -362,7 +366,7 @@ router.get('/*', authMiddleware, tenantMiddleware, async (req, res) => {
       : (await firebaseData.getStorageBucket().file(`tenants/${scopedPath}`).getSignedUrl({ action: 'read', expires: Date.now() + expiresIn * 1000 }))[0];
     return res.json({ status: 'ok', url: signedUrl, expiresIn, persistent: false });
   } catch (error) {
-    return res.status(500).json({ status: 'error', message: error.message });
+    return res.status(500).json({ status: 'error', message: 'Unable to create a download link for this file.' });
   }
 });
 

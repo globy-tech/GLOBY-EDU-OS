@@ -32,7 +32,7 @@ describe('marketing frontend syntax', () => {
     expect(source).toContain('profile-principal-signature-file');
   });
 
-  it('leaves mobile image pickers free to offer both camera and gallery sources', () => {
+  it('wires mobile image pickers for both camera and gallery sources', () => {
     const mainPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js');
     const registrationPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'register-wizard.js');
     const dashboardPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js');
@@ -42,16 +42,59 @@ describe('marketing frontend syntax', () => {
 
     expect(mainSource).toContain('accept="${field.accept || \'image/*\'}"');
     expect(registrationSource).toContain('id="school-logo-input" type="file" accept="image/*" class="hidden"');
-    expect(dashboardSource).toContain('type="file" accept="image/*" data-student-profile-photo-input');
-    expect(mainSource).not.toContain('capture="${field.capture}"');
-    expect(registrationSource).not.toContain('capture="environment"');
-    expect(dashboardSource).not.toContain('capture="environment"');
+    expect(dashboardSource).toContain('type="file" accept="image/jpeg,image/png,image/gif,image/webp" data-student-profile-photo-input');
+    expect(mainSource).toContain("studentProfilePhotoInput.setAttribute('capture', 'user')");
+    expect(mainSource).toContain("profilePhotoInput.setAttribute('capture', 'user')");
     expect(dashboardSource).toContain('Upload Photo');
     expect(dashboardSource).toContain('Open Camera');
     expect(mainSource).toContain('async function refreshStoredProfilePhotos(records, token)');
     expect(mainSource).toContain('await refreshStoredProfilePhotos(schoolData.teachers, token);');
     expect(mainSource).toContain('profilePhotoPath: uploadedPhoto.path');
     expect(mainSource).toContain("cache: 'no-store'");
+  });
+
+  it('aligns frontend image types with backend validation and wires profile photo source controls', () => {
+    const mainPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js');
+    const dashboardPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js');
+    const validationPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'utils', 'file-upload-validation.js');
+    const mainSource = fs.readFileSync(mainPath, 'utf8');
+    const dashboardSource = fs.readFileSync(dashboardPath, 'utf8');
+    const validationSource = fs.readFileSync(validationPath, 'utf8');
+
+    expect(validationSource).toContain("const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])");
+    expect(validationSource).toContain("if (!file.type.startsWith('image/')) return 'Only image files are allowed.';");
+    expect(validationSource).toContain('export function validateProfileImageUpload(file)');
+    expect(mainSource).toContain("studentProfilePhotoInput.removeAttribute('capture')");
+    expect(mainSource).toContain("button.dataset.teacherPhotoSource === 'camera'");
+    expect(mainSource).toContain('data-student-profile-photo-status');
+    expect(mainSource).toContain('teacher-profile-photo-status');
+    expect(dashboardSource).toContain('data-student-profile-photo-camera');
+    expect(dashboardSource).toContain('data-teacher-photo-source="camera"');
+    expect(dashboardSource).toContain('alt="Current profile photo"');
+    expect(dashboardSource).toContain('student.fullName || student.name || \'S\'');
+    expect(dashboardSource).toContain('teacher.fullName || teacher.name || \'T\'');
+  });
+
+  it('validates profile image formats and size without restricting other image workflows', () => {
+    const validationPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'utils', 'file-upload-validation.js');
+    const validationUrl = require('url').pathToFileURL(validationPath).href;
+    const script = `
+      import assert from 'node:assert/strict';
+      import { validateImageUpload, validateProfileImageUpload, MAX_FILE_UPLOAD_BYTES } from ${JSON.stringify(validationUrl)};
+      for (const type of ['image/jpeg', 'image/png', 'image/gif', 'image/webp']) {
+        assert.equal(validateProfileImageUpload({ type, size: 1024 }), '');
+      }
+      assert.match(validateProfileImageUpload({ type: 'image/svg+xml', size: 1024 }), /JPEG, PNG, GIF, or WebP/);
+      assert.match(validateProfileImageUpload({ type: 'image/png', size: MAX_FILE_UPLOAD_BYTES + 1 }), /too large/);
+      assert.equal(validateImageUpload({ type: 'image/svg+xml', size: 1024 }), '');
+    `;
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script], {
+      encoding: 'utf8',
+      env: { ...process.env, NODE_NO_WARNINGS: '1' },
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
   });
 
   it('locks subscription checkout while pending and exposes recoverable errors', () => {
@@ -97,10 +140,15 @@ describe('marketing frontend syntax', () => {
   it('adds the polished public contact block and validated CMS logo upload flow', () => {
     const entryPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js');
     const adminPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'admin.js');
+    const adminStatePath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'admin-state.js');
     const mainSource = fs.readFileSync(entryPath, 'utf8');
     const adminSource = fs.readFileSync(adminPath, 'utf8');
+    const adminStateSource = fs.readFileSync(adminStatePath, 'utf8');
 
     expect(mainSource).toContain('bg-gradient-to-br from-white via-slate-50 to-sky-50/60');
+    expect(mainSource).toMatch(/\$\{cms\.address \? `<p[^`]*Address:[^`]*` : ''\}/);
+    expect(adminStateSource).not.toContain('123 Education Lane');
+    expect(mainSource).toMatch(/\$\{cms\.address \? `<p[^`]*Address:[^`]*` : ''\}/);
     expect(adminSource).toContain('Please choose a valid image file for the website logo.');
     expect(adminSource).toContain('const validationError = validateImageUpload(file);');
   });
@@ -129,7 +177,8 @@ describe('marketing frontend syntax', () => {
     expect(coverUploadSource).toContain("uploadTenantAsset(file, 'school-cover', true, {");
     expect(coverUploadSource).not.toContain('readFileAsDataUrl(file)');
     expect(registrationSource).toContain('body: JSON.stringify({ logo: uploadedLogo.url, logoPath: uploadedLogo.path })');
-    expect(adminSource).toContain('values.logoPath = uploadedLogoPath || getWebsiteCMSSettings().logoPath || \'\';');
+    expect(adminSource).toContain('values.logoPath = uploadedLogoPath || (values.logoUrl === initialLogoUrl ? currentSettings.logoPath || \'\' : \'\');');
+    expect(adminSource).toContain('await publishWebsiteCMS(token, values)');
   });
 
   it('does not present unsupported workspace updates as persisted account changes', () => {
@@ -194,5 +243,32 @@ describe('marketing frontend syntax', () => {
     expect(source).toContain("#/register");
     expect(source).toContain("Unable to load public pricing plans; showing the default pricing state");
     expect(source).toContain("Array.isArray(pricingPlans) ? pricingPlans.filter((plan) => plan && plan.active !== false) : []");
+  });
+
+  it('renders school dashboard sections using the route-normalized section keys', () => {
+    const dashboardPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js');
+    const mainPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js');
+    const dashboardSource = fs.readFileSync(dashboardPath, 'utf8');
+    const mainSource = fs.readFileSync(mainPath, 'utf8');
+
+    expect(mainSource).toContain("if (['activity', 'activity-log', 'logs'].includes(key)) return 'activity';");
+    expect(mainSource).toContain("if (['profile', 'school-profile', 'school_profile'].includes(key)) return 'profile';");
+    expect(mainSource).toContain("if (['settings', 'configuration', 'config'].includes(key)) return 'settings';");
+    expect(dashboardSource).toMatch(/^\s*activity:\s*`/m);
+    expect(dashboardSource).toMatch(/^\s*profile:\s*`/m);
+    expect(dashboardSource).toMatch(/^\s*settings:\s*`/m);
+
+    const sectionMapStart = dashboardSource.indexOf('const sectionContent = {');
+    const sectionMapEnd = dashboardSource.indexOf('\n  const sectionContentByRoute', sectionMapStart);
+    const sectionMap = dashboardSource.slice(sectionMapStart, sectionMapEnd);
+    for (const section of ['activity', 'profile', 'settings']) {
+      expect(sectionMap.match(new RegExp(`^\\s{4}${section}:`, 'gm'))).toHaveLength(1);
+    }
+    expect(sectionMap).toMatch(/^\s{4}teacherActivity:\s*`/m);
+    expect(sectionMap).toMatch(/^\s{4}schoolProfile:\s*`/m);
+    expect(sectionMap).toMatch(/^\s{4}schoolSettings:\s*`/m);
+    expect(dashboardSource).toContain('activity: `${sectionContent.activity}${sectionContent.teacherActivity}`');
+    expect(dashboardSource).toContain('profile: `${sectionContent.schoolProfile}${sectionContent.profile}`');
+    expect(dashboardSource).toContain('settings: `${sectionContent.schoolSettings}${sectionContent.settings}`');
   });
 });

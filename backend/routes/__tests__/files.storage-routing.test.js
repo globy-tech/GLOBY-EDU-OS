@@ -1,5 +1,7 @@
 const express = require('express');
 jest.setTimeout(30000);
+const originalQaMode = process.env.GLOBY_QA_MODE;
+process.env.GLOBY_QA_MODE = 'false';
 
 jest.mock('../../modules/auth/middleware/auth.middleware', () => (req, res, next) => {
   req.user = global.__uploadUser || { tenantId: 'school-a', roles: ['school_authority'] };
@@ -77,9 +79,11 @@ const firebaseFile = {
 
 describe('production file storage routing', () => {
   const originalNodeEnv = process.env.NODE_ENV;
+  const originalRenderServiceId = process.env.RENDER_SERVICE_ID;
 
   beforeEach(() => {
     process.env.NODE_ENV = 'production';
+    delete process.env.RENDER_SERVICE_ID;
     jest.clearAllMocks();
     firebaseData.isFirebaseDataConfigured.mockReturnValue(true);
     firebaseData.getStorageBucket.mockReturnValue({
@@ -119,8 +123,12 @@ describe('production file storage routing', () => {
   });
 
   afterAll(() => {
+    if (originalQaMode === undefined) delete process.env.GLOBY_QA_MODE;
+    else process.env.GLOBY_QA_MODE = originalQaMode;
     if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = originalNodeEnv;
+    if (originalRenderServiceId === undefined) delete process.env.RENDER_SERVICE_ID;
+    else process.env.RENDER_SERVICE_ID = originalRenderServiceId;
   });
 
   async function runRequest(method, url, body, contentType = 'image/png') {
@@ -242,6 +250,21 @@ describe('production file storage routing', () => {
     const response = await runRequest('POST', '/files/upload?filename=student-profile/photo.png', Buffer.from('%PDF'), 'application/pdf');
 
     expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      status: 'error',
+      message: 'Choose a valid JPEG, PNG, GIF, or WebP image.',
+    });
+    expect(storage.uploadSchoolFile).not.toHaveBeenCalled();
+  });
+
+  test('rejects a missing profile photo with a clear error before storage', async () => {
+    const response = await runRequest('POST', '/files/upload?filename=student-profile/missing.png');
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      status: 'error',
+      message: 'A non-empty file body and valid filename are required.',
+    });
     expect(storage.uploadSchoolFile).not.toHaveBeenCalled();
   });
 
@@ -449,12 +472,12 @@ describe('production file storage routing', () => {
     expect(payload.status).toBe('error');
   });
 
-  test('reports missing R2 variable names without exposing configuration values', async () => {
+  test('reports missing and invalid R2 variable names without exposing configuration values', async () => {
     storage.isR2Configured.mockReturnValue(false);
     storage.getR2ConfigurationStatus.mockReturnValue({
       configured: false,
       missingVariables: ['CLOUDFLARE_R2_SECRET_ACCESS_KEY'],
-      invalidVariables: [],
+      invalidVariables: ['CLOUDFLARE_R2_ENDPOINT'],
     });
 
     const response = await runRequest('POST', '/files/upload?filename=school-logo/photo.png', Buffer.from('image'));
@@ -462,6 +485,7 @@ describe('production file storage routing', () => {
 
     expect(response.status).toBe(503);
     expect(payload.message).toContain('CLOUDFLARE_R2_SECRET_ACCESS_KEY');
+    expect(payload.message).toContain('invalid CLOUDFLARE_R2_ENDPOINT');
     expect(payload.message).not.toContain('secret-test');
   });
 
@@ -543,6 +567,21 @@ describe('production file storage routing', () => {
     const response = await runRequest('GET', '/files/student-profile/photo.png');
 
     expect(response.status).toBe(503);
+    expect(firebaseData.getStorageBucket).not.toHaveBeenCalled();
+  });
+
+  test('requires R2 on Render even if NODE_ENV is not production', async () => {
+    process.env.NODE_ENV = 'test';
+    process.env.RENDER_SERVICE_ID = 'render-qa-test';
+    storage.isR2Configured.mockReturnValue(false);
+
+    const upload = await runRequest('POST', '/files/upload?filename=school-logo/photo.png', Buffer.from('image'));
+    const retrieval = await runRequest('GET', '/files/student-profile/photo.png');
+
+    expect(upload.status).toBe(503);
+    expect(retrieval.status).toBe(503);
+    expect(storage.uploadSchoolFile).not.toHaveBeenCalled();
+    expect(storage.createSchoolFileSignedUrl).not.toHaveBeenCalled();
     expect(firebaseData.getStorageBucket).not.toHaveBeenCalled();
   });
 

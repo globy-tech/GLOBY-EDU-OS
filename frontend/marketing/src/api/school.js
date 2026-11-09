@@ -62,11 +62,15 @@ async function getJson(url, token) {
   }
 }
 
-async function postJson(url, body, token) {
-  const queued = await queueRequest('POST', url, body);
-  if (queued) return queued;
+async function postJson(url, body, token, { extraHeaders = {}, queueOffline = true } = {}) {
+  if (queueOffline) {
+    const queued = await queueRequest('POST', url, body);
+    if (queued) return queued;
+  } else if (!isOnline()) {
+    return { ok: false, status: 0, data: { status: 'error', message: 'This finance operation requires an active connection and was not queued.' } };
+  }
 
-  const headers = { 'Content-Type': 'application/json' };
+  const headers = { 'Content-Type': 'application/json', ...extraHeaders };
   if (token) headers.Authorization = `Bearer ${token}`;
 
   try {
@@ -74,8 +78,23 @@ async function postJson(url, body, token) {
     const data = await res.json().catch(() => null);
     return handleUnauthorized({ ok: res.ok, status: res.status, data });
   } catch (error) {
-    const queued = await queueRequest('POST', url, body);
+    const queued = queueOffline ? await queueRequest('POST', url, body) : null;
     return queued || { ok: false, status: 0, data: { status: 'error', message: error.message || 'Network request failed.' } };
+  }
+}
+
+async function patchJson(url, body, token) {
+  if (!isOnline()) {
+    return { ok: false, status: 0, data: { status: 'error', message: 'This finance operation requires an active connection and was not queued.' } };
+  }
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  try {
+    const res = await fetch(url, { method: 'PATCH', headers, body: JSON.stringify(body) });
+    const data = await res.json().catch(() => null);
+    return handleUnauthorized({ ok: res.ok, status: res.status, data });
+  } catch (error) {
+    return { ok: false, status: 0, data: { status: 'error', message: error.message || 'Network request failed.' } };
   }
 }
 
@@ -96,19 +115,23 @@ async function putJson(url, body, token) {
   }
 }
 
-async function deleteJson(url, token) {
-  const queued = await queueRequest('DELETE', url, null);
+async function deleteJson(url, token, body = null) {
+  const queued = await queueRequest('DELETE', url, body);
   if (queued) return queued;
 
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
 
   try {
-    const res = await fetch(url, { method: 'DELETE', headers });
+    const res = await fetch(url, {
+      method: 'DELETE',
+      headers,
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
     const data = await res.json().catch(() => null);
     return handleUnauthorized({ ok: res.ok, status: res.status, data });
   } catch (error) {
-    return queueRequest('DELETE', url, null);
+    return queueRequest('DELETE', url, body);
   }
 }
 
@@ -126,6 +149,46 @@ export async function updateSchoolDetails(token, schoolId, payload) {
 
 export async function createFeePayment(token, schoolId, payload) {
   return postJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/payments`, payload, token);
+}
+
+export async function createSchoolInvoice(token, schoolId, payload, idempotencyKey) {
+  return postJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/invoices`, payload, token, {
+    extraHeaders: { 'Idempotency-Key': idempotencyKey },
+    queueOffline: false,
+  });
+}
+
+export async function fetchSchoolInvoices(token, schoolId) {
+  return getJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/invoices`, token);
+}
+
+export async function updateSchoolInvoiceStatus(token, schoolId, invoiceId, status) {
+  return patchJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/invoices/${encodeURIComponent(invoiceId)}`, { status }, token);
+}
+
+export async function startSchoolInvoiceCheckout(token, schoolId, invoiceId, idempotencyKey) {
+  return postJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/invoices/${encodeURIComponent(invoiceId)}/checkout`, {}, token, {
+    extraHeaders: { 'Idempotency-Key': idempotencyKey },
+    queueOffline: false,
+  });
+}
+
+export async function verifySchoolInvoicePayment(token, schoolId, invoiceId, reference, idempotencyKey) {
+  return postJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/invoices/${encodeURIComponent(invoiceId)}/verify-payment`, { reference }, token, {
+    extraHeaders: { 'Idempotency-Key': idempotencyKey },
+    queueOffline: false,
+  });
+}
+
+export async function createSchoolRefundRequest(token, schoolId, payload, idempotencyKey) {
+  return postJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/refund-requests`, payload, token, {
+    extraHeaders: { 'Idempotency-Key': idempotencyKey },
+    queueOffline: false,
+  });
+}
+
+export async function fetchSchoolRefundRequests(token, schoolId) {
+  return getJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/refund-requests`, token);
 }
 
 export async function searchSchoolData(token, schoolId, term, scope = '') {
@@ -214,8 +277,25 @@ export async function updateSchoolEntity(token, schoolId, entityType, entityId, 
   return putJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`, payload, token);
 }
 
-export async function deleteSchoolEntity(token, schoolId, entityType, entityId) {
-  return deleteJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`, token);
+export async function deleteSchoolEntity(token, schoolId, entityType, entityId, confirmation = '') {
+  const body = confirmation ? { confirmation } : null;
+  return deleteJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`, token, body);
+}
+
+export async function requestStudentDeletion(token, schoolId, studentId, reason = '') {
+  return postJson(
+    `/api/v1/schools/${encodeURIComponent(schoolId)}/entities/students/${encodeURIComponent(studentId)}/deletion-request`,
+    { reason },
+    token,
+  );
+}
+
+export async function resolveStudentDeletionRequest(token, schoolId, studentId, decision, confirmation = '') {
+  return putJson(
+    `/api/v1/schools/${encodeURIComponent(schoolId)}/entities/students/${encodeURIComponent(studentId)}/deletion-request`,
+    { decision, confirmation },
+    token,
+  );
 }
 
 export async function fetchAssignments(token, schoolId, query = {}) {

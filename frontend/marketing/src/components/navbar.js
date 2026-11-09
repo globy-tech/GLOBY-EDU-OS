@@ -1,19 +1,32 @@
 // navbar.js
 // Responsive marketing navigation for the GlobyEdu SaaS homepage.
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export function Nav(cms = {}) {
   const companyName = String(cms.companyName || 'GlobyEdu OS').trim() || 'GlobyEdu OS';
   const configuredLogo = String(cms.logoUrl || '').trim();
   const defaultLogo = '/src/assets/images/ui/globyedu-logo.jpg';
-  const logoUrl = configuredLogo && configuredLogo !== 'null' && configuredLogo !== 'undefined' ? configuredLogo : defaultLogo;
+  const logoUrl = configuredLogo && configuredLogo !== 'null' && configuredLogo !== 'undefined'
+    ? configuredLogo
+    : defaultLogo;
+  const safeLogoUrl = escapeHtml(logoUrl);
+  const safeCompanyName = escapeHtml(companyName);
   return `
   <header class="sticky top-0 z-50 border-b border-slate-200/70 bg-white/85 backdrop-blur-xl shadow-sm">
     <div class="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
       <div class="flex items-center gap-4">
         <div class="flex items-center gap-3">
-          ${logoUrl ? `<img src="${logoUrl}" alt="${companyName} logo" class="h-11 w-11 rounded-2xl border border-slate-200 bg-white object-contain p-1 shadow-sm sm:h-12 sm:w-12" />` : `<div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-600 to-emerald-500 text-xl font-bold text-white shadow-lg shadow-sky-500/10 sm:h-12 sm:w-12">G</div>`}
+          ${safeLogoUrl ? `<img src="${safeLogoUrl}" alt="${safeCompanyName} logo" class="h-11 w-11 rounded-2xl border border-slate-200 bg-white object-contain p-1 shadow-sm sm:h-12 sm:w-12" onerror="this.onerror=null;this.src='${defaultLogo}'" />` : `<div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-600 to-emerald-500 text-xl font-bold text-white shadow-lg shadow-sky-500/10 sm:h-12 sm:w-12">G</div>`}
           <div>
-            <div class="text-lg font-semibold text-slate-900">${companyName}</div>
+            <div class="text-lg font-semibold text-slate-900">${safeCompanyName}</div>
             <div class="text-xs uppercase tracking-[0.25em] text-slate-500">School operating system</div>
           </div>
         </div>

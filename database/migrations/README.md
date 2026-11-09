@@ -2,7 +2,7 @@
 
 Purpose: Version-controlled Prisma migration files. Keep each migration idempotent and reversible where possible.
 
-Status: No Prisma migration has been generated yet. The current schema is preparation only; do not run a production migration until a clean Supabase database is intentionally provisioned and the schema has been reviewed.
+Status: Initial schema, pricing, school archival, and school finance migrations are versioned. Do not run a production migration until the target Supabase database is intentionally provisioned and the migration has been reviewed.
 
 Safe preparation commands:
 

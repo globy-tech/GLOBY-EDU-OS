@@ -1,10 +1,43 @@
 const { createClient } = require('@supabase/supabase-js');
 const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const fs = require('fs/promises');
+const path = require('path');
+const { isProductionRuntime } = require('../config/app-url.config');
 
 const SUPABASE_BUCKET = 'school-files';
 let supabaseClient = null;
 let r2Client = null;
+
+function getLocalQaFilePath(filePath) {
+  if (isProductionRuntime() || String(process.env.GLOBY_QA_MODE || '').trim().toLowerCase() !== 'true') return null;
+  const qaHome = String(process.env.GLOBY_QA_HOME || '').trim();
+  if (!qaHome) throw new Error('Isolated QA file storage requires GLOBY_QA_HOME.');
+
+  const segments = String(filePath || '').replace(/\\/g, '/').split('/');
+  if (!segments.length || segments.some((segment) => !segment || segment === '.' || segment === '..' || segment.includes('\0'))) {
+    throw new Error('Invalid isolated QA file path.');
+  }
+
+  const root = path.resolve(qaHome, 'files');
+  const resolved = path.resolve(root, ...segments);
+  const relative = path.relative(root, resolved);
+  if (!relative || relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative)) {
+    throw new Error('Invalid isolated QA file path.');
+  }
+  return resolved;
+}
+
+function getFileContentType(filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+  return ({
+    '.gif': 'image/gif',
+    '.jpeg': 'image/jpeg',
+    '.jpg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+  })[extension] || 'application/octet-stream';
+}
 
 function getSupabaseConfig() {
   return {
@@ -95,8 +128,13 @@ function getR2Client() {
   if (r2Client) return r2Client;
 
   const { endpoint, accessKeyId, secretAccessKey } = getR2Config();
-  if (!isR2Configured()) {
-    throw new Error('Cloudflare R2 is not configured. Set CLOUDFLARE_R2_ENDPOINT, CLOUDFLARE_R2_ACCESS_KEY_ID, CLOUDFLARE_R2_SECRET_ACCESS_KEY, and CLOUDFLARE_R2_BUCKET.');
+  const status = getR2ConfigurationStatus();
+  if (!status.configured) {
+    const issues = [
+      ...status.missingVariables.map((variable) => `missing ${variable}`),
+      ...status.invalidVariables.map((variable) => `invalid ${variable}`),
+    ];
+    throw new Error(`Cloudflare R2 configuration is unavailable: ${issues.join(', ')}.`);
   }
 
   r2Client = new S3Client({
@@ -113,6 +151,13 @@ function getR2Client() {
 }
 
 async function uploadSchoolFile(filePath, file, options = {}) {
+  const localQaPath = getLocalQaFilePath(filePath);
+  if (localQaPath) {
+    await fs.mkdir(path.dirname(localQaPath), { recursive: true });
+    await fs.writeFile(localQaPath, file, { flag: options.upsert === true ? 'w' : 'wx' });
+    return filePath;
+  }
+
   if (isR2Configured()) {
     const client = getR2Client();
     const { bucket } = getR2Config();
@@ -139,6 +184,12 @@ async function uploadSchoolFile(filePath, file, options = {}) {
 }
 
 async function createSchoolFileSignedUrl(filePath, expiresIn = 3600) {
+  const localQaPath = getLocalQaFilePath(filePath);
+  if (localQaPath) {
+    const contents = await fs.readFile(localQaPath);
+    return `data:${getFileContentType(filePath)};base64,${contents.toString('base64')}`;
+  }
+
   if (isR2Configured()) {
     const client = getR2Client();
     const { bucket } = getR2Config();
@@ -159,6 +210,9 @@ async function createSchoolFileSignedUrl(filePath, expiresIn = 3600) {
 }
 
 async function downloadSchoolFile(filePath) {
+  const localQaPath = getLocalQaFilePath(filePath);
+  if (localQaPath) return fs.readFile(localQaPath);
+
   if (isR2Configured()) {
     const client = getR2Client();
     const { bucket } = getR2Config();

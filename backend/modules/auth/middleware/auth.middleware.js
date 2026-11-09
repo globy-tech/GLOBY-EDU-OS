@@ -7,6 +7,7 @@ const firebaseAdmin = require('../../../firebase.admin');
 const firebaseData = require('../../../firebase.data');
 const firebaseCore = require('../../../firebase.core');
 const prisma = require('../../../config/prisma.client');
+const { loadSchoolData } = require('../../school/fallback.school');
 const { findFallbackUser, findFallbackUserByPayload } = require('./fallback-user');
 
 function parseMockToken(token) {

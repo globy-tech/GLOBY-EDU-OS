@@ -3,6 +3,7 @@ const path = require('path');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const config = require('../../config/auth.config');
+const { assertIsolatedQaConfiguration } = require('../../config/qa-config');
 const { generateSchoolSubdomain } = require('./tenant-hostname');
 
 const SCHOOLS_FILE = process.env.GLOBY_SCHOOLS_FILE
@@ -21,13 +22,31 @@ const DEMO_SCHOOL_PASSWORD = 'GlobySchool@123';
 const DEMO_TEACHER_PASSWORD = 'GlobyTeacher@123';
 const DEMO_STUDENT_PASSWORD = 'GlobyStudent@123';
 
+function isQaMode() {
+  return String(process.env.GLOBY_QA_MODE || '').trim().toLowerCase() === 'true';
+}
+
 function assertFallbackStoreAllowed() {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('[fallback.school] JSON fallback storage is disabled in production. Configure a production datastore.');
   }
-  if (process.env.NODE_ENV !== 'test' && String(process.env.DATA_STORE_MODE || '').trim().toLowerCase() !== 'json') {
-    throw new Error('[fallback.school] Set DATA_STORE_MODE=json to explicitly enable local JSON storage.');
+
+  const isTestRuntime = process.env.NODE_ENV === 'test';
+  const qaMode = isQaMode();
+  const dataStoreMode = String(process.env.DATA_STORE_MODE || '').trim().toLowerCase();
+
+  if (qaMode) {
+    assertIsolatedQaConfiguration(process.env, path.resolve(__dirname, '../..'));
+    if (path.resolve(process.env.GLOBY_SCHOOLS_FILE) !== SCHOOLS_FILE) {
+      throw new Error('[fallback.school] QA school data path changed after fallback storage was initialized.');
+    }
   }
+
+  if (isTestRuntime || qaMode || dataStoreMode === 'json') {
+    return;
+  }
+
+  throw new Error('[fallback.school] Set DATA_STORE_MODE=json to explicitly enable local JSON storage.');
 }
 
 function ensureSchoolDataFile() {
@@ -35,13 +54,13 @@ function ensureSchoolDataFile() {
   try {
     fs.mkdirSync(path.dirname(SCHOOLS_FILE), { recursive: true });
   } catch (err) {
-    // Ignore directory-creation failures; the fallback in-memory snapshot still works during tests.
+    if (isQaMode()) throw err;
   }
   if (!fs.existsSync(SCHOOLS_FILE)) {
     try {
       fs.writeFileSync(SCHOOLS_FILE, JSON.stringify({ schools: [] }, null, 2), 'utf-8');
     } catch (err) {
-      // Keep the in-memory fallback working even when the file is temporarily unavailable.
+      if (isQaMode()) throw err;
     }
   }
 }
@@ -104,6 +123,7 @@ function loadSchoolData() {
       const json = JSON.parse(raw);
       source = Array.isArray(json.schools) ? json.schools : [];
     } catch (err) {
+      if (isQaMode()) throw err;
       source = [];
     }
   }
@@ -123,6 +143,7 @@ function saveSchoolData(schools) {
     fs.mkdirSync(path.dirname(SCHOOLS_FILE), { recursive: true });
     fs.writeFileSync(SCHOOLS_FILE, JSON.stringify({ schools: sanitized }, null, 2), 'utf-8');
   } catch (err) {
+    if (isQaMode()) throw err;
     globalThis.__workspaceSnapshot = sanitized;
   }
   return sanitized;
@@ -448,7 +469,6 @@ function createTeacherRecord(school, payload) {
   const teacherId = safePayload.teacherId || createTeacherIdentifier(school, safePayload.fullName || safePayload.name || 'teacher');
   
   const teacher = {
-    username: safePayload.username || safePayload.email || teacherId,
     role: 'teacher',
     grade: safePayload.grade || 'N/A',
     fullName: safePayload.fullName || safePayload.name || 'Teacher',
@@ -456,7 +476,6 @@ function createTeacherRecord(school, payload) {
     emailVerified: safePayload.emailVerified !== false,
     developmentOnly: safePayload.developmentOnly || false,
     platformAdmin: false,
-    teacherId,
     email: safePayload.email || null,
     phone: safePayload.phone || null,
     department: safePayload.department || null,

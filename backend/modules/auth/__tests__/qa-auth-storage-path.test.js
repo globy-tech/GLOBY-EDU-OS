@@ -1,12 +1,10 @@
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
+const useIsolatedSchoolStore = require('../../school/__tests__/isolated-school-store');
 
 describe('isolated QA authentication storage', () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'globy-qa-auth-'));
-  const schoolsFile = path.join(directory, 'schools.json');
-  const environmentKeys = ['DATA_STORE_MODE', 'GLOBY_SCHOOLS_FILE'];
-  const originalEnvironment = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
+  const cleanupIsolatedSchoolStore = useIsolatedSchoolStore();
+  const schoolsFile = process.env.GLOBY_SCHOOLS_FILE;
   let findFallbackUser;
 
   beforeAll(() => {
@@ -28,11 +26,7 @@ describe('isolated QA authentication storage', () => {
   });
 
   afterAll(() => {
-    for (const key of environmentKeys) {
-      if (originalEnvironment[key] === undefined) delete process.env[key];
-      else process.env[key] = originalEnvironment[key];
-    }
-    fs.rmSync(directory, { recursive: true, force: true });
+    cleanupIsolatedSchoolStore();
   });
 
   test('resolves account status from the explicitly configured QA schools file', () => {

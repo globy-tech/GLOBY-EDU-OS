@@ -2,13 +2,21 @@ jest.mock('../../audit/audit.service', () => ({
   recordAuditEvent: jest.fn().mockResolvedValue(null),
   listAuditEvents: jest.fn().mockResolvedValue([]),
 }));
+jest.mock('../../../firebase.data', () => ({ isFirebaseDataConfigured: () => false }));
+jest.mock('../../../firebase.core', () => ({
+  isFirebaseCoreMode: () => false,
+  getMaintenanceMode: jest.fn().mockResolvedValue(false),
+}));
+jest.mock('../../../config/prisma.client', () => ({ __stub: true }));
 
+const useIsolatedSchoolStore = require('../../school/__tests__/isolated-school-store');
+const cleanupIsolatedSchoolStore = useIsolatedSchoolStore();
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const authRouter = require('../../../routes/auth');
 const platformAdminService = require('../../platform-admin/platform-admin.service');
 const config = require('../../../config/auth.config');
-const { loadSchoolData, saveSchoolData } = require('../../school/fallback.school');
+const { ensureDemoSchool, loadSchoolData, saveSchoolData } = require('../../school/fallback.school');
 
 function createTestServer() {
   const app = express();
@@ -28,14 +36,19 @@ describe('credential security', () => {
   beforeAll(() => {
     hadPreviousSnapshot = Object.prototype.hasOwnProperty.call(global, '__workspaceSnapshot');
     previousSnapshot = global.__workspaceSnapshot;
+    ensureDemoSchool();
     global.__workspaceSnapshot = JSON.parse(JSON.stringify(loadSchoolData()));
     server = createTestServer();
   });
 
   afterAll(async () => {
-    await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
-    if (hadPreviousSnapshot) global.__workspaceSnapshot = previousSnapshot;
-    else delete global.__workspaceSnapshot;
+    try {
+      if (server) await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    } finally {
+      if (hadPreviousSnapshot) global.__workspaceSnapshot = previousSnapshot;
+      else delete global.__workspaceSnapshot;
+      cleanupIsolatedSchoolStore();
+    }
   });
 
   test('issues signed tokens and blocks temporary-password users from protected routes', async () => {

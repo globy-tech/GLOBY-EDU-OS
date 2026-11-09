@@ -1,12 +1,8 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
     function isSuperAdmin() {
-      return isSignedIn() &&
+      return request.auth != null &&
         request.auth.token.role == 'super_admin' &&
         request.auth.token.platformAdmin == true &&
         request.auth.token.roles is list &&
@@ -15,135 +11,13 @@ service cloud.firestore {
         request.auth.token.schoolId == null;
     }
 
-    function tenantMatch(tenantId) {
-      return isSignedIn() && request.auth.token.tenantId == tenantId;
-    }
-
-    function validSchoolRecord(resourceData) {
-      return resourceData.schoolId is string && resourceData.schoolId.size() > 0;
-    }
-
-    function ownsTenantRecord(resourceData) {
-      return validSchoolRecord(resourceData) && tenantMatch(resourceData.schoolId);
-    }
-
-    function hasTenantRole(allowedRoles) {
-      return isSignedIn() && request.auth.token.role in allowedRoles;
-    }
-
-    function canCreateTenantRecord(allowedRoles) {
-      return isSuperAdmin() || (ownsTenantRecord(request.resource.data) && hasTenantRole(allowedRoles));
-    }
-
-    function canUpdateTenantRecord(allowedRoles) {
-      return isSuperAdmin() || (
-        ownsTenantRecord(resource.data) &&
-        ownsTenantRecord(request.resource.data) &&
-        hasTenantRole(allowedRoles)
-      );
-    }
-
-    function canDeleteTenantRecord(allowedRoles) {
-      return isSuperAdmin() || (ownsTenantRecord(resource.data) && hasTenantRole(allowedRoles));
-    }
-
-    function userCanReadOwnTenant(tenantId) {
-      return isSignedIn() && (
-        request.auth.token.tenantId == tenantId ||
-        isSuperAdmin()
-      );
-    }
-
-    match /tenants/{tenantId} {
-      allow get, list: if isSignedIn() && (
-        isSuperAdmin() || request.auth.token.tenantId == tenantId
-      );
-      allow create: if isSuperAdmin();
-      allow update, delete: if isSuperAdmin() || (tenantMatch(tenantId) && request.auth.token.role in ['school_authority', 'school_head']);
-    }
-
-    match /users/{userId} {
-      allow get, list: if false;
-      allow create, update, delete: if false;
-    }
-
-    match /roles/{roleId} {
-      allow get, list: if isSignedIn() && (
-        isSuperAdmin() ||
-        resource.data.schoolId == request.auth.token.tenantId
-      );
-      allow create: if canCreateTenantRecord(['school_authority', 'school_head']);
-      allow update: if canUpdateTenantRecord(['school_authority', 'school_head']);
-      allow delete: if canDeleteTenantRecord(['school_authority', 'school_head']);
-    }
-
-    match /teachers/{teacherId} {
-      allow get, list: if isSignedIn() && (
-        isSuperAdmin() ||
-        resource.data.schoolId == request.auth.token.tenantId ||
-        request.auth.token.uid == teacherId
-      );
-      allow create: if canCreateTenantRecord(['school_authority', 'school_head']);
-      allow update: if canUpdateTenantRecord(['school_authority', 'school_head']);
-      allow delete: if canDeleteTenantRecord(['school_authority', 'school_head']);
-    }
-
-    match /students/{studentId} {
-      allow get, list: if isSignedIn() && (
-        isSuperAdmin() ||
-        resource.data.schoolId == request.auth.token.tenantId ||
-        request.auth.token.uid == studentId
-      );
-      allow create: if canCreateTenantRecord(['school_authority', 'school_head']);
-      allow update: if canUpdateTenantRecord(['school_authority', 'school_head']);
-      allow delete: if canDeleteTenantRecord(['school_authority', 'school_head']);
-    }
-
-    match /classes/{classId} {
-      allow get, list: if isSignedIn() && (
-        isSuperAdmin() ||
-        resource.data.schoolId == request.auth.token.tenantId
-      );
-      allow create: if canCreateTenantRecord(['school_authority', 'school_head', 'teacher']);
-      allow update: if canUpdateTenantRecord(['school_authority', 'school_head', 'teacher']);
-      allow delete: if canDeleteTenantRecord(['school_authority', 'school_head', 'teacher']);
-    }
-
-    match /enrollments/{enrollmentId} {
-      allow get, list: if isSignedIn() && (
-        isSuperAdmin() ||
-        resource.data.schoolId == request.auth.token.tenantId ||
-        request.auth.token.uid == resource.data.studentId
-      );
-      allow create: if canCreateTenantRecord(['school_authority', 'school_head', 'teacher']);
-      allow update: if canUpdateTenantRecord(['school_authority', 'school_head', 'teacher']);
-      allow delete: if canDeleteTenantRecord(['school_authority', 'school_head', 'teacher']);
-    }
-
-    match /auditLogs/{logId} {
-      allow read: if isSuperAdmin();
-      allow create, update, delete: if false;
-    }
-
     match /pricingPlans/{planId} {
       allow read: if true;
       allow write: if isSuperAdmin();
     }
 
-    match /payments/{paymentId} {
-      allow read: if isSuperAdmin() || (isSignedIn() && resource.data.schoolId == request.auth.token.tenantId);
-      allow write: if false;
-    }
-
-    match /subscriptions/{schoolId} {
-      allow read: if isSuperAdmin() || tenantMatch(schoolId);
-      allow write: if false;
-    }
-
-    match /refundRequests/{requestId} {
-      allow read: if isSuperAdmin() || (isSignedIn() && resource.data.schoolId == request.auth.token.tenantId);
-      allow create: if isSignedIn() && request.resource.data.schoolId == request.auth.token.tenantId;
-      allow update, delete: if isSuperAdmin();
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }

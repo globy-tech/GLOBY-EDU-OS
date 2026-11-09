@@ -9,6 +9,44 @@ const { roleGuard } = require('../auth/middleware/role.middleware');
 const tenantMiddleware = require('./middleware/tenant.middleware');
 const { listAuditEvents, recordAuditEvent } = require('../audit/audit.service');
 
+const SCHOOL_AUTHORITY_UPDATE_FIELDS = new Set([
+  'name',
+  'email',
+  'phone',
+  'website',
+  'country',
+  'region',
+  'city',
+  'schoolType',
+  'schoolLevel',
+  'motto',
+  'description',
+  'address',
+  'timezone',
+  'logo',
+  'logoPath',
+  'coverImage',
+  'coverImagePath',
+  'stamp',
+  'stampPath',
+  'principalSignature',
+  'principalSignaturePath',
+  'branding',
+  'settings',
+  'announcements',
+  'messages',
+  'reports',
+  'events',
+  'recentActivities',
+  'financeCategories',
+  'examRecords',
+  'examResults',
+  'reportCards',
+  'transcripts',
+  'academicYear',
+  'currentTerm',
+]);
+
 async function auditSchoolAction(req, event) {
   await recordAuditEvent({
     req,
@@ -346,9 +384,13 @@ router.get('/:schoolId', authMiddleware, tenantMiddleware, async (req, res) => {
       : roles.includes('student')
         ? schoolService.getStudentSchoolView(school, req.user)
         : schoolService.sanitizeSchoolResponse(school);
-    return res.json({ status: 'ok', school: responseSchool });
+    const response = { status: 'ok', school: responseSchool };
+    if (roles.some((role) => ['school_authority', 'school_head', 'super_admin'].includes(String(role).toLowerCase()))) {
+      response.summary = await schoolService.getDashboardSummary(schoolId, school);
+    }
+    return res.json(response);
   } catch (err) {
-    return res.status(500).json({ status: 'error', message: err.message });
+    return res.status(500).json({ status: 'error', message: 'Unable to load school details.' });
   }
 });
 
@@ -363,14 +405,113 @@ router.post('/:schoolId/payments', authMiddleware, tenantMiddleware, roleGuard([
   }
 });
 
+router.get('/:schoolId/invoices', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const invoices = await schoolService.listSchoolInvoices(req.params.schoolId, req.user || {});
+    return res.json({ status: 'ok', invoices });
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.post('/:schoolId/invoices', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const idempotencyKey = req.get?.('Idempotency-Key') || req.headers?.['idempotency-key'];
+    const invoice = await schoolService.createSchoolInvoice(req.params.schoolId, req.body || {}, req.user || {}, idempotencyKey);
+    await auditSchoolAction(req, { action: 'invoice.created', resourceType: 'invoice', resourceId: invoice.id });
+    return res.status(201).json({ status: 'ok', invoice });
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.patch('/:schoolId/invoices/:invoiceId', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const invoice = await schoolService.cancelSchoolInvoice(req.params.schoolId, req.params.invoiceId, req.body || {}, req.user || {});
+    await auditSchoolAction(req, { action: 'invoice.cancelled', resourceType: 'invoice', resourceId: invoice.id });
+    return res.json({ status: 'ok', invoice });
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.post('/:schoolId/invoices/:invoiceId/checkout', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const idempotencyKey = req.get?.('Idempotency-Key') || req.headers?.['idempotency-key'];
+    const payment = await schoolService.initializeInvoicePayment(
+      req.params.schoolId,
+      req.params.invoiceId,
+      req.user || {},
+      idempotencyKey,
+    );
+    await auditSchoolAction(req, {
+      action: 'invoice.payment.checkout.started',
+      resourceType: 'invoice',
+      resourceId: req.params.invoiceId,
+      metadata: { paymentReference: payment.reference },
+    });
+    return res.status(201).json({ status: 'ok', payment });
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.post('/:schoolId/invoices/:invoiceId/verify-payment', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const idempotencyKey = req.get?.('Idempotency-Key') || req.headers?.['idempotency-key'];
+    const result = await schoolService.verifyAndLinkInvoicePayment(
+      req.params.schoolId,
+      req.params.invoiceId,
+      req.body || {},
+      req.user || {},
+      idempotencyKey,
+    );
+    if (!result.alreadyLinked) {
+      await auditSchoolAction(req, {
+        action: 'invoice.payment.verified',
+        resourceType: 'invoice',
+        resourceId: result.invoice.id,
+        metadata: { paymentReference: result.invoice.paymentReference },
+      });
+    }
+    return res.json({
+      status: 'ok',
+      ...result,
+      message: result.alreadyLinked ? 'This verified payment is already linked to the invoice.' : 'Payment verified and linked to the invoice.',
+    });
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.get('/:schoolId/refund-requests', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const refunds = await schoolService.listSchoolRefundRequests(req.params.schoolId, req.user || {});
+    return res.json({ status: 'ok', refunds });
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.post('/:schoolId/refund-requests', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const idempotencyKey = req.get?.('Idempotency-Key') || req.headers?.['idempotency-key'];
+    const refund = await schoolService.createSchoolRefundRequest(req.params.schoolId, req.body || {}, req.user || {}, idempotencyKey);
+    await auditSchoolAction(req, { action: 'refund.requested', resourceType: 'refund-request', resourceId: refund.id });
+    return res.status(201).json({ status: 'ok', refund, message: 'Refund request submitted for review. No payment has been refunded.' });
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({ status: 'error', message: err.message });
+  }
+});
+
 // PUT /api/v1/schools/:schoolId - School Head (own school), teacher workspace, or Super Admin
 router.put('/:schoolId', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'teacher', 'super_admin']), async (req, res) => {
   try {
     const schoolId = req.params.schoolId;
     const payload = req.body || {};
     const roles = Array.isArray(req.user?.roles) ? req.user.roles : [];
-    if (['payments', 'receipts'].some((field) => Object.prototype.hasOwnProperty.call(payload, field))) {
-      return res.status(403).json({ status: 'error', message: 'Payments and receipts must be recorded through the fee-payment endpoint.' });
+    if (['payments', 'receipts', 'invoices', 'refunds'].some((field) => Object.prototype.hasOwnProperty.call(payload, field))) {
+      return res.status(403).json({ status: 'error', message: 'Payments, receipts, invoices, and refund requests must use their dedicated finance endpoints.' });
     }
     const subscriptionFields = new Set(['subscriptionPlan', 'subscriptionStatus', 'expiresAt', 'trialEndsAt', 'trialStatus', 'billingPeriod', 'studentLimit']);
     if (!(req.user?.platformAdmin === true && roles.includes('super_admin')) &&
@@ -380,6 +521,13 @@ router.put('/:schoolId', authMiddleware, tenantMiddleware, roleGuard(['school_he
     if (roles.some((role) => ['school_authority', 'school_head'].includes(String(role).toLowerCase())) &&
         Object.prototype.hasOwnProperty.call(payload, 'attendanceRecords')) {
       return res.status(403).json({ status: 'error', message: 'Attendance can only be recorded by authorized teachers.' });
+    }
+    const isSchoolAuthority = roles.some((role) => ['school_authority', 'school_head'].includes(String(role).toLowerCase()));
+    if (isSchoolAuthority && Object.keys(payload).some((field) => !SCHOOL_AUTHORITY_UPDATE_FIELDS.has(field))) {
+      return res.status(403).json({
+        status: 'error',
+        message: 'This school update is not permitted. Use an authorized school workflow.',
+      });
     }
     const school = await schoolService.getSchoolBySchoolId(schoolId);
     if (!school) return res.status(404).json({ status: 'error', message: 'School not found' });
@@ -524,11 +672,53 @@ router.put('/:schoolId/entities/:entityType/:entityId', authMiddleware, tenantMi
   }
 });
 
+router.post('/:schoolId/entities/students/:studentId/deletion-request', authMiddleware, tenantMiddleware, roleGuard(['teacher']), async (req, res) => {
+  try {
+    const result = await schoolService.requestStudentDeletion(
+      req.params.schoolId,
+      req.params.studentId,
+      req.body?.reason,
+      req.user || {},
+    );
+    await auditSchoolAction(req, {
+      action: 'student.deletion_requested',
+      resourceType: 'student',
+      resourceId: result.studentId,
+    });
+    return res.status(201).json({ status: 'ok', ...result });
+  } catch (err) {
+    return res.status(400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.put('/:schoolId/entities/students/:studentId/deletion-request', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const { decision, confirmation } = req.body || {};
+    const result = await schoolService.resolveStudentDeletionRequest(
+      req.params.schoolId,
+      req.params.studentId,
+      decision,
+      confirmation,
+      req.user || {},
+    );
+    await auditSchoolAction(req, {
+      action: result.status === 'approved' ? 'student.deletion_approved' : 'student.deletion_rejected',
+      resourceType: 'student',
+      resourceId: result.studentId,
+    });
+    return res.json({ status: 'ok', ...result });
+  } catch (err) {
+    return res.status(400).json({ status: 'error', message: err.message });
+  }
+});
+
 // DELETE /api/v1/schools/:schoolId/entities/:entityType/:entityId - Tenant-scoped remove entity
-router.delete('/:schoolId/entities/:entityType/:entityId', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'teacher', 'super_admin']), async (req, res) => {
+router.delete('/:schoolId/entities/:entityType/:entityId', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
   try {
     const { schoolId, entityType, entityId } = req.params;
-    const entity = await schoolService.deleteEntity(schoolId, entityType, entityId, req.user);
+    const entity = await schoolService.deleteEntity(schoolId, entityType, entityId, req.user, {
+      confirmation: req.body?.confirmation,
+    });
     if (['students', 'teachers'].includes(entityType)) {
       await auditSchoolAction(req, { action: `${entityType.slice(0, -1)}.archived`, resourceType: entityType.slice(0, -1), resourceId: entityId });
     }
@@ -553,13 +743,13 @@ router.get('/:schoolId/search', authMiddleware, tenantMiddleware, roleGuard(['sc
 });
 
 // GET /api/v1/schools/:schoolId/summary - Tenant-scoped dashboard summary
-router.get('/:schoolId/summary', authMiddleware, tenantMiddleware, async (req, res) => {
+router.get('/:schoolId/summary', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
   try {
     const schoolId = req.params.schoolId;
     const summary = await schoolService.getDashboardSummary(schoolId);
     return res.json({ status: 'ok', summary });
   } catch (err) {
-    return res.status(500).json({ status: 'error', message: err.message });
+    return res.status(500).json({ status: 'error', message: 'Unable to load the school dashboard summary.' });
   }
 });
 

@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const prisma = require('../../config/prisma.client');
+const { assertIsolatedQaConfiguration } = require('../../config/qa-config');
 const firebaseData = require('../../firebase.data');
 
 const AUDIT_FILE = process.env.GLOBY_AUDIT_FILE
@@ -16,6 +17,7 @@ function isProductionRuntime() {
 
 function assertFallbackAuditAllowed() {
   if (isProductionRuntime()) throw new Error('[audit.service] JSON audit storage is disabled in production.');
+  assertIsolatedQaConfiguration();
 }
 
 function sanitizeValue(value, key = '') {

@@ -30,6 +30,12 @@ function routeHandler() {
   return layer.route.stack[layer.route.stack.length - 1].handle;
 }
 
+function summaryRoute() {
+  const layer = schoolRouter.stack.find((entry) => entry.route?.path === '/:schoolId/summary' && entry.route.methods.get);
+  if (!layer) throw new Error('School summary route not found');
+  return layer.route;
+}
+
 function response() {
   const res = { status: jest.fn(), json: jest.fn() };
   res.status.mockReturnValue(res);
@@ -70,6 +76,30 @@ afterEach(() => {
 });
 
 describe('attendance role permissions', () => {
+  test.each(['student', 'teacher'])('%s cannot read the school-wide dashboard summary', async (role) => {
+    const handlers = summaryRoute().stack;
+    const req = request(role, {});
+    const res = response();
+    const next = jest.fn();
+
+    await handlers[1].handle(req, res, () => handlers[2].handle(req, res, next));
+
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test('school authorities can pass the dashboard summary role check', async () => {
+    const handlers = summaryRoute().stack;
+    const req = request('school_authority', {});
+    const res = response();
+    const next = jest.fn();
+
+    await handlers[1].handle(req, res, () => handlers[2].handle(req, res, next));
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
   test.each(['school_authority', 'school_head'])('%s cannot write attendance through generic updates', async (role) => {
     const updateSchool = jest.spyOn(schoolService, 'updateSchool');
     const res = response();
@@ -83,6 +113,39 @@ describe('attendance role permissions', () => {
       message: 'Attendance can only be recorded by authorized teachers.',
     }));
     expect(updateSchool).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['schoolStatus', 'suspended'],
+    ['users', []],
+    ['teachers', []],
+    ['students', []],
+    ['classes', []],
+    ['invoices', []],
+    ['refunds', []],
+  ])('school authorities cannot update protected %s through the generic route', async (field, value) => {
+    const updateSchool = jest.spyOn(schoolService, 'updateSchool');
+    const res = response();
+
+    await routeHandler()(request('school_authority', { [field]: value }), res);
+
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(updateSchool).not.toHaveBeenCalled();
+  });
+
+  test('school authorities can update allowed school profile fields', async () => {
+    const school = createSchool();
+    jest.spyOn(schoolService, 'getSchoolBySchoolId').mockResolvedValue(school);
+    const updateSchool = jest.spyOn(schoolService, 'updateSchool').mockResolvedValue({
+      ...school,
+      name: 'Updated Attendance Test School',
+    });
+    const res = response();
+
+    await routeHandler()(request('school_authority', { name: 'Updated Attendance Test School' }), res);
+
+    expect(updateSchool).toHaveBeenCalledWith(school.id, { name: 'Updated Attendance Test School' });
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ status: 'ok' }));
   });
 
   test('authorized teachers can persist attendance for their assigned student and class', async () => {
@@ -191,5 +254,98 @@ describe('attendance role permissions', () => {
     expect(res.status).toHaveBeenCalledWith(403);
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ message: 'Tenant mismatch' }));
     expect(next).not.toHaveBeenCalled();
+  });
+});
+
+describe('student account deletion workflow', () => {
+  const teacher = {
+    userId: `${SCHOOL_ID}:T-A`,
+    username: 'T-A',
+    tenantId: SCHOOL_ID,
+    schoolId: SCHOOL_ID,
+    roles: ['teacher'],
+  };
+  const authority = {
+    userId: `${SCHOOL_ID}:AUTH-A`,
+    username: 'AUTH-A',
+    tenantId: SCHOOL_ID,
+    schoolId: SCHOOL_ID,
+    roles: ['school_authority'],
+  };
+
+  test('assigned teachers can request deletion but cannot permanently delete students', async () => {
+    await expect(schoolService.deleteEntity(SCHOOL_ID, 'students', 'STU-A', teacher, {
+      confirmation: 'STU-A',
+    })).rejects.toThrow('Only School Authority can manage account deletion.');
+
+    const result = await schoolService.requestStudentDeletion(SCHOOL_ID, 'STU-A', 'Duplicate record', teacher);
+
+    expect(result.deletionRequest).toEqual(expect.objectContaining({
+      status: 'pending',
+      reason: 'Duplicate record',
+    }));
+    expect(global.__workspaceSnapshot[0].students[0].metadata.deletionRequest.status).toBe('pending');
+  });
+
+  test('teachers cannot request deletion outside their tenant or assigned class', async () => {
+    await expect(schoolService.requestStudentDeletion(OTHER_SCHOOL_ID, 'STU-A', '', teacher))
+      .rejects.toThrow('Tenant mismatch');
+
+    global.__workspaceSnapshot[0].students[0].classId = 'class-b';
+    global.__workspaceSnapshot[0].students[0].className = 'Unassigned Class';
+    await expect(schoolService.requestStudentDeletion(SCHOOL_ID, 'STU-A', '', teacher))
+      .rejects.toThrow('Teacher is not authorized for this student');
+  });
+
+  test('authority can reject a request or approve it only with student-ID confirmation', async () => {
+    await schoolService.requestStudentDeletion(SCHOOL_ID, 'STU-A', '', teacher);
+    await expect(schoolService.resolveStudentDeletionRequest(
+      SCHOOL_ID,
+      'STU-A',
+      'approved',
+      'wrong-id',
+      authority,
+    )).rejects.toThrow('Type the student ID to confirm permanent deletion.');
+
+    const result = await schoolService.resolveStudentDeletionRequest(
+      SCHOOL_ID,
+      'STU-A',
+      'rejected',
+      '',
+      authority,
+    );
+    expect(result.status).toBe('rejected');
+    expect(global.__workspaceSnapshot[0].students[0].metadata.deletionRequest.status).toBe('rejected');
+  });
+
+  test('approval permanently removes the student record and associated local account', async () => {
+    const school = global.__workspaceSnapshot[0];
+    school.users.push({ username: 'STU-A', studentId: 'STU-A', role: 'student', status: 'active' });
+    await schoolService.requestStudentDeletion(SCHOOL_ID, 'STU-A', '', teacher);
+
+    const result = await schoolService.resolveStudentDeletionRequest(
+      SCHOOL_ID,
+      'STU-A',
+      'approved',
+      'STU-A',
+      authority,
+    );
+
+    expect(result.status).toBe('approved');
+    expect(school.students).toHaveLength(0);
+    expect(school.users).toHaveLength(0);
+  });
+
+  test('authority archive and restore status is synchronized to the student login record', async () => {
+    const school = global.__workspaceSnapshot[0];
+    school.users.push({ username: 'STU-A', studentId: 'STU-A', role: 'student', status: 'active' });
+
+    await schoolService.updateEntity(SCHOOL_ID, 'students', 'STU-A', { status: 'archived' }, authority);
+    expect(school.students[0].status).toBe('archived');
+    expect(school.users[0].status).toBe('archived');
+
+    await schoolService.updateEntity(SCHOOL_ID, 'students', 'STU-A', { status: 'active' }, authority);
+    expect(school.students[0].status).toBe('active');
+    expect(school.users[0].status).toBe('active');
   });
 });

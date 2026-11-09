@@ -20,19 +20,20 @@ import { matchesAdminSchoolFilter } from './utils/school-management-filters.mjs'
 import { getAdminState } from './pages/admin-state.js';
 import { PlatformAdminPage } from './pages/platform-admin.js';
 import { SchoolDashboardPage, SchoolAuthorityDashboard, TeacherDashboard, StudentDashboard } from './pages/school-dashboard.js';
-import { fetchSchoolSummary, fetchSchoolDetails, updateSchoolDetails, createFeePayment, searchSchoolData, fetchSchoolEntities, createSchoolEntity, resendTeacherInvitation, updateSchoolEntity, deleteSchoolEntity, fetchAdminDashboardSummary, fetchPlatformAuditLogs, fetchSchoolActivity, fetchAdminSchoolList, fetchArchivedAdminSchools, createAdminSchool, updateAdminSchool, deleteAdminSchool, activateAdminSchool, fetchWorkspaceMessages, fetchMessageRecipients, createWorkspaceMessage, updateWorkspaceMessage, deleteWorkspaceMessage, fetchSupportTickets, createSupportTicket, updateSupportTicket, deleteSupportTicket, fetchAssignments, fetchLessons, createAssignment, createLesson, submitAssignment } from './api/school.js';
-import { studentLogin, schoolAuthorityLogin, schoolLogin as apiLogin, firebaseLogin as apiFirebaseLogin, linkFirebaseIdentity, platformAdminLogin, logout as apiLogout, forgotPassword as apiForgot, register as apiRegister, confirmFirebasePasswordReset, changePassword as apiChangePassword } from './api/auth.js';
+import { fetchSchoolSummary, fetchSchoolDetails, updateSchoolDetails, createFeePayment, createSchoolInvoice, createSchoolRefundRequest, startSchoolInvoiceCheckout, verifySchoolInvoicePayment, searchSchoolData, fetchSchoolEntities, createSchoolEntity, resendTeacherInvitation, updateSchoolEntity, deleteSchoolEntity, requestStudentDeletion, resolveStudentDeletionRequest, fetchAdminDashboardSummary, fetchPlatformAuditLogs, fetchSchoolActivity, fetchAdminSchoolList, fetchArchivedAdminSchools, createAdminSchool, updateAdminSchool, deleteAdminSchool, activateAdminSchool, fetchWorkspaceMessages, fetchMessageRecipients, createWorkspaceMessage, updateWorkspaceMessage, deleteWorkspaceMessage, fetchSupportTickets, createSupportTicket, updateSupportTicket, deleteSupportTicket, fetchAssignments, fetchLessons, createAssignment, createLesson, submitAssignment } from './api/school.js';
+import { studentLogin, teacherLogin, schoolAuthorityLogin, schoolLogin as apiLogin, firebaseLogin as apiFirebaseLogin, linkFirebaseIdentity, platformAdminLogin, logout as apiLogout, refreshAuthSession, forgotPassword as apiForgot, register as apiRegister, confirmFirebasePasswordReset, changePassword as apiChangePassword } from './api/auth.js';
 import { isFirebaseConfigured, firebaseSignInWithEmail, firebaseSignInWithGoogle, firebaseLinkGoogle, firebaseApplyActionCode, firebaseSignOutUser } from './firebase/firebase-client.js';
 import { buildChangedFieldsPayload, buildSchoolCollectionPayload, buildSchoolEntityPayload, normalizeAttendanceStatus, buildAttendanceRoster, replaceAttendanceSession } from './utils/school-dashboard-actions.js?v=20261022-attendance-history';
 import { showGlobalPwaNotice } from './utils/pwa-notifications.js';
-import { MAX_FILE_UPLOAD_BYTES, validateImageUpload } from './utils/file-upload-validation.js';
+import { MAX_FILE_UPLOAD_BYTES, validateImageUpload, validateProfileImageUpload } from './utils/file-upload-validation.js';
 import { fetchPublicPricing, fetchAdminPricing, fetchMaintenanceMode, initializeSubscriptionCheckout, verifySubscriptionPayment } from './api/pricing.js';
+import { fetchPublicWebsiteCMS } from './api/website-cms.js';
 import { setPwaUpdateAvailable, getPwaUpdateAvailable, clearPwaUpdateAvailable } from './utils/pwa-utils.js';
 import { testimonialImage1, testimonialImage2, testimonialImage3, screenshotAuthorityImage, screenshotTeacherImage, screenshotStudentImage, screenshotAuthorityPlaceholder, screenshotTeacherPlaceholder, screenshotStudentPlaceholder } from './assets/asset-paths.js';
 
 const root = document.getElementById('marketing-root');
+let accessTokenRefreshTimer = null;
 const LANDING_ROUTES = ['home', 'features', 'solutions', 'pricing', 'about', 'contact'];
-const WEBSITE_CMS_STORAGE_KEY = 'globyedu_websiteCms';
 const SESSION_LIMIT = 2;
 const PWA_STATUS_ID = 'globyedu-pwa-status';
 
@@ -182,21 +183,32 @@ const TEACHER_ASSIGNABLE_CLASS_OPTIONS = [
     options: [1, 2, 3].map((level) => ({ label: `SHS ${level}`, value: `SHS ${level}` })),
   },
 ];
+const WEBSITE_CMS_STORAGE_KEY = 'globyedu_websiteCms';
 const DEFAULT_WEBSITE_CMS = {
   companyName: 'GlobyEdu OS',
   logoUrl: '/src/assets/images/ui/globyedu-logo.jpg',
   heroTitle: 'The premium operating system for modern schools.',
   heroSubtitle: 'Unify admissions, attendance, lesson planning, finance, messaging, and reporting in one elegant school operations experience built for growth.',
   contactEmail: 'hello@globyedu.com',
-  contactPhone: '+1 (555) 123-4567',
-  address: '123 Education Lane, Learning City',
+  contactPhone: '+233 53 749 7607',
+  address: '',
   businessHours: 'Monday-Friday • 8am to 6pm',
   website: 'https://globyedu.com',
-  whatsApp: '+1 (555) 123-4567',
+  whatsApp: '+233 53 749 7607',
   googleMapsUrl: 'https://maps.google.com',
   themeColor: '#0ea5e9',
   socialLinks: 'LinkedIn, Twitter, Facebook, Instagram',
 };
+let currentWebsiteCMSSettings = { ...DEFAULT_WEBSITE_CMS };
+
+function normalizeWebsiteCMSSettings(settings = {}) {
+  const sanitized = { ...DEFAULT_WEBSITE_CMS, ...settings };
+  Object.keys(sanitized).forEach((field) => {
+    if (String(settings[field] || '').includes('*')) settings[field] = DEFAULT_WEBSITE_CMS[field];
+    if (String(sanitized[field] || '').includes('*')) sanitized[field] = DEFAULT_WEBSITE_CMS[field];
+  });
+  return sanitized;
+}
 
 let currentSchoolStudents = [];
 let currentSchoolTeachers = [];
@@ -397,29 +409,24 @@ function generateReportCard(payload = {}) {
 }
 
 function getWebsiteCMSSettings() {
-  try {
-    const stored = localStorage.getItem(WEBSITE_CMS_STORAGE_KEY);
-    if (!stored) return { ...DEFAULT_WEBSITE_CMS };
-    const settings = { ...DEFAULT_WEBSITE_CMS, ...JSON.parse(stored) };
-    if (settings.companyName === 'Demo Academy') settings.companyName = DEFAULT_WEBSITE_CMS.companyName;
-    if (settings.heroSubtitle === 'Updated subtitle') settings.heroSubtitle = DEFAULT_WEBSITE_CMS.heroSubtitle;
-    const rawLogo = String(settings.logoUrl || '').trim();
-    const staleLogoTokens = ['operations-hero.svg', 'logo-placeholder', 'placeholder-logo', 'hero-dashboard.svg'];
-    const hasStaleLogo = !rawLogo || rawLogo === 'null' || rawLogo === 'undefined' || staleLogoTokens.some((token) => rawLogo.toLowerCase().includes(token.toLowerCase()));
-    if (hasStaleLogo) settings.logoUrl = DEFAULT_WEBSITE_CMS.logoUrl;
-    ['contactEmail', 'contactPhone', 'whatsApp'].forEach((field) => {
-      if (String(settings[field] || '').includes('*')) settings[field] = DEFAULT_WEBSITE_CMS[field];
-    });
-    return settings;
-  } catch {
-    return { ...DEFAULT_WEBSITE_CMS };
-  }
+  return currentWebsiteCMSSettings;
 }
 
-function saveWebsiteCMSSettings(values = {}) {
-  const merged = { ...getWebsiteCMSSettings(), ...values };
-  localStorage.setItem(WEBSITE_CMS_STORAGE_KEY, JSON.stringify(merged));
-  return merged;
+async function loadWebsiteCMSSettings() {
+  const result = await fetchPublicWebsiteCMS();
+  if (result.ok && result.data?.status === 'ok' && result.data.settings && typeof result.data.settings === 'object') {
+    const settings = { ...result.data.settings };
+    Object.keys(settings).forEach((field) => {
+      if (String(settings[field] || '').includes('*')) settings[field] = DEFAULT_WEBSITE_CMS[field];
+    });
+    currentWebsiteCMSSettings = { ...DEFAULT_WEBSITE_CMS, ...settings };
+    try {
+      localStorage.setItem(WEBSITE_CMS_STORAGE_KEY, JSON.stringify(currentWebsiteCMSSettings));
+    } catch {
+      // Ignore storage issues and keep the in-memory CMS state active.
+    }
+  }
+  return currentWebsiteCMSSettings;
 }
 
 function displayPwaNotice({ title, message, type = 'info', primaryText = 'OK', secondaryText = null, onPrimary = null, onSecondary = null, duration = 6000 }) {
@@ -570,7 +577,11 @@ function markActiveSession() {
   }
 
   localStorage.setItem('globyedu_sessionActive', 'true');
-  localStorage.setItem('globyedu_sessionExpiresAt', String(Date.now() + 1000 * 60 * 60 * 24 * 7));
+  const sessionExpiresAt = Number(localStorage.getItem('globyedu_sessionExpiresAt') || 0);
+  if (!sessionExpiresAt || sessionExpiresAt <= Date.now()) {
+    localStorage.setItem('globyedu_sessionExpiresAt', String(Date.now() + 1000 * 60 * 60 * 24 * 7));
+  }
+  scheduleAccessTokenRefresh();
   seedWorkspaceData();
   applyWorkspaceTheme();
   recordWorkspaceActivity('Session started', 'The authenticated workspace was restored for this browser.', 'session');
@@ -581,8 +592,8 @@ function getSafePublicPricingPlans(pricingPlans = []) {
   return pricingPlans.filter((plan) => plan && typeof plan === 'object' && (plan.active !== false));
 }
 
-async function renderLanding(activeSection = 'home') {
-  const cms = getWebsiteCMSSettings();
+async function renderLanding(activeSection = 'home', navigationId = routeGeneration) {
+  const cms = await loadWebsiteCMSSettings();
   let pricingPlans = [];
 
   try {
@@ -598,6 +609,8 @@ async function renderLanding(activeSection = 'home') {
   } catch (error) {
     console.warn('Unable to load public pricing plans; showing the default pricing state.', error);
   }
+
+  if (navigationId !== routeGeneration) return;
 
   root.innerHTML = `
           ${Nav(cms)}
@@ -703,7 +716,12 @@ function attachLandingActions(activeSection) {
   attachNewsletterHandlers();
 }
 
-function refreshLandingFromCMS() {
+async function refreshLandingFromCMS(event) {
+  if (event?.detail?.settings && typeof event.detail.settings === 'object') {
+    currentWebsiteCMSSettings = { ...DEFAULT_WEBSITE_CMS, ...event.detail.settings };
+  } else {
+    await loadWebsiteCMSSettings();
+  }
   const { path } = parseHash();
   if (!path || path === 'home' || LANDING_ROUTES.includes(path)) {
     renderLanding(path || 'home');
@@ -1247,10 +1265,10 @@ function renderFAQ(cms = getWebsiteCMSSettings()) {
           <h3 class="mt-4 text-2xl font-semibold">Contact our team.</h3>
           <p class="mt-4 text-slate-300">Send a note if you need a demo, pricing details, or onboarding help.</p>
           <div class="mt-8 space-y-4 text-sm text-slate-300">
-            <p><span class="font-semibold">Email:</span> ${cms.contactEmail}</p>
-            <p><span class="font-semibold">Phone:</span> ${cms.contactPhone}</p>
-            <p><span class="font-semibold">Address:</span> ${cms.address}</p>
-            <p><span class="font-semibold">Hours:</span> ${cms.businessHours}</p>
+            <p><span class="font-semibold">Email:</span> ${escapeHtml(cms.contactEmail)}</p>
+            <p><span class="font-semibold">Phone:</span> ${escapeHtml(cms.contactPhone)}</p>
+            ${cms.address ? `<p><span class="font-semibold">Address:</span> ${escapeHtml(cms.address)}</p>` : ''}
+            <p><span class="font-semibold">Hours:</span> ${escapeHtml(cms.businessHours)}</p>
           </div>
         </div>
       </div>
@@ -1274,7 +1292,8 @@ function renderContact(cms = getWebsiteCMSSettings()) {
   const socialLinks = String(cms.socialLinks || 'LinkedIn, Twitter, Facebook, Instagram')
     .split(',')
     .map((item) => item.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .map(escapeHtml);
 
   return `
     <section class="mt-20 rounded-4xl border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-sky-50/60 p-8 text-slate-900 shadow-[0_30px_90px_-45px_rgba(14,165,233,0.28)]">
@@ -1284,10 +1303,10 @@ function renderContact(cms = getWebsiteCMSSettings()) {
           <h2 class="mt-4 text-3xl font-semibold text-slate-900">Let us build your school's digital future.</h2>
           <p class="mt-4 max-w-xl text-slate-600">Share your details and our team will follow up with a tailored onboarding plan for your campus.</p>
           <div class="mt-8 space-y-3 text-sm text-slate-600">
-            <p class="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2"><span class="font-semibold text-slate-900">Email:</span> ${cms.contactEmail}</p>
-            <p class="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2"><span class="font-semibold text-slate-900">Phone:</span> ${cms.contactPhone}</p>
-            <p class="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2"><span class="font-semibold text-slate-900">Address:</span> ${cms.address}</p>
-            <p class="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2"><span class="font-semibold text-slate-900">Hours:</span> ${cms.businessHours}</p>
+            <p class="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2"><span class="font-semibold text-slate-900">Email:</span> ${escapeHtml(cms.contactEmail)}</p>
+            <p class="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2"><span class="font-semibold text-slate-900">Phone:</span> ${escapeHtml(cms.contactPhone)}</p>
+            ${cms.address ? `<p class="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2"><span class="font-semibold text-slate-900">Address:</span> ${escapeHtml(cms.address)}</p>` : ''}
+            <p class="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2"><span class="font-semibold text-slate-900">Hours:</span> ${escapeHtml(cms.businessHours)}</p>
             <p class="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2"><span class="font-semibold text-slate-900">Social:</span> ${socialLinks.join(' • ')}</p>
           </div>
         </div>
@@ -1334,7 +1353,7 @@ function renderPlatformAdminPage() {
   attachPlatformAdminHandlers();
 }
 
-function renderAuthenticatedAppShell(section = 'overview', role = 'super_admin', childrenContent = null) {
+function renderAuthenticatedAppShell(section = 'overview', role = 'super_admin', childrenContent = null, profilePhotoUrl = '') {
   seedWorkspaceData();
   applyWorkspaceTheme();
   const userName = localStorage.getItem('globyedu_userFullName') || 'User';
@@ -1354,7 +1373,85 @@ function renderAuthenticatedAppShell(section = 'overview', role = 'super_admin',
       children: content,
     })}
   `;
+  showAccountProfilePhoto(profilePhotoUrl);
   attachAuthenticatedShellHandlers(roleKey, section);
+  attachAccountProfilePhotoHandlers(roleKey);
+}
+
+function showAccountProfilePhoto(url) {
+  if (!url) return;
+  const imageSelectors = ['[data-account-profile-photo]', '[data-school-profile-photo]', '[data-platform-profile-photo]'];
+  imageSelectors.forEach((selector) => {
+    document.querySelectorAll(selector).forEach((image) => {
+      image.src = url;
+      image.classList.remove('hidden');
+    });
+  });
+  document.querySelectorAll('[data-account-profile-initial], [data-school-profile-initial], [data-platform-profile-initial]')
+    .forEach((initial) => initial.classList.add('hidden'));
+}
+
+function attachAccountProfilePhotoHandlers(role) {
+  if (!['school_authority', 'super_admin'].includes(role)) return;
+  const token = getAccessToken();
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  fetch('/api/v1/account-profile/photo', { headers, cache: 'no-store' })
+    .then(async (response) => {
+      const data = await response.json().catch(() => null);
+      if (!response.ok || data?.status !== 'ok') {
+        if (response.status !== 403) throw new Error(data?.message || 'Unable to load your profile photo.');
+        return null;
+      }
+      return data.url || null;
+    })
+    .then(showAccountProfilePhoto)
+    .catch((error) => console.warn('Unable to load authenticated profile photo.', error));
+
+  const input = document.querySelector('[data-account-profile-photo-input]');
+  const cameraButton = document.querySelector('[data-account-profile-camera]');
+  const status = document.querySelector('[data-account-profile-photo-status]');
+  if (!input) return;
+
+  input.closest('label')?.addEventListener('click', () => input.removeAttribute('capture'));
+  cameraButton?.addEventListener('click', () => {
+    input.setAttribute('capture', 'user');
+    input.click();
+  });
+  input.addEventListener('change', async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    const validationError = validateProfileImageUpload(file);
+    if (validationError) {
+      input.value = '';
+      if (status) status.textContent = validationError;
+      return;
+    }
+
+    if (status) status.textContent = 'Uploading profile photo...';
+    input.disabled = true;
+    try {
+      const response = await fetch('/api/v1/account-profile/photo', {
+        method: 'POST',
+        headers: {
+          ...headers,
+          'Content-Type': file.type || 'application/octet-stream',
+        },
+        body: file,
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || data?.status !== 'ok' || !data.url) {
+        throw new Error(data?.message || `Profile photo upload failed (HTTP ${response.status}).`);
+      }
+      showAccountProfilePhoto(data.url);
+      if (status) status.textContent = 'Profile photo saved.';
+    } catch (error) {
+      if (status) status.textContent = error.message || 'Unable to upload your profile photo.';
+    } finally {
+      input.disabled = false;
+      input.value = '';
+      input.removeAttribute('capture');
+    }
+  });
 }
 
 function getWorkspaceTitle(section, role) {
@@ -1645,15 +1742,7 @@ function attachAuthenticatedShellHandlers(role, section) {
     button.addEventListener('click', async () => {
       const action = button.getAttribute('data-app-action');
       if (action === 'logout') {
-        const status = document.getElementById('account-action-status');
-        const result = await apiLogout(getAccessToken());
-        if (!result.ok || result.data?.status !== 'ok') {
-          if (status) {
-            status.textContent = result.data?.message || 'Unable to securely end this session. Please try again.';
-            status.classList.remove('hidden');
-          }
-          return;
-        }
+        if (!await revokeCurrentSession()) return;
         const loginRoute = role === 'super_admin' ? '#/platform-admin' : '#/login';
         clearAuthenticationState();
         location.replace(loginRoute);
@@ -1831,6 +1920,7 @@ async function renderRolePage(role = 'super_admin', section = 'overview', naviga
 
   let dashboardContent = '';
   let teacherData = null;
+  let shellProfilePhotoUrl = '';
   let assignments = [];
   let lessons = [];
   let schoolData = {
@@ -1903,6 +1993,7 @@ async function renderRolePage(role = 'super_admin', section = 'overview', naviga
       assignments,
       lessons,
     };
+    shellProfilePhotoUrl = teacherData.teacherProfile?.profilePhoto || '';
     dashboardContent = TeacherDashboard(section, teacherData);
   } else if (role === 'student') {
     const studentRecord = schoolData.student || schoolData.profile || schoolData.students?.find((entry) => {
@@ -1933,13 +2024,14 @@ async function renderRolePage(role = 'super_admin', section = 'overview', naviga
       assignments,
       lessons,
     };
+    shellProfilePhotoUrl = studentData.profilePhoto;
     dashboardContent = StudentDashboard(section, studentData);
   } else {
     // Fallback to school authority dashboard
     dashboardContent = SchoolAuthorityDashboard(section, schoolData);
   }
 
-  renderAuthenticatedAppShell(section, role, dashboardContent);
+  renderAuthenticatedAppShell(section, role, dashboardContent, shellProfilePhotoUrl);
   attachSchoolHandlers();
   if (role === 'teacher') initializeTeacherWorkspaceHandlers(teacherData);
 }
@@ -2007,8 +2099,7 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
 
   const token = getAccessToken();
   if (schoolId && token) {
-    const [summaryResult, schoolResult, activityResult] = await Promise.all([
-      fetchSchoolSummary(token, schoolId),
+    const [schoolResult, activityResult] = await Promise.all([
       fetchSchoolDetails(token, schoolId),
       normalizedSection === 'activity' ? fetchSchoolActivity(token, schoolId) : Promise.resolve(null),
     ]);
@@ -2019,12 +2110,9 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
         : '';
     }
 
-    if (summaryResult.ok && summaryResult.data?.status === 'ok') {
-      summary = summaryResult.data.summary || summary;
-    }
-
     if (schoolResult.ok && schoolResult.data?.status === 'ok') {
       const school = schoolResult.data.school || {};
+      summary = schoolResult.data.summary || summary;
       await refreshStoredSchoolAssets(school, token);
       const students = Array.isArray(school.students) ? school.students : [];
       const teachers = Array.isArray(school.teachers) ? school.teachers : [];
@@ -2226,6 +2314,8 @@ async function uploadTenantAsset(file, prefix = 'assets', includePath = false, o
 
 async function uploadCreatedEntityProfilePhoto(file, entityType, entity, token, schoolId) {
   if (!file || typeof file.arrayBuffer !== 'function') return;
+  const validationError = validateProfileImageUpload(file);
+  if (validationError) throw new Error(validationError);
   const isStudent = entityType === 'students';
   const ownerType = isStudent ? 'student' : 'teacher';
   const identifier = entity?.[isStudent ? 'studentId' : 'teacherId'] || entity?.id || entity?.username || entity?.email;
@@ -2305,7 +2395,7 @@ async function handleImageUpload(fileInput, hiddenInput, previewElement, fallbac
   if (!fileInput || !hiddenInput || !previewElement) return;
   const file = fileInput.files && fileInput.files[0];
   if (!file) return;
-  const validationError = validateSchoolImage(file);
+  const validationError = validateProfileImageUpload(file);
   if (validationError) {
     alert(validationError);
     fileInput.value = '';
@@ -2893,20 +2983,36 @@ function attachWorkspaceModuleHandlers() {
   }
 
   const studentProfileUploadButton = document.querySelector('[data-student-profile-photo-upload]');
+  const studentProfileCameraButton = document.querySelector('[data-student-profile-photo-camera]');
   const studentProfilePhotoInput = document.querySelector('[data-student-profile-photo-input]');
   if (studentProfileUploadButton && studentProfilePhotoInput) {
-    studentProfileUploadButton.addEventListener('click', () => studentProfilePhotoInput.click());
+    studentProfileUploadButton.addEventListener('click', () => {
+      studentProfilePhotoInput.removeAttribute('capture');
+      studentProfilePhotoInput.click();
+    });
+    studentProfileCameraButton?.addEventListener('click', () => {
+      studentProfilePhotoInput.setAttribute('capture', 'user');
+      studentProfilePhotoInput.click();
+    });
     studentProfilePhotoInput.addEventListener('change', async () => {
       const file = studentProfilePhotoInput.files?.[0];
-      if (!file || !file.type.startsWith('image/')) return;
+      if (!file) return;
+      const validationError = validateProfileImageUpload(file);
+      if (validationError) {
+        studentProfilePhotoInput.value = '';
+        alert(validationError);
+        return;
+      }
       const token = getAccessToken();
       const schoolId = localStorage.getItem('globyedu_schoolId');
       const studentId = localStorage.getItem('globyedu_studentId');
+      const status = document.querySelector('[data-student-profile-photo-status]');
       if (!token || !schoolId || !studentId) {
         alert('Your student session is missing. Please sign in again.');
         return;
       }
       try {
+        if (status) status.textContent = 'Uploading profile photo...';
         const uploadedPhoto = await uploadTenantAsset(file, 'student-profile', true, {
           type: 'student',
           id: studentId,
@@ -2919,9 +3025,11 @@ function attachWorkspaceModuleHandlers() {
         if (!result.ok || result.data?.status !== 'ok') {
           throw new Error(result.data?.message || 'The photo could not be saved to the student profile.');
         }
+        if (status) status.textContent = 'Profile photo saved.';
         recordWorkspaceActivity('Profile photo updated', 'A student profile photo was uploaded.', 'profile');
         location.reload();
       } catch (error) {
+        if (status) status.textContent = error.message || 'Unable to upload the student profile photo.';
         alert(error.message || 'Unable to upload the student profile photo.');
       }
     });
@@ -3063,7 +3171,8 @@ function attachSchoolHandlers() {
 
   const logoutButton = document.getElementById('school-dashboard-logout');
   if (logoutButton) {
-    logoutButton.addEventListener('click', () => {
+    logoutButton.addEventListener('click', async () => {
+      if (!await revokeCurrentSession()) return;
       clearAuthenticationState();
       location.hash = '#/login';
     });
@@ -3976,15 +4085,25 @@ function attachSchoolHandlers() {
         return;
       }
 
-      if (action === 'delete') {
-        if (!confirm(`PERMANENTLY delete student record for ${studentRecord.fullName || studentRecord.studentId || studentRecord.email || 'selected student'}? This action cannot be undone.`)) return;
-        const studentIdentifier = studentRecord.id || studentRecord.studentId || studentRecord.email;
-        const result = await deleteSchoolEntity(token, schoolId, 'students', studentIdentifier);
+      if (action === 'approve-deletion' || action === 'reject-deletion') {
+        const studentIdentifier = studentRecord.studentId || studentRecord.id || studentRecord.email;
+        const approve = action === 'approve-deletion';
+        const prompt = approve
+          ? `Permanently delete ${studentRecord.fullName || studentIdentifier} after approving the teacher's request?`
+          : `Reject the deletion request for ${studentRecord.fullName || studentIdentifier}?`;
+        if (!confirm(prompt)) return;
+        const result = await resolveStudentDeletionRequest(
+          token,
+          schoolId,
+          studentIdentifier,
+          approve ? 'approved' : 'rejected',
+          approve ? studentIdentifier : '',
+        );
         if (!result.ok || result.data?.status !== 'ok') {
-          alert(result.data?.message || 'Unable to delete student record.');
+          alert(result.data?.message || 'Unable to resolve the student deletion request.');
           return;
         }
-        alert('Student record permanently deleted.');
+        alert(approve ? 'Student deletion request approved and the account was deleted.' : 'Student deletion request rejected.');
         renderSchoolDashboardPage('students');
         return;
       }
@@ -4165,7 +4284,7 @@ function attachSchoolHandlers() {
       if (action === 'delete') {
         if (!confirm(`PERMANENTLY delete teacher record for ${teacherRecord.fullName || teacherRecord.teacherId || teacherRecord.email || 'selected teacher'}? This action cannot be undone.`)) return;
         const teacherIdentifier = teacherRecord.id || teacherRecord.username || teacherRecord.teacherId || teacherRecord.email;
-        const result = await deleteSchoolEntity(token, schoolId, 'teachers', teacherIdentifier);
+        const result = await deleteSchoolEntity(token, schoolId, 'teachers', teacherIdentifier, teacherRecord.teacherId || teacherIdentifier);
         if (!result.ok || result.data?.status !== 'ok') {
           alert(result.data?.message || 'Unable to delete teacher record.');
           return;
@@ -4442,20 +4561,67 @@ function attachSchoolHandlers() {
       }
 
       if (action === 'generate-invoice') {
+        const schoolResult = await fetchSchoolDetails(token, schoolId);
+        if (!schoolResult.ok || schoolResult.data?.status !== 'ok') {
+          alert(schoolResult.data?.message || 'Unable to load school students for invoice creation.');
+          return;
+        }
+        const school = schoolResult.data.school || {};
+        const studentOptions = (Array.isArray(school.students) ? school.students : [])
+          .filter((student) => String(student.status || 'active').toLowerCase() !== 'archived')
+          .map((student) => ({ label: `${student.fullName || student.name || student.email} (${student.studentId || student.id || student.email})`, value: student.studentId || student.id || student.email }))
+          .filter((option) => option.value);
         const formData = await showAdminForm('Generate invoice', [
           { name: 'invoiceNumber', label: 'Invoice number', required: true },
-          { name: 'student', label: 'Student', required: true },
-          { name: 'className', label: 'Class' },
+          { name: 'studentId', label: 'Student', type: 'select', options: studentOptions, required: true },
           { name: 'amount', label: 'Amount', required: true },
-          { name: 'status', label: 'Status', placeholder: 'Pending / Paid / Overdue' },
-          { name: 'dueDate', label: 'Due date', type: 'date' },
+          { name: 'dueDate', label: 'Due date', type: 'date', required: true },
+          { name: 'description', label: 'Description', type: 'textarea' },
         ]);
         if (!formData) return;
-        const school = (await fetchSchoolDetails(token, schoolId).then((result) => (result.ok && result.data?.status === 'ok' ? result.data.school : null))) || {};
-        const invoices = Array.isArray(school.invoices) ? school.invoices : [];
-        invoices.push({ invoiceNumber: formData.invoiceNumber, student: formData.student, className: formData.className || '', amount: formData.amount || '', status: formData.status || 'Pending', dueDate: formData.dueDate || '' });
-        await updateSchoolDetails(token, schoolId, { invoices });
+        const key = globalThis.crypto?.randomUUID?.() || `invoice-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+        const result = await createSchoolInvoice(token, schoolId, formData, key);
+        if (!result.ok || result.data?.status !== 'ok') {
+          alert(result.data?.message || 'Unable to create invoice.');
+          return;
+        }
         alert('Invoice generated successfully.');
+        renderSchoolDashboardPage('finance');
+        return;
+      }
+
+      if (action === 'verify-invoice-payment') {
+        const invoiceId = button.getAttribute('data-invoice-id');
+        const existingReference = button.getAttribute('data-payment-reference') || '';
+        const reference = existingReference || prompt('Enter the Paystack transaction reference to verify for this invoice.');
+        if (!reference) return;
+        const key = globalThis.crypto?.randomUUID?.() || `verify-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+        const result = await verifySchoolInvoicePayment(token, schoolId, invoiceId, reference.trim(), key);
+        if (!result.ok || result.data?.status !== 'ok') {
+          alert(result.data?.message || 'Payment could not be verified. The invoice was not changed.');
+          return;
+        }
+        alert(result.data?.message || 'Payment verified and linked to the invoice.');
+        renderSchoolDashboardPage('finance');
+        return;
+      }
+
+      if (action === 'start-invoice-checkout') {
+        const invoiceId = button.getAttribute('data-invoice-id');
+        const checkoutWindow = window.open('about:blank', '_blank');
+        const key = globalThis.crypto?.randomUUID?.() || `checkout-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+        const result = await startSchoolInvoiceCheckout(token, schoolId, invoiceId, key);
+        const checkoutUrl = result.data?.payment?.checkoutUrl;
+        if (!result.ok || result.data?.status !== 'ok' || !checkoutUrl) {
+          checkoutWindow?.close();
+          alert(result.data?.message || 'Unable to start online payment.');
+          return;
+        }
+        if (checkoutWindow) {
+          checkoutWindow.location = checkoutUrl;
+        } else {
+          alert(`Paystack checkout is ready. Open this URL to complete payment:\n${checkoutUrl}`);
+        }
         renderSchoolDashboardPage('finance');
         return;
       }
@@ -4490,18 +4656,32 @@ function attachSchoolHandlers() {
       }
 
       if (action === 'create-refund') {
-        const formData = await showAdminForm('Create refund', [
-          { name: 'student', label: 'Student', required: true },
+        const schoolResult = await fetchSchoolDetails(token, schoolId);
+        if (!schoolResult.ok || schoolResult.data?.status !== 'ok') {
+          alert(schoolResult.data?.message || 'Unable to load school payment records for a refund request.');
+          return;
+        }
+        const school = schoolResult.data.school || {};
+        const paymentOptions = (Array.isArray(school.payments) ? school.payments : [])
+          .filter((payment) => ['received', 'paid', 'complete', 'completed', 'verified'].includes(String(payment.status || '').toLowerCase()))
+          .map((payment) => ({
+            label: `${payment.studentName || payment.student || 'Student'} - ${payment.reference || payment.id} (${payment.amount})`,
+            value: payment.id,
+          }))
+          .filter((option) => option.value);
+        const formData = await showAdminForm('Request refund review', [
+          { name: 'paymentId', label: 'Recorded payment', type: 'select', options: paymentOptions, required: true },
           { name: 'amount', label: 'Amount', required: true },
-          { name: 'type', label: 'Type', placeholder: 'Partial / Full / Scholarship / Waiver' },
-          { name: 'status', label: 'Status', placeholder: 'Pending' },
+          { name: 'reason', label: 'Reason', type: 'textarea', required: true },
         ]);
         if (!formData) return;
-        const school = (await fetchSchoolDetails(token, schoolId).then((result) => (result.ok && result.data?.status === 'ok' ? result.data.school : null))) || {};
-        const refunds = Array.isArray(school.refunds) ? school.refunds : [];
-        refunds.push({ student: formData.student, amount: formData.amount || '', type: formData.type || 'Partial', status: formData.status || 'Pending' });
-        await updateSchoolDetails(token, schoolId, { refunds });
-        alert('Refund created successfully.');
+        const key = globalThis.crypto?.randomUUID?.() || `refund-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+        const result = await createSchoolRefundRequest(token, schoolId, formData, key);
+        if (!result.ok || result.data?.status !== 'ok') {
+          alert(result.data?.message || 'Unable to create refund request.');
+          return;
+        }
+        alert(result.data?.message || 'Refund request submitted for review. No payment has been refunded.');
         renderSchoolDashboardPage('finance');
         return;
       }
@@ -5631,7 +5811,16 @@ function initializeTeacherWorkspaceHandlers(teacherData = {}) {
 
   const profilePhotoInput = document.getElementById('teacher-profile-photo');
   const profilePhotoPreview = document.getElementById('teacher-profile-photo-preview');
+  const profilePhotoStatus = document.getElementById('teacher-profile-photo-status');
   const profileSaveButton = document.querySelector('[data-teacher-workspace-action="save-profile"]');
+  document.querySelectorAll('[data-teacher-photo-source]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (!profilePhotoInput) return;
+      if (button.dataset.teacherPhotoSource === 'camera') profilePhotoInput.setAttribute('capture', 'user');
+      else profilePhotoInput.removeAttribute('capture');
+      profilePhotoInput.click();
+    });
+  });
   if (profilePhotoInput && profilePhotoInput.dataset.teacherPhotoBound === 'true') return;
   if (profilePhotoInput) profilePhotoInput.dataset.teacherPhotoBound = 'true';
   profilePhotoInput?.addEventListener('change', async () => {
@@ -5643,6 +5832,7 @@ function initializeTeacherWorkspaceHandlers(teacherData = {}) {
       return;
     }
     try {
+      if (profilePhotoStatus) profilePhotoStatus.textContent = 'Uploading profile photo...';
       const uploadedPhoto = await uploadTenantAsset(file, 'teacher-profile', true, {
         type: 'teacher', id: 'self', field: 'profilePhotoPath',
       });
@@ -5651,9 +5841,38 @@ function initializeTeacherWorkspaceHandlers(teacherData = {}) {
         profileSaveButton.dataset.profilePhotoPath = uploadedPhoto.path;
       }
       if (profilePhotoPreview) profilePhotoPreview.innerHTML = `<img src="${escapeHtml(uploadedPhoto.url)}" alt="Profile preview" class="h-20 w-20 rounded-full object-cover" />`;
+      if (profilePhotoStatus) profilePhotoStatus.textContent = 'Photo uploaded. Save your profile to apply it.';
     } catch (error) {
+      if (profilePhotoStatus) profilePhotoStatus.textContent = error.message || 'Unable to upload the selected profile photo.';
       alert(error.message || 'Unable to upload the selected profile photo.');
     }
+  });
+
+  document.querySelectorAll('[data-teacher-student-delete-request]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const studentId = button.getAttribute('data-teacher-student-delete-request');
+      const schoolId = localStorage.getItem('globyedu_schoolId');
+      const token = getAccessToken();
+      if (!studentId || !schoolId || !token) return;
+      if (teacherData.schoolDataLoadError) {
+        alert(teacherData.schoolDataLoadError);
+        return;
+      }
+      const student = (Array.isArray(teacherData.students) ? teacherData.students : [])
+        .find((entry) => String(entry.studentId || entry.id || entry.email) === studentId);
+      if (!student) {
+        alert('Student record was not found in your assigned classes. Refresh the list and try again.');
+        return;
+      }
+      if (!confirm(`Request School Authority review to delete ${student.fullName || student.studentId || 'this student'}? The account will not be deleted until approved.`)) return;
+      const result = await requestStudentDeletion(token, schoolId, studentId);
+      if (!result.ok || result.data?.status !== 'ok') {
+        alert(result.data?.message || 'Unable to submit the student deletion request.');
+        return;
+      }
+      alert('Deletion request submitted for School Authority review.');
+      renderRolePage('teacher', 'students');
+    });
   });
 
   document.querySelectorAll('[data-teacher-student-edit]').forEach((button) => {
@@ -5802,6 +6021,76 @@ function isAuthenticated() {
   return Boolean(accessToken || role || sessionActive);
 }
 
+function getAccessTokenExpiresAt(token = getAccessToken()) {
+  try {
+    const encodedPayload = String(token || '').split('.')[1];
+    if (!encodedPayload) return 0;
+    const normalizedPayload = encodedPayload.replace(/-/g, '+').replace(/_/g, '/')
+      .padEnd(Math.ceil(encodedPayload.length / 4) * 4, '=');
+    const payload = JSON.parse(atob(normalizedPayload));
+    const expiresAt = Number(payload.exp) * 1000;
+    return Number.isFinite(expiresAt) && expiresAt > 0 ? expiresAt : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function scheduleAccessTokenRefresh() {
+  if (accessTokenRefreshTimer) window.clearTimeout(accessTokenRefreshTimer);
+  accessTokenRefreshTimer = null;
+
+  const token = getAccessToken();
+  const sessionExpiresAt = Number(localStorage.getItem('globyedu_sessionExpiresAt') || 0);
+  if (!token || !sessionExpiresAt) return;
+  if (Date.now() >= sessionExpiresAt) {
+    clearAuthenticationState();
+    return;
+  }
+
+  const tokenExpiresAt = getAccessTokenExpiresAt(token);
+  const refreshAt = tokenExpiresAt ? tokenExpiresAt - 60_000 : Date.now() + 10 * 60_000;
+  const delay = Math.max(1000, Math.min(refreshAt - Date.now(), sessionExpiresAt - Date.now()));
+  accessTokenRefreshTimer = window.setTimeout(refreshAccessToken, delay);
+}
+
+async function refreshAccessToken() {
+  const sessionExpiresAt = Number(localStorage.getItem('globyedu_sessionExpiresAt') || 0);
+  if (!sessionExpiresAt || Date.now() >= sessionExpiresAt) {
+    clearAuthenticationState();
+    location.hash = '#/login';
+    return;
+  }
+
+  try {
+    const result = await refreshAuthSession();
+    if (result.ok && result.data?.status === 'ok' && result.data.accessToken) {
+      localStorage.setItem('globyedu_accessToken', result.data.accessToken);
+      scheduleAccessTokenRefresh();
+      return;
+    }
+    if (result.status < 500) {
+      clearAuthenticationState();
+      location.hash = '#/login';
+      return;
+    }
+  } catch {
+    // Retry network failures while the current access token remains valid.
+  }
+
+  const tokenExpiresAt = getAccessTokenExpiresAt();
+  if (tokenExpiresAt > Date.now()) {
+    accessTokenRefreshTimer = window.setTimeout(
+      refreshAccessToken,
+      Math.min(15_000, tokenExpiresAt - Date.now()),
+    );
+    return;
+  }
+
+  console.error('Unable to refresh the authenticated session; signing out.');
+  clearAuthenticationState();
+  location.hash = '#/login';
+}
+
 function getDashboardPathForRole(role, platformAdmin = false) {
   if (platformAdmin || role === 'platform_admin' || role === 'super_admin') return '#/admin/overview';
   if (role === 'school_authority' || role === 'school_head') return '#/school/overview';
@@ -5833,6 +6122,8 @@ function requireAuth() {
 
 // Clear persisted authentication state when the user signs out.
 function clearAuthenticationState() {
+  if (accessTokenRefreshTimer) window.clearTimeout(accessTokenRefreshTimer);
+  accessTokenRefreshTimer = null;
   localStorage.removeItem('globyedu_accessToken');
   localStorage.removeItem('globyedu_userRole');
   localStorage.removeItem('globyedu_platformAdmin');
@@ -5851,6 +6142,31 @@ function clearAuthenticationState() {
   if (isFirebaseConfigured()) {
     firebaseSignOutUser().catch(() => console.error('Firebase sign-out failed while clearing the session.'));
   }
+}
+
+async function revokeCurrentSession() {
+  const resultSlot = document.getElementById('account-action-status');
+  try {
+    const result = await apiLogout(getAccessToken());
+    if (result.ok && result.data?.status === 'ok') return true;
+    const message = result.data?.message || 'Unable to securely end this session. Please try again.';
+    if (resultSlot) {
+      resultSlot.textContent = message;
+      resultSlot.classList.remove('hidden');
+    } else {
+      window.alert(message);
+    }
+  } catch (error) {
+    console.error('Unable to revoke the current session.', error);
+    const message = 'Unable to securely end this session. Please try again.';
+    if (resultSlot) {
+      resultSlot.textContent = message;
+      resultSlot.classList.remove('hidden');
+    } else {
+      window.alert(message);
+    }
+  }
+  return false;
 }
 
 // Attach handlers for the dedicated platform admin login page.
@@ -6096,29 +6412,33 @@ function attachLoginHandlers() {
         response = await schoolAuthorityLogin(schoolId, username, password);
       } else if (role === 'teacher') {
         if (!isFirebaseConfigured()) {
-          throw new Error('Teacher sign-in is currently unavailable. Please try again later.');
-        }
-        const credential = await firebaseSignInWithEmail(username, password);
-        firebaseTeacherSignedIn = true;
-        if (!credential?.user?.emailVerified) {
-          await firebaseSignOutUser();
-          firebaseTeacherSignedIn = false;
-          throw new Error('Unable to sign in. Please check your details.');
-        }
-        const idToken = await credential.user.getIdToken();
-        response = await apiFirebaseLogin(idToken, schoolId, false, {
-          identifier: username,
-          loginType: 'teacher',
-        });
-        if (response.ok && response.data?.status === 'ok' &&
-            !response.data.user?.roles?.includes('teacher')) {
-          await firebaseSignOutUser();
-          firebaseTeacherSignedIn = false;
-          throw new Error('Unable to sign in. Please check your details.');
-        }
-        if (!response.ok || response.data?.status !== 'ok') {
-          await firebaseSignOutUser();
-          firebaseTeacherSignedIn = false;
+          if (!['localhost', '127.0.0.1'].includes(location.hostname)) {
+            throw new Error('Teacher sign-in is currently unavailable. Please try again later.');
+          }
+          response = await teacherLogin(schoolId, username, password);
+        } else {
+          const credential = await firebaseSignInWithEmail(username, password);
+          firebaseTeacherSignedIn = true;
+          if (!credential?.user?.emailVerified) {
+            await firebaseSignOutUser();
+            firebaseTeacherSignedIn = false;
+            throw new Error('Unable to sign in. Please check your details.');
+          }
+          const idToken = await credential.user.getIdToken();
+          response = await apiFirebaseLogin(idToken, schoolId, false, {
+            identifier: username,
+            loginType: 'teacher',
+          });
+          if (response.ok && response.data?.status === 'ok' &&
+              !response.data.user?.roles?.includes('teacher')) {
+            await firebaseSignOutUser();
+            firebaseTeacherSignedIn = false;
+            throw new Error('Unable to sign in. Please check your details.');
+          }
+          if (!response.ok || response.data?.status !== 'ok') {
+            await firebaseSignOutUser();
+            firebaseTeacherSignedIn = false;
+          }
         }
       } else {
         response = await studentLogin(schoolId, username, password);
@@ -6469,6 +6789,7 @@ async function route() {
   }
   if (current === 'login') {
     if (redirectAuthenticatedUser()) return;
+    await loadWebsiteCMSSettings();
     return renderLoginPage();
   }
   if (current === 'platform-admin') {
@@ -6578,7 +6899,8 @@ function attachAdminHandlers() {
 
   const logoutButton = document.getElementById('admin-logout');
   if (logoutButton) {
-    logoutButton.addEventListener('click', () => {
+    logoutButton.addEventListener('click', async () => {
+      if (!await revokeCurrentSession()) return;
       clearAuthenticationState();
       location.hash = '#/login';
     });
@@ -7113,6 +7435,7 @@ function attachNewsletterHandlers() {
 window.addEventListener('hashchange', route);
 window.addEventListener('DOMContentLoaded', async () => {
   route();
+  scheduleAccessTokenRefresh();
   await registerServiceWorker();
   setupPwaInstallPrompt();
   setupNetworkStatusWatcher();

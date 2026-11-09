@@ -32,7 +32,9 @@ describe('isolated QA configuration', () => {
     ['Firebase credentials', (env) => { env.FIREBASE_PRIVATE_KEY = 'not-a-real-key'; }],
     ['external payment provider', (env) => { env.PAYSTACK_SECRET_KEY = 'not-a-real-key'; }],
     ['non-JSON mode', (env) => { env.DATA_STORE_MODE = 'firebase'; }],
+    ['missing school store', (env) => { delete env.GLOBY_SCHOOLS_FILE; }],
     ['missing audit store', (env) => { delete env.GLOBY_AUDIT_FILE; }],
+    ['audit store outside QA home', (env) => { env.GLOBY_AUDIT_FILE = path.join(os.tmpdir(), 'outside-audit-logs.json'); }],
     ['repository data directory', (env) => { env.GLOBY_QA_HOME = path.resolve(__dirname, '..', '..', '..'); }],
     ['protected school store', (env) => { env.GLOBY_SCHOOLS_FILE = path.resolve(__dirname, '..', '..', 'data', 'schools.json'); }],
   ])('rejects unsafe %s configuration', (label, updateEnv) => {

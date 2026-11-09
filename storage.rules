@@ -1,25 +1,6 @@
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
-    function isTenantOwner(tenantId) {
-      return isSignedIn() && request.auth.token.tenantId == tenantId;
-    }
-
-    match /tenants/{tenantId}/{allPaths=**} {
-      allow read: if isSignedIn() && (
-        request.auth.token.role == 'super_admin' ||
-        request.auth.token.tenantId == tenantId
-      );
-      allow write: if isSignedIn() && (
-        request.auth.token.role == 'super_admin' ||
-        request.auth.token.tenantId == tenantId && request.auth.token.role in ['school_authority', 'school_head', 'teacher']
-      );
-    }
-
     match /{allPaths=**} {
       allow read, write: if false;
     }

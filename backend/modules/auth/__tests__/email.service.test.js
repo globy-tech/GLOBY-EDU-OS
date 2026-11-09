@@ -27,7 +27,9 @@ describe('transactional email service', () => {
   it('sends an email via the Brevo API when configured', async () => {
     const { sendEmail } = require('../utils/email');
 
-    const result = await sendEmail('student@example.com', 'Password reset', '<p>Reset</p>');
+    const result = await sendEmail('student@example.com', 'Password reset', '<p>Reset</p>', {
+      replyTo: 'reply@example.test',
+    });
 
     expect(global.fetch).toHaveBeenCalledWith(
       'https://api.brevo.com/v3/smtp/email',
@@ -39,6 +41,7 @@ describe('transactional email service', () => {
         }),
       })
     );
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).replyTo).toEqual({ email: 'reply@example.test' });
     expect(result).toMatchObject({
       ok: true,
       provider: 'brevo',
@@ -73,7 +76,9 @@ describe('transactional email service', () => {
     });
 
     const { sendEmail } = require('../utils/email');
-    const result = await sendEmail('student@example.com', 'Verify your email', '<p>Verify</p>');
+    const result = await sendEmail('student@example.com', 'Verify your email', '<p>Verify</p>', {
+      replyTo: 'reply@example.test',
+    });
 
     expect(global.fetch).toHaveBeenCalledWith(
       'https://api.resend.com/emails',
@@ -84,6 +89,7 @@ describe('transactional email service', () => {
         }),
       })
     );
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).reply_to).toBe('reply@example.test');
     expect(result).toMatchObject({
       ok: true,
       status: 200,

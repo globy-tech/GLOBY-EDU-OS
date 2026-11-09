@@ -108,4 +108,4 @@ function assertIsolatedQaConfiguration(env = process.env, backendRoot = path.res
   }
 }
 
-module.exports = { assertIsolatedQaConfiguration };
+module.exports = { assertIsolatedQaConfiguration, EXTERNAL_SERVICE_VARIABLES };

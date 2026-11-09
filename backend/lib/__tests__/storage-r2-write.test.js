@@ -1,4 +1,6 @@
 const storage = require('../supabaseClient');
+const originalQaMode = process.env.GLOBY_QA_MODE;
+process.env.GLOBY_QA_MODE = 'false';
 
 describe('Cloudflare R2 write behavior', () => {
   const keys = [
@@ -25,6 +27,8 @@ describe('Cloudflare R2 write behavior', () => {
       if (original[key] === undefined) delete process.env[key];
       else process.env[key] = original[key];
     });
+    if (originalQaMode === undefined) delete process.env.GLOBY_QA_MODE;
+    else process.env.GLOBY_QA_MODE = originalQaMode;
   });
 
   it('uses conditional create for non-upsert writes and allows explicit upserts', async () => {

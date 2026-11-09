@@ -2,11 +2,9 @@
 // Express route handlers for authentication endpoints. Delegates logic to auth.service.
 
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
 const bcrypt = require('bcrypt');
 const config = require('../../config/auth.config');
-const { getAppUrl } = require('../../config/app-url.config');
+const { getAppUrl, isProductionRuntime } = require('../../config/app-url.config');
 const firebaseAdmin = require('../../firebase.admin');
 const firebaseData = require('../../firebase.data');
 const firebaseCore = require('../../firebase.core');
@@ -24,6 +22,8 @@ const {
   clearLoginFailures,
 } = require('./utils/login-rate-limiter');
 const { recordAuditEvent } = require('../audit/audit.service');
+const { verifyRefreshToken } = require('./utils/token');
+const { loadSchoolData, saveSchoolData } = require('../school/fallback.school');
 
 function registrationErrorDetails(error, phase) {
   const errorName = String(error?.name || 'Error').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 60) || 'Error';
@@ -43,8 +43,8 @@ function canManageUserSession(req, userId) {
 function sessionCookieOptions() {
   return {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+    secure: isProductionRuntime(),
+    sameSite: isProductionRuntime() ? 'strict' : 'lax',
     path: '/api/v1/auth',
     ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}),
   };
@@ -58,18 +58,6 @@ function getRefreshCookie(req) {
   const header = String(req.headers.cookie || '');
   const match = header.split(';').map((part) => part.trim()).find((part) => part.startsWith('globyedu_refresh_token='));
   return match ? decodeURIComponent(match.slice('globyedu_refresh_token='.length)) : null;
-}
-
-function loadSchoolData() {
-  const filePath = path.join(__dirname, '../../data/schools.json');
-  const raw = fs.readFileSync(filePath, 'utf-8');
-  const json = JSON.parse(raw);
-  return json.schools || [];
-}
-
-function saveSchoolData(schools) {
-  const filePath = path.join(__dirname, '../../data/schools.json');
-  fs.writeFileSync(filePath, JSON.stringify({ schools }, null, 2), 'utf-8');
 }
 
 // POST /api/v1/auth/register
@@ -400,16 +388,24 @@ router.post('/refresh', async (req, res) => {
 });
 
 // POST /api/v1/auth/logout
-router.post('/logout', authMiddleware, async (req, res) => {
+router.post('/logout', async (req, res) => {
   try {
-    const userId = req.user?.userId;
     const refreshToken = getRefreshCookie(req) || req.body?.refreshToken;
-    if (!userId || !refreshToken) return res.status(400).json({ status: 'error', message: 'Authenticated session is required' });
-    await authService.logout(userId, refreshToken);
+    if (refreshToken) {
+      try {
+        const decoded = verifyRefreshToken(refreshToken);
+        if (decoded.userId) await authService.logout(String(decoded.userId), refreshToken);
+      } catch (error) {
+        if (error?.name !== 'JsonWebTokenError' && error?.name !== 'TokenExpiredError' && error?.name !== 'NotBeforeError') {
+          throw error;
+        }
+      }
+    }
     res.clearCookie('globyedu_refresh_token', sessionCookieOptions());
     return res.json({ status: 'ok' });
   } catch (err) {
-    return res.status(400).json({ status: 'error', message: err.message });
+    res.clearCookie('globyedu_refresh_token', sessionCookieOptions());
+    return res.status(503).json({ status: 'error', message: 'Unable to revoke the session. Please try again.' });
   }
 });
 

@@ -264,7 +264,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
   const examDashboardMetrics = buildExamDashboardMetrics(examRecords.length ? examRecords : examSchedules, examResults.length ? examResults : gradeEntries, gradingSystem);
 
   const sectionContent = {
-    activity: `
+    teacherActivity: `
       <div class="space-y-6">
         <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
           <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Teacher Activity</p>
@@ -349,7 +349,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
         </div>
       </div>
     `,
-    profile: `
+    schoolProfile: `
       <div class="space-y-6">
         <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
           <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Profile</p>
@@ -360,13 +360,21 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
             <div class="rounded-4xl border border-slate-200 bg-white p-5">
               <p class="text-sm font-semibold text-slate-900">Profile photo</p>
               <div class="mt-4 flex items-center gap-4">
-                <div class="flex h-16 w-16 items-center justify-center rounded-full bg-sky-100 text-xl font-semibold text-sky-700">${escapeHtml((school.name || 'U').slice(0, 1))}</div>
+                <div class="relative flex h-16 w-16 items-center justify-center overflow-hidden rounded-full bg-sky-100 text-xl font-semibold text-sky-700">
+                  <span data-school-profile-initial>${escapeHtml(((sectionData.profile && sectionData.profile.fullName) || school.name || 'U').slice(0, 1))}</span>
+                  <img data-school-profile-photo alt="Profile photo" class="hidden absolute inset-0 h-full w-full object-cover" />
+                </div>
                 <div>
                   <p class="font-semibold text-slate-900">${escapeHtml((sectionData.profile && sectionData.profile.fullName) || school.name || 'User')}</p>
                   <p class="text-sm text-slate-600">${escapeHtml((sectionData.profile && sectionData.profile.email) || summary.email || '')}</p>
                 </div>
               </div>
-              <button type="button" data-workspace-profile-upload class="mt-5 rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white">Upload photo (unavailable)</button>
+              <label class="mt-5 inline-flex cursor-pointer rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white">
+                Upload photo
+                <input data-account-profile-photo-input type="file" accept="image/jpeg,image/png,image/gif,image/webp" class="sr-only" />
+              </label>
+              <button type="button" data-account-profile-camera class="ml-2 rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700">Use camera</button>
+              <p data-account-profile-photo-status class="mt-2 text-sm text-slate-600" role="status" aria-live="polite"></p>
             </div>
             <div class="rounded-4xl border border-slate-200 bg-white p-5">
               <p class="text-sm font-semibold text-slate-900">Personal information</p>
@@ -392,7 +400,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
         </div>
       </div>
     `,
-    settings: `
+    schoolSettings: `
       <div class="space-y-6">
         <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
           <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Settings</p>
@@ -523,6 +531,23 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
           <h2 class="mt-2 text-2xl font-semibold text-slate-900">Complete school profile management</h2>
           <p class="mt-3 text-sm text-slate-600">Update branding, contact details, and profile data connected to the current tenant.</p>
         </div>
+        <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
+          <p class="text-sm font-semibold text-slate-900">Personal profile photo</p>
+          <div class="mt-4 flex items-center gap-4">
+            <div class="relative flex h-16 w-16 items-center justify-center overflow-hidden rounded-full bg-sky-100 text-xl font-semibold text-sky-700">
+              <span data-school-profile-initial>${escapeHtml(String(summary.headName || summary.name || 'U').slice(0, 1))}</span>
+              <img data-school-profile-photo alt="Profile photo" class="hidden absolute inset-0 h-full w-full object-cover" />
+            </div>
+            <div>
+              <label class="inline-flex cursor-pointer rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white">
+                Upload photo
+                <input data-account-profile-photo-input type="file" accept="image/jpeg,image/png,image/gif,image/webp" class="sr-only" />
+              </label>
+              <button type="button" data-account-profile-camera class="ml-2 rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700">Use camera</button>
+              <p data-account-profile-photo-status class="mt-2 text-sm text-slate-600" role="status" aria-live="polite"></p>
+            </div>
+          </div>
+        </div>
         <div class="rounded-4xl border border-slate-200 bg-slate-50 p-6 shadow-sm">
           <div class="grid gap-4 md:grid-cols-2">
             <label class="block text-sm text-slate-700">School Name<input id="school-profile-name" value="${escapeHtml(school.name || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3" /></label>
@@ -645,9 +670,11 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
                   ${students.map((student) => {
                     const studentClassName = student.className || sectionData.classes.find((entry) => String(entry.classId || entry.id) === String(student.classId))?.name || '';
                     const searchText = [student.fullName, student.email, student.studentId, student.admissionNumber, studentClassName, student.gradeLevel, student.grade, student.guardian, student.parentEmail].filter(Boolean).join(' ').toLowerCase();
+                    const studentIdentifier = student.id || student.email || student.studentId || '';
+                    const hasPendingDeletionRequest = student.metadata?.deletionRequest?.status === 'pending';
                     return `
                       <tr data-school-student-row data-school-student-id="${escapeHtml(student.id || student.email || student.studentId || '')}" data-search-text="${escapeHtml(searchText)}" class="${student.status === 'archived' ? 'opacity-60' : ''}">
-                        <td class="px-4 py-4 font-semibold text-slate-900"><div class="flex items-center gap-3">${student.profilePhoto ? `<img src="${escapeHtml(student.profilePhoto)}" alt="" class="h-9 w-9 rounded-full object-cover" />` : ''}<span>${escapeHtml(student.fullName || student.name || student.email || 'Student')}</span></div></td>
+                        <td class="px-4 py-4 font-semibold text-slate-900"><div class="flex items-center gap-3"><span class="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-emerald-100 text-xs font-semibold text-emerald-700">${student.profilePhoto ? `<img src="${escapeHtml(student.profilePhoto)}" alt="" class="h-full w-full object-cover" />` : escapeHtml((student.fullName || student.name || 'S').trim().charAt(0).toUpperCase())}</span><span>${escapeHtml(student.fullName || student.name || student.email || 'Student')}</span></div></td>
                         <td class="px-4 py-4">${escapeHtml(student.studentId || student.admissionNumber || '—')}</td>
                         <td class="px-4 py-4">${escapeHtml(studentClassName || '—')}</td>
                         <td class="px-4 py-4">${escapeHtml(student.gradeLevel || student.grade || '—')}</td>
@@ -655,7 +682,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
                         <td class="px-4 py-4"><span class="inline-flex rounded-full ${student.status === 'archived' ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'} px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em]">${escapeHtml(student.status || 'active')}</span></td>
                         <td class="px-4 py-4 space-x-1">
                           <button type="button" data-school-student-action="edit" data-school-student-id="${escapeHtml(student.id || student.email || student.studentId || '')}" class="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-semibold text-sky-700 hover:bg-sky-100">Edit</button>
-                          ${student.status === 'active' ? `<button type="button" data-school-student-action="archive" data-school-student-id="${escapeHtml(student.id || student.email || student.studentId || '')}" class="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-100">Archive</button>` : `<button type="button" data-school-student-action="restore" data-school-student-id="${escapeHtml(student.id || student.email || student.studentId || '')}" class="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-100">Restore</button><button type="button" data-school-student-action="delete" data-school-student-id="${escapeHtml(student.id || student.email || student.studentId || '')}" class="rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100">Delete</button>`}
+                          ${hasPendingDeletionRequest ? `<button type="button" data-school-student-action="approve-deletion" data-school-student-id="${escapeHtml(studentIdentifier)}" class="rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100">Approve deletion</button><button type="button" data-school-student-action="reject-deletion" data-school-student-id="${escapeHtml(studentIdentifier)}" class="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50">Reject</button>` : student.status === 'active' ? `<button type="button" data-school-student-action="archive" data-school-student-id="${escapeHtml(studentIdentifier)}" class="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-100">Archive</button>` : `<button type="button" data-school-student-action="restore" data-school-student-id="${escapeHtml(studentIdentifier)}" class="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-100">Restore</button>`}
                         </td>
                       </tr>
                     `;
@@ -734,7 +761,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
                               : 'Not invited';
                     return `
                       <tr class="${teacher.status === 'archived' ? 'opacity-60' : ''}">
-                        <td class="px-4 py-4 font-semibold text-slate-900">${escapeHtml(teacher.fullName || teacher.name || teacher.email || 'Teacher')}</td>
+                        <td class="px-4 py-4 font-semibold text-slate-900"><div class="flex items-center gap-3"><span class="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-sky-100 text-xs font-semibold text-sky-700">${teacher.profilePhoto ? `<img src="${escapeHtml(teacher.profilePhoto)}" alt="" class="h-full w-full object-cover" />` : escapeHtml((teacher.fullName || teacher.name || 'T').trim().charAt(0).toUpperCase())}</span><span>${escapeHtml(teacher.fullName || teacher.name || teacher.email || 'Teacher')}</span></div></td>
                         <td class="px-4 py-4">${escapeHtml(teacher.teacherId || teacher.employeeNumber || '—')}</td>
                         <td class="px-4 py-4">${escapeHtml(teacher.department || '—')}</td>
                         <td class="px-4 py-4">${escapeHtml(teacher.position || '—')}</td>
@@ -1307,13 +1334,20 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
         </div>
       </div>
     `,
-  }[section] || sectionContent.overview;
+  };
+  const sectionContentByRoute = {
+    ...sectionContent,
+    activity: `${sectionContent.activity}${sectionContent.teacherActivity}`,
+    profile: `${sectionContent.schoolProfile}${sectionContent.profile}`,
+    settings: `${sectionContent.schoolSettings}${sectionContent.settings}`,
+  };
+  const renderedSection = sectionContentByRoute[section] || sectionContent.overview;
 
   return `
     <div class="min-h-screen bg-slate-50 text-slate-900">
       <main class="mx-auto max-w-7xl px-0 py-4 sm:px-2 sm:py-6 lg:px-8 lg:py-8">
         <div class="rounded-4xl border border-slate-200 bg-white p-4 shadow-2xl shadow-slate-200/50 sm:p-6 lg:p-10">
-          ${sectionContent}
+          ${renderedSection}
         </div>
       </main>
     </div>
@@ -1415,7 +1449,7 @@ export function TeacherDashboard(section = 'overview', teacherData = {}) {
     : '<p class="text-sm text-slate-600">No assigned students found.</p>';
   const sectionMarkup = {
     classes: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">My Classes</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Classes assigned to ${escapeHtml(teacherName)}</h2><div class="mt-5 grid gap-4 sm:grid-cols-2">${classesMarkup}</div></div>`,
-    students: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Students</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Students in your assigned classes</h2><button type="button" data-teacher-workspace-action="create-student" class="mt-5 rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Add student</button><div class="mt-5 grid gap-3 sm:grid-cols-2">${students.length ? students.map((student) => `<article class="rounded-2xl border border-slate-200 bg-white p-3"><div class="flex items-center gap-3"><div class="flex h-10 w-10 items-center justify-center overflow-hidden rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700">${student.profilePhoto ? `<img src="${escapeHtml(student.profilePhoto)}" alt="${escapeHtml(student.fullName || 'Student')}" class="h-full w-full object-cover" />` : escapeHtml((student.fullName || 'S').slice(0, 1))}</div><div><p class="font-semibold text-slate-900">${escapeHtml(student.fullName || 'Student')}</p><p class="text-xs text-slate-500">${escapeHtml(student.studentId || '')}</p></div></div><button type="button" data-teacher-student-edit="${escapeHtml(student.studentId || student.id || student.email || '')}" class="mt-3 rounded-full border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700">Edit</button></article>`).join('') : '<p class="text-sm text-slate-600">No assigned students found.</p>'}</div></div>`,
+    students: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Students</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Students in your assigned classes</h2><button type="button" data-teacher-workspace-action="create-student" class="mt-5 rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Add student</button><div class="mt-5 grid gap-3 sm:grid-cols-2">${students.length ? students.map((student) => `<article class="rounded-2xl border border-slate-200 bg-white p-3"><div class="flex items-center gap-3"><div class="flex h-10 w-10 items-center justify-center overflow-hidden rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700">${student.profilePhoto ? `<img src="${escapeHtml(student.profilePhoto)}" alt="${escapeHtml(student.fullName || 'Student')}" class="h-full w-full object-cover" />` : escapeHtml((student.fullName || 'S').slice(0, 1))}</div><div><p class="font-semibold text-slate-900">${escapeHtml(student.fullName || 'Student')}</p><p class="text-xs text-slate-500">${escapeHtml(student.studentId || '')}</p></div></div><button type="button" data-teacher-student-edit="${escapeHtml(student.studentId || student.id || student.email || '')}" class="mt-3 rounded-full border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700">Edit</button>${student.metadata?.deletionRequest?.status === 'pending' ? '<span class="ml-2 mt-3 inline-block rounded-full bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">Deletion request pending</span>' : `<button type="button" data-teacher-student-delete-request="${escapeHtml(student.studentId || student.id || student.email || '')}" class="ml-2 mt-3 rounded-full border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">Request deletion</button>`}</article>`).join('') : '<p class="text-sm text-slate-600">No assigned students found.</p>'}</div></div>`,
     assignments: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Assignments</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Assignments for your authorized classes</h2><button type="button" data-teacher-workspace-action="create-assignment" class="mt-5 rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Create assignment</button><div class="mt-5 space-y-3">${assignments.length ? assignments.map((entry) => `<article class="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p class="font-semibold text-slate-900">${escapeHtml(entry.title || 'Assignment')}</p><p class="mt-1 text-sm text-slate-600">${escapeHtml(entry.subject || 'Subject')} · Due ${escapeHtml(entry.dueDate || 'No due date')}</p><p class="mt-2 text-sm text-slate-600">${escapeHtml(entry.instructions || entry.description || '')}</p></article>`).join('') : '<p class="text-sm text-slate-600">No assignments created yet.</p>'}</div></div>`,
     lessons: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Learning Materials</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Lessons for your authorized classes</h2><button type="button" data-teacher-workspace-action="create-lesson" class="mt-5 rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Create learning material</button><div class="mt-5 space-y-3">${lessons.length ? lessons.map((entry) => `<article class="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p class="font-semibold text-slate-900">${escapeHtml(entry.title || 'Lesson')}</p><p class="mt-1 text-sm text-slate-600">${escapeHtml(entry.subject || 'Subject')} · ${escapeHtml(entry.className || entry.classId || '')}</p><p class="mt-2 text-sm text-slate-600">${escapeHtml(entry.content || entry.description || '')}</p></article>`).join('') : '<p class="text-sm text-slate-600">No learning materials created yet.</p>'}</div></div>`,
     attendance: `
@@ -1452,7 +1486,7 @@ export function TeacherDashboard(section = 'overview', teacherData = {}) {
       <div class="space-y-6"><div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Messages</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Authorized teacher communication</h2><div class="mt-4 flex flex-wrap gap-3"><button type="button" data-workspace-message-folder="inbox" class="rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white">Inbox</button><button type="button" data-workspace-message-folder="sent" class="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700">Sent</button><button type="button" data-workspace-message-compose class="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700">Compose</button></div><input id="workspace-message-search" class="mt-4 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm" placeholder="Search messages" /><div id="workspace-messages-list" class="mt-5 space-y-3"></div></div></div>
     `,
     announcements: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Announcements</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Updates for teachers and everyone</h2><div class="mt-5 space-y-3">${announcements.length ? announcements.map((entry) => `<article class="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p class="font-semibold text-slate-900">${escapeHtml(entry.title || 'Announcement')}</p><p class="mt-1 text-sm text-slate-600">${escapeHtml(entry.detail || entry.message || '')}</p></article>`).join('') : '<p class="text-sm text-slate-600">No announcements for teachers.</p>'}</div></div>`,
-    profile: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Profile</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">${escapeHtml(profile.fullName || teacherName)}</h2><div class="mt-5 grid gap-4 sm:grid-cols-2"><label class="text-sm font-semibold text-slate-700">Full name<input id="teacher-profile-name" value="${escapeHtml(profile.fullName || teacherName)}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Teacher ID<input value="${escapeHtml(profile.teacherId || profile.username || '')}" disabled class="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Email<input id="teacher-profile-email" value="${escapeHtml(profile.email || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Phone<input id="teacher-profile-phone" value="${escapeHtml(profile.phone || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Department<input id="teacher-profile-department" value="${escapeHtml(profile.department || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Position<input id="teacher-profile-position" value="${escapeHtml(profile.position || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Qualification<input id="teacher-profile-qualification" value="${escapeHtml(profile.qualification || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><div class="sm:col-span-2"><label class="text-sm font-semibold text-slate-700">Profile photo<input id="teacher-profile-photo" type="file" accept="image/*" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /><span id="teacher-profile-photo-preview" class="mt-2 block"></span></label><div class="mt-3 flex flex-wrap gap-2"><button type="button" data-teacher-photo-source="gallery" class="rounded-full border border-sky-200 bg-white px-3 py-2 text-xs font-semibold text-sky-700">Upload Photo</button><button type="button" data-teacher-photo-source="camera" class="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">Open Camera</button></div></div></div><div class="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">Assigned classes: ${escapeHtml(classes.map((entry) => entry.name || entry.className || entry.grade).filter(Boolean).join(', ') || 'None')}</div><button type="button" data-teacher-workspace-action="save-profile" class="mt-5 rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Save profile</button></div>`,
+    profile: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Profile</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">${escapeHtml(profile.fullName || teacherName)}</h2><div class="mt-5 grid gap-4 sm:grid-cols-2"><label class="text-sm font-semibold text-slate-700">Full name<input id="teacher-profile-name" value="${escapeHtml(profile.fullName || teacherName)}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Teacher ID<input value="${escapeHtml(profile.teacherId || profile.username || '')}" disabled class="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Email<input id="teacher-profile-email" value="${escapeHtml(profile.email || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Phone<input id="teacher-profile-phone" value="${escapeHtml(profile.phone || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Department<input id="teacher-profile-department" value="${escapeHtml(profile.department || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Position<input id="teacher-profile-position" value="${escapeHtml(profile.position || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><label class="text-sm font-semibold text-slate-700">Qualification<input id="teacher-profile-qualification" value="${escapeHtml(profile.qualification || '')}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label><div class="sm:col-span-2"><label class="text-sm font-semibold text-slate-700">Profile photo<input id="teacher-profile-photo" type="file" accept="image/jpeg,image/png,image/gif,image/webp" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /><span id="teacher-profile-photo-preview" class="mt-2 block">${profile.profilePhoto ? `<img src="${escapeHtml(profile.profilePhoto)}" alt="Current profile photo" class="h-20 w-20 rounded-full object-cover" />` : '<span class="flex h-20 w-20 items-center justify-center rounded-full bg-sky-100 text-2xl font-semibold text-sky-700">' + escapeHtml((profile.fullName || teacherName || 'T').trim().charAt(0).toUpperCase()) + '</span>'}</span><span id="teacher-profile-photo-status" class="mt-2 block text-sm text-slate-600" role="status" aria-live="polite"></span></label><div class="mt-3 flex flex-wrap gap-2"><button type="button" data-teacher-photo-source="gallery" class="rounded-full border border-sky-200 bg-white px-3 py-2 text-xs font-semibold text-sky-700">Upload Photo</button><button type="button" data-teacher-photo-source="camera" class="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">Open Camera</button></div></div></div><div class="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">Assigned classes: ${escapeHtml(classes.map((entry) => entry.name || entry.className || entry.grade).filter(Boolean).join(', ') || 'None')}</div><button type="button" data-teacher-workspace-action="save-profile" class="mt-5 rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Save profile</button></div>`,
     settings: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Settings</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Teacher account settings</h2><p class="mt-4 text-sm text-slate-600">No individual teacher preference store is configured in the current architecture. School-wide settings remain restricted to School Authority.</p><p class="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">NOT SUPPORTED: editable teacher settings persistence.</p></div>`,
   };
   const content = sectionMarkup[activeSection] || '';
@@ -1680,11 +1714,12 @@ export function StudentDashboard(section = 'overview', studentData = {}) {
             ${profilePhoto ? `<img src="${escapeHtml(profilePhoto)}" alt="${escapeHtml(studentName)}" class="mx-auto h-24 w-24 rounded-full object-cover" />` : `<div class="mx-auto flex h-24 w-24 items-center justify-center rounded-full bg-sky-100 text-2xl font-semibold text-sky-700">${escapeHtml((studentName || 'S').charAt(0).toUpperCase())}</div>`}
             <p class="mt-4 text-xl font-semibold text-slate-900">${escapeHtml(studentName)}</p>
             <p class="text-sm text-slate-600">${escapeHtml(studentId)}</p>
-            <input type="file" accept="image/*" data-student-profile-photo-input class="sr-only" />
+            <input type="file" accept="image/jpeg,image/png,image/gif,image/webp" data-student-profile-photo-input class="sr-only" />
             <div class="mt-4 flex flex-wrap gap-2">
               <button type="button" data-student-profile-photo-upload class="rounded-full border border-sky-200 bg-white px-4 py-2 text-sm font-semibold text-sky-700 transition hover:bg-sky-50">Upload Photo</button>
               <button type="button" data-student-profile-photo-camera class="rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100">Open Camera</button>
             </div>
+            <p data-student-profile-photo-status class="mt-2 text-sm text-slate-600" role="status" aria-live="polite"></p>
           </div>
           <div class="grid gap-4 md:grid-cols-2">
             <div class="rounded-[1.25rem] border border-slate-200 bg-white p-4"><p class="text-sm text-slate-500">Student ID</p><p class="mt-1 font-semibold text-slate-900">${escapeHtml(studentId)}</p></div>

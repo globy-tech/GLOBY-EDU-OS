@@ -110,6 +110,13 @@ test('normal login works before logout, revoked access is rejected, and a fresh 
     const beforeLogout = await accessProtectedRoute(port, firstLogin.accessToken);
     expect(beforeLogout.status).toBe(200);
 
+    const invalidTokenLogout = await fetch(`http://127.0.0.1:${port}/api/v1/auth/logout`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer invalid-or-expired-access-token' },
+    });
+    expect(invalidTokenLogout.status).toBe(200);
+    expect((await accessProtectedRoute(port, firstLogin.accessToken)).status).toBe(200);
+
     const logoutResponse = await fetch(`http://127.0.0.1:${port}/api/v1/auth/logout`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${firstLogin.accessToken}` },

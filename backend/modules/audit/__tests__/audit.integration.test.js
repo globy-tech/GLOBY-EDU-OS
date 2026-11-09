@@ -1,16 +1,56 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
+const { assertIsolatedQaConfiguration, EXTERNAL_SERVICE_VARIABLES } = require('../../../config/qa-config');
+
+const isolatedDataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'globy-audit-integration-'));
+const isolatedSchoolsFile = path.join(isolatedDataDirectory, 'schools.json');
+const isolatedAuditFile = path.join(isolatedDataDirectory, 'audit-logs.json');
+const isolatedPasswordResetTokensFile = path.join(isolatedDataDirectory, 'password-reset-tokens.json');
+const environmentKeys = [
+  ...EXTERNAL_SERVICE_VARIABLES,
+  'DATABASE_URL',
+  'USE_REAL_DATABASE',
+  'RENDER_SERVICE_ID',
+  'NODE_ENV',
+  'DATA_STORE_MODE',
+  'GLOBY_QA_MODE',
+  'GLOBY_QA_HOME',
+  'GLOBY_SCHOOLS_FILE',
+  'GLOBY_AUDIT_FILE',
+  'GLOBY_PASSWORD_RESET_TOKENS_FILE',
+];
+const previousEnvironment = new Map(environmentKeys.map((key) => [key, process.env[key]]));
+EXTERNAL_SERVICE_VARIABLES.forEach((key) => { delete process.env[key]; });
+delete process.env.DATABASE_URL;
+delete process.env.USE_REAL_DATABASE;
+delete process.env.RENDER_SERVICE_ID;
+process.env.NODE_ENV = 'test';
+process.env.DATA_STORE_MODE = 'json';
+process.env.GLOBY_QA_MODE = 'false';
+process.env.GLOBY_QA_HOME = isolatedDataDirectory;
+process.env.GLOBY_SCHOOLS_FILE = isolatedSchoolsFile;
+process.env.GLOBY_AUDIT_FILE = isolatedAuditFile;
+process.env.GLOBY_PASSWORD_RESET_TOKENS_FILE = isolatedPasswordResetTokensFile;
+fs.writeFileSync(isolatedSchoolsFile, JSON.stringify({ schools: [] }), 'utf8');
+fs.writeFileSync(isolatedAuditFile, JSON.stringify({ logs: [] }), 'utf8');
+assertIsolatedQaConfiguration({
+  NODE_ENV: 'test',
+  DATA_STORE_MODE: 'json',
+  GLOBY_QA_MODE: 'true',
+  GLOBY_QA_HOME: isolatedDataDirectory,
+  GLOBY_SCHOOLS_FILE: isolatedSchoolsFile,
+  GLOBY_AUDIT_FILE: isolatedAuditFile,
+  GLOBY_PASSWORD_RESET_TOKENS_FILE: isolatedPasswordResetTokensFile,
+}, path.resolve(__dirname, '../../..'));
+
 const authRouter = require('../../../routes/auth');
 const apiRouter = require('../../../routes/api');
 const { signAccessToken } = require('../../auth/utils/token');
 const { recordAuditEvent, listAuditEvents } = require('../audit.service');
 const { ensureDemoSchool } = require('../../school/fallback.school');
-
-const schoolsFile = path.join(__dirname, '../../../data/schools.json');
-const auditFile = path.join(__dirname, '../../../data/audit-logs.json');
-const originalSchools = fs.readFileSync(schoolsFile, 'utf8');
 
 function createServer(router, mount = '/api/v1') {
   const app = express();
@@ -28,19 +68,25 @@ describe('backend audit logging', () => {
   let apiServer;
 
   beforeAll(() => {
-    fs.writeFileSync(auditFile, JSON.stringify({ logs: [] }, null, 2), 'utf8');
     ensureDemoSchool();
     authServer = createServer(authRouter, '/api/v1/auth');
     apiServer = createServer(apiRouter);
   });
 
   afterAll(async () => {
-    fs.writeFileSync(schoolsFile, originalSchools, 'utf8');
-    if (fs.existsSync(auditFile)) fs.unlinkSync(auditFile);
-    await Promise.all([
-      new Promise((resolve) => authServer.close(resolve)),
-      new Promise((resolve) => apiServer.close(resolve)),
-    ]);
+    try {
+      await Promise.all([
+        authServer && new Promise((resolve) => authServer.close(resolve)),
+        apiServer && new Promise((resolve) => apiServer.close(resolve)),
+      ].filter(Boolean));
+    } finally {
+      environmentKeys.forEach((key) => {
+        const value = previousEnvironment.get(key);
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      });
+      fs.rmSync(isolatedDataDirectory, { recursive: true, force: true });
+    }
   });
 
   test('successful and failed fallback logins create tenant-aware audit events', async () => {
@@ -119,12 +165,16 @@ describe('backend audit logging', () => {
     expect(studentUpdate.status).toBe(200);
 
     const teacherArchive = await fetch(`http://127.0.0.1:${port}/api/v1/schools/globy-school/entities/teachers/${encodeURIComponent(teacherId)}`, {
-      method: 'DELETE', headers: { Authorization: `Bearer ${authorityToken}` },
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${authorityToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirmation: teacherId }),
     });
     expect(teacherArchive.status).toBe(200);
 
     const studentArchive = await fetch(`http://127.0.0.1:${port}/api/v1/schools/globy-school/entities/students/${encodeURIComponent(studentId)}`, {
-      method: 'DELETE', headers: { Authorization: `Bearer ${authorityToken}` },
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${authorityToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirmation: studentId }),
     });
     expect(studentArchive.status).toBe(200);
 

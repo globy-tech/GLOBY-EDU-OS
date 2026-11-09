@@ -78,10 +78,9 @@ export async function platformAdminLogin(email, password) {
 }
 
 export async function logout(accessToken) {
-  if (!accessToken) {
-    return { ok: false, status: 401, data: { status: 'error', message: 'Authenticated session is required.' } };
-  }
-  return postJsonWithToken('/api/v1/auth/logout', {}, accessToken);
+  return accessToken
+    ? postJsonWithToken('/api/v1/auth/logout', {}, accessToken)
+    : postJson('/api/v1/auth/logout', {});
 }
 
 export async function refreshAuthSession() {

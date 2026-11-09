@@ -32,7 +32,7 @@ function isValidSender(value) {
   return /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(getSenderAddress(value));
 }
 
-async function sendWithResend(recipient, emailSubject, html, resendConfig, fallbackFromBrevo = false) {
+async function sendWithResend(recipient, emailSubject, html, resendConfig, fallbackFromBrevo = false, options = {}) {
   if (!isValidSender(resendConfig.fromEmail)) {
     console.warn('[email] The configured Resend sender address is invalid.', { fallbackFromBrevo });
     return { ok: false, reason: 'INVALID_SENDER_ADDRESS', provider: 'resend' };
@@ -50,6 +50,7 @@ async function sendWithResend(recipient, emailSubject, html, resendConfig, fallb
         to: [recipient],
         subject: emailSubject,
         html: String(html || ''),
+        ...(options.replyTo ? { reply_to: options.replyTo } : {}),
       }),
     });
 
@@ -83,12 +84,16 @@ async function sendWithResend(recipient, emailSubject, html, resendConfig, fallb
   }
 }
 
-async function sendEmail(to, subject, html) {
+async function sendEmail(to, subject, html, options = {}) {
   const recipient = String(to || '').trim();
   const emailSubject = String(subject || '').trim() || 'GlobyEdu notification';
+  const replyTo = String(options.replyTo || '').trim();
 
   if (!recipient) {
     return { ok: false, reason: 'MISSING_RECIPIENT' };
+  }
+  if (replyTo && !isValidSender(replyTo)) {
+    return { ok: false, reason: 'INVALID_REPLY_TO' };
   }
 
   const brevoConfigured = isBrevoConfigured();
@@ -108,7 +113,7 @@ async function sendEmail(to, subject, html) {
   if (brevoConfigured && !isValidSender(getBrevoConfig().senderEmail)) {
     console.warn('[email] The configured transactional sender address is invalid.', { provider: 'brevo' });
     return resendConfigured
-      ? sendWithResend(recipient, emailSubject, html, resendConfig, true)
+      ? sendWithResend(recipient, emailSubject, html, resendConfig, true, { replyTo })
       : { ok: false, reason: 'INVALID_SENDER_ADDRESS', provider: 'brevo' };
   }
 
@@ -118,7 +123,7 @@ async function sendEmail(to, subject, html) {
   }
 
   if (!brevoConfigured) {
-    return sendWithResend(recipient, emailSubject, html, resendConfig);
+    return sendWithResend(recipient, emailSubject, html, resendConfig, false, { replyTo });
   }
 
   const { apiKey, senderEmail, senderName } = getBrevoConfig();
@@ -137,6 +142,7 @@ async function sendEmail(to, subject, html) {
           name: senderName || 'GlobyEdu',
         },
         to: [{ email: recipient, name: recipient }],
+        ...(replyTo ? { replyTo: { email: replyTo } } : {}),
         subject: emailSubject,
         html: String(html || ''),
       }),
@@ -156,7 +162,7 @@ async function sendEmail(to, subject, html) {
       });
       const requestWasRejected = response.status >= 400 && response.status < 500;
       return resendConfigured && requestWasRejected
-        ? sendWithResend(recipient, emailSubject, html, resendConfig, true)
+        ? sendWithResend(recipient, emailSubject, html, resendConfig, true, { replyTo })
         : { ok: false, reason: 'BREVO_API_ERROR', status: response.status, provider: 'brevo' };
     }
 

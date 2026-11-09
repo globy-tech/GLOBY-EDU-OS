@@ -15,8 +15,8 @@ export function CTA() {
           </div>
 
           <div class="flex w-full flex-col items-start gap-3 text-sm text-slate-600 sm:w-auto sm:flex-row sm:items-center sm:gap-6">
-            <div class="flex items-center gap-2"><svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M3 6h18" stroke="#0ea5e9" stroke-width="1.4"/></svg>+233 59 123 4567</div>
-            <div class="flex items-center gap-2"><svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M3 12h18" stroke="#0ea5e9" stroke-width="1.4"/></svg>info@globyedu.com</div>
+            <div class="flex items-center gap-2"><svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M3 6h18" stroke="#0ea5e9" stroke-width="1.4"/></svg>+233 53 749 7607</div>
+            <div class="flex items-center gap-2"><svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M3 12h18" stroke="#0ea5e9" stroke-width="1.4"/></svg>hello@globyedu.com</div>
             <a href="#/contact" class="btn btn-primary">Contact Us</a>
           </div>
         </div>

@@ -47,6 +47,8 @@ const entityConfig = {
   students: { field: 'students', roleName: 'student', idKey: 'email' },
 };
 
+const financeMutationLocks = new Map();
+
 const TEACHER_ASSIGNABLE_CLASSES = new Set([
   'Nursery 1', 'Nursery 2', 'KG 1', 'KG 2',
   'Class 1', 'Class 2', 'Class 3', 'Class 4', 'Class 5', 'Class 6',
@@ -572,19 +574,34 @@ function resolveAssignmentOwnership(school, assignment, actor = {}) {
   const roles = getUserRoleList(actor);
   if (roles.includes('school_authority') || roles.includes('super_admin')) return true;
   if (!roles.includes('teacher')) return false;
-  const actorId = String(actor.username || actor.userId || '').split(':').pop().trim().toLowerCase();
   const owner = String(assignment.teacherId || assignment.createdBy || assignment.owner || '').trim().toLowerCase();
-  const teacherMatches = owner === actorId || owner === String(actor.userId || '').split(':').pop().trim().toLowerCase();
-  return teacherMatches;
+  const actorIdentifiers = new Set(
+    [actor.username, actor.email, actor.userId]
+      .filter(Boolean)
+      .map((value) => String(value).split(':').pop().trim().toLowerCase())
+  );
+  const teacher = [...(Array.isArray(school.teachers) ? school.teachers : []), ...(Array.isArray(school.users) ? school.users : [])]
+    .find((entry) => [entry.teacherId, entry.username, entry.email, entry.userId, entry.id]
+      .filter(Boolean)
+      .some((value) => actorIdentifiers.has(String(value).trim().toLowerCase())));
+  [teacher?.teacherId, teacher?.username, teacher?.email, teacher?.userId, teacher?.id]
+    .filter(Boolean)
+    .forEach((value) => actorIdentifiers.add(String(value).trim().toLowerCase()));
+  return actorIdentifiers.has(owner);
 }
 
 function resolveLessonOwnership(school, lesson, actor = {}) {
-  const roles = getUserRoleList(actor);
-  if (roles.includes('school_authority') || roles.includes('super_admin')) return true;
-  if (!roles.includes('teacher')) return false;
-  const actorId = String(actor.username || actor.userId || '').split(':').pop().trim().toLowerCase();
-  const owner = String(lesson.teacherId || lesson.createdBy || '').trim().toLowerCase();
-  return owner === actorId;
+  return resolveAssignmentOwnership(school, {
+    teacherId: lesson.teacherId,
+    createdBy: lesson.createdBy,
+  }, actor);
+}
+
+function isTeacherAssignedToAcademicItem(school, item, actor) {
+  const classId = String(item.classId || '').trim();
+  const className = String(item.className || '').trim();
+  const classScope = classId || className;
+  return Boolean(classScope) && resolveTeacherAuthorization(school, actor, classScope);
 }
 
 function resolveClassForStudent(school, actor = {}) {
@@ -1403,6 +1420,10 @@ function sanitizeSchoolResponse(school = {}) {
   const { users, teachers, students, ...safeSchool } = sanitizedSchool;
   return {
     ...safeSchool,
+    invoices: sanitizeFinanceRecords(safeSchool.invoices),
+    payments: sanitizeFinanceRecords(safeSchool.payments),
+    receipts: sanitizeFinanceRecords(safeSchool.receipts),
+    refunds: sanitizeFinanceRecords(safeSchool.refunds),
     users: Array.isArray(users) ? users.map(sanitizeTeacherRecord) : [],
     teachers: Array.isArray(teachers) ? teachers.map(sanitizeTeacherRecord) : [],
     students: Array.isArray(students) ? students.map(sanitizeStudentRecord) : [],
@@ -1584,11 +1605,11 @@ function getStudentSchoolView(school, user = {}) {
     announcements,
     messages,
     reportCards: getReportCardsForStudents(school, [student]),
-    payments,
-    fees: payments,
+    payments: sanitizeFinanceRecords(payments),
+    fees: sanitizeFinanceRecords(payments),
     financeCategories: [],
     invoices: [],
-    receipts: (Array.isArray(school.receipts) ? school.receipts : []).filter((receipt) => payments.some((payment) => payment.receiptNumber === receipt.receiptNumber || payment.id === receipt.paymentId)),
+    receipts: sanitizeFinanceRecords((Array.isArray(school.receipts) ? school.receipts : []).filter((receipt) => payments.some((payment) => payment.receiptNumber === receipt.receiptNumber || payment.id === receipt.paymentId))),
     refunds: [],
     reports: [],
   };
@@ -1699,6 +1720,535 @@ async function createFeePayment(schoolId, input = {}, actor = {}) {
   const { payment, receipt } = buildFeeRecords(payments, receipts);
   const updated = await updateSchool(school.id, { payments: [...payments, payment], receipts: [...receipts, receipt] });
   return { payment, receipt, school: sanitizeSchoolResponse(updated) };
+}
+
+function financeError(message, statusCode = 400) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function assertFinanceActor(schoolId, actor = {}) {
+  const roles = (Array.isArray(actor.roles) ? actor.roles : []).map((role) => String(role).toLowerCase());
+  if (!roles.some((role) => ['school_authority', 'school_head', 'super_admin'].includes(role))) {
+    throw financeError('You do not have permission to manage school finance.', 403);
+  }
+  if (roles.includes('super_admin') && actor.platformAdmin !== true) {
+    throw financeError('Platform administrator authorization is required.', 403);
+  }
+  if (!roles.includes('super_admin') && String(actor.tenantId || actor.schoolId || '') !== String(schoolId)) {
+    throw financeError('You do not have access to this school.', 403);
+  }
+}
+
+async function mutateSchoolFinance(schoolId, mutate) {
+  if (firebaseCore.isFirebaseCoreMode()) {
+    const { result } = await firebaseCore.updateTenantInTransaction(schoolId, (tenant) => {
+      const mutation = mutate(tenant);
+      return { updates: mutation.updates, result: mutation.result };
+    });
+    return result;
+  }
+
+  if (prisma && !prisma.__stub) {
+    return prisma.$transaction(async (transaction) => {
+      const tenant = await transaction.tenant.findUnique({ where: { schoolId } });
+      if (!tenant) throw financeError('School not found.', 404);
+      const mutation = mutate(tenant);
+      if (Object.keys(mutation.updates).length) {
+        await transaction.tenant.update({ where: { id: tenant.id }, data: mutation.updates });
+      }
+      return mutation.result;
+    }, { isolationLevel: 'Serializable' });
+  }
+
+  const previous = financeMutationLocks.get(schoolId) || Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => { release = resolve; });
+  const queued = previous.then(() => current);
+  financeMutationLocks.set(schoolId, queued);
+  await previous;
+  try {
+    const school = loadSchoolData().find((entry) => entry.schoolId === schoolId || entry.id === schoolId);
+    if (!school) throw financeError('School not found.', 404);
+    const mutation = mutate(school);
+    if (Object.keys(mutation.updates).length) {
+      await updateSchool(school.id || school.schoolId, mutation.updates);
+    }
+    return mutation.result;
+  } finally {
+    release();
+    if (financeMutationLocks.get(schoolId) === queued) financeMutationLocks.delete(schoolId);
+  }
+}
+
+function validatedIdempotencyKey(value) {
+  const key = String(value || '').trim();
+  if (!/^[A-Za-z0-9._:-]{8,128}$/.test(key)) {
+    throw financeError('A valid Idempotency-Key header is required.');
+  }
+  return key;
+}
+
+function financeRequestHash(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function sanitizeFinanceRecord(record = {}) {
+  const { idempotencyHash, requestHash, ...safeRecord } = record;
+  return safeRecord;
+}
+
+function sanitizeFinanceRecords(records) {
+  return Array.isArray(records) ? records.map(sanitizeFinanceRecord) : [];
+}
+
+function validateFinancePayloadKeys(payload, allowedKeys) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw financeError('A valid finance request body is required.');
+  }
+  if (Object.keys(payload).some((key) => !allowedKeys.includes(key))) {
+    throw financeError('The finance request contains unsupported fields.');
+  }
+}
+
+function findFinanceStudent(school, studentId) {
+  const normalizedId = String(studentId || '').trim().toLowerCase();
+  if (!normalizedId) throw financeError('A student from this school is required.');
+  const student = (Array.isArray(school.students) ? school.students : []).find((entry) =>
+    [entry.studentId, entry.id, entry.email].some((value) => String(value || '').trim().toLowerCase() === normalizedId));
+  if (!student || String(student.status || 'active').toLowerCase() === 'archived') {
+    throw financeError('The selected student does not belong to this school.');
+  }
+  return student;
+}
+
+function parseFinanceAmount(value, label = 'Amount') {
+  const amountText = String(value ?? '').trim();
+  const amount = Number(amountText);
+  if (!/^\d+(?:\.\d{1,2})?$/.test(amountText) || !Number.isFinite(amount) || amount <= 0) {
+    throw financeError(`${label} must be a positive amount with no more than two decimal places.`);
+  }
+  return amount;
+}
+
+function validateFinanceDate(value) {
+  const date = String(value || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(`${date}T00:00:00.000Z`)) ||
+      new Date(`${date}T00:00:00.000Z`).toISOString().slice(0, 10) !== date) {
+    throw financeError('A valid due date in YYYY-MM-DD format is required.');
+  }
+  return date;
+}
+
+function assertFinanceProviderEnabled() {
+  if (String(process.env.GLOBY_QA_MODE || '').trim().toLowerCase() === 'true') {
+    throw financeError('Payment-provider operations are disabled in isolated QA mode.', 503);
+  }
+}
+
+async function initializeInvoicePayment(schoolId, invoiceId, actor = {}, idempotencyHeader) {
+  assertFinanceActor(schoolId, actor);
+  assertFinanceProviderEnabled();
+  const idempotencyHash = financeRequestHash(validatedIdempotencyKey(idempotencyHeader));
+  const school = await getSchoolBySchoolId(schoolId);
+  if (!school) throw financeError('School not found.', 404);
+  const invoice = (Array.isArray(school.invoices) ? school.invoices : []).find((entry) => entry.id === invoiceId);
+  if (!invoice) throw financeError('Invoice not found.', 404);
+  if (invoice.status !== 'pending') throw financeError('Only a pending invoice can start checkout.', 409);
+
+  const email = String(invoice.studentEmail || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw financeError('A valid student email is required to start Paystack checkout.');
+  }
+  const secret = String(process.env.PAYSTACK_SECRET_KEY || '').trim();
+  if (!secret) throw financeError('Paystack payment initialization is not configured.', 503);
+  const reference = `GLB-INV-${crypto.randomBytes(12).toString('hex').toUpperCase()}`;
+  const reservation = {
+    id: crypto.randomUUID(),
+    schoolId,
+    invoiceId,
+    studentId: invoice.studentId,
+    studentName: invoice.student,
+    amount: Number(invoice.amount),
+    currency: invoice.currency,
+    reference,
+    method: 'Paystack',
+    provider: 'paystack',
+    status: 'initializing',
+    idempotencyHash,
+    createdAt: new Date().toISOString(),
+    createdBy: actor.userId || null,
+  };
+  const claim = await mutateSchoolFinance(schoolId, (currentSchool) => {
+    const currentInvoice = (Array.isArray(currentSchool.invoices) ? currentSchool.invoices : [])
+      .find((entry) => entry.id === invoiceId);
+    if (!currentInvoice || currentInvoice.status !== 'pending') {
+      throw financeError('Invoice is no longer pending checkout.', 409);
+    }
+    const payments = Array.isArray(currentSchool.payments) ? currentSchool.payments : [];
+    const activeCheckout = payments.find((entry) =>
+      entry.invoiceId === invoiceId && entry.provider === 'paystack' &&
+      ['initializing', 'initialized', 'initialization_failed'].includes(entry.status));
+    if (activeCheckout) {
+      if (activeCheckout.idempotencyHash === idempotencyHash && activeCheckout.status === 'initialized') {
+        return { updates: {}, result: { payment: sanitizeFinanceRecord(activeCheckout), shouldInitialize: false } };
+      }
+      throw financeError('This invoice already has a Paystack checkout attempt. Verify it or request manual review before retrying.', 409);
+    }
+    if (payments.some((entry) => entry.reference === reference)) {
+      throw financeError('Paystack generated a duplicate payment reference.', 409);
+    }
+    const invoices = Array.isArray(currentSchool.invoices) ? currentSchool.invoices : [];
+    const invoiceIndex = invoices.findIndex((entry) => entry.id === invoiceId);
+    const updatedInvoice = { ...invoices[invoiceIndex], checkoutReference: reference, checkoutStatus: 'initializing' };
+    const updatedInvoices = [...invoices];
+    updatedInvoices[invoiceIndex] = updatedInvoice;
+    return {
+      updates: { invoices: updatedInvoices, payments: [...payments, reservation] },
+      result: { payment: sanitizeFinanceRecord(reservation), shouldInitialize: true },
+    };
+  });
+
+  if (!claim.shouldInitialize) return claim.payment;
+
+  let response;
+  let body;
+  try {
+    response = await fetch('https://api.paystack.co/transaction/initialize', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${secret}` },
+      body: JSON.stringify({
+        email,
+        amount: Math.round(Number(invoice.amount) * 100),
+        currency: invoice.currency,
+        reference,
+        metadata: { schoolId, invoiceId, studentId: invoice.studentId },
+      }),
+    });
+    body = await response.json();
+  } catch {
+    await markInvoiceCheckoutFailed(schoolId, invoiceId, reference);
+    throw financeError('Unable to start Paystack checkout. No invoice payment was confirmed.', 502);
+  }
+  if (!response.ok || body?.status !== true || !body.data?.authorization_url ||
+      String(body.data.reference || reference) !== reference) {
+    await markInvoiceCheckoutFailed(schoolId, invoiceId, reference);
+    throw financeError('Paystack could not initialize checkout. No invoice payment was confirmed.', 502);
+  }
+  let checkoutUrl;
+  try {
+    const parsedUrl = new URL(body.data.authorization_url);
+    if (parsedUrl.protocol !== 'https:' || !/(^|\.)paystack\.com$/i.test(parsedUrl.hostname)) {
+      throw new Error('Untrusted checkout host.');
+    }
+    checkoutUrl = parsedUrl.toString();
+  } catch {
+    await markInvoiceCheckoutFailed(schoolId, invoiceId, reference);
+    throw financeError('Paystack returned an invalid checkout URL. No invoice payment was confirmed.', 502);
+  }
+
+  return mutateSchoolFinance(schoolId, (currentSchool) => {
+    const payments = Array.isArray(currentSchool.payments) ? currentSchool.payments : [];
+    const paymentIndex = payments.findIndex((entry) => entry.reference === reference && entry.status === 'initializing');
+    if (paymentIndex < 0) throw financeError('Paystack checkout reservation was not found.', 409);
+    const initialized = { ...payments[paymentIndex], status: 'initialized', checkoutUrl };
+    const updatedPayments = [...payments];
+    updatedPayments[paymentIndex] = initialized;
+    const invoices = Array.isArray(currentSchool.invoices) ? currentSchool.invoices : [];
+    const invoiceIndex = invoices.findIndex((entry) => entry.id === invoiceId);
+    if (invoiceIndex < 0) throw financeError('Invoice not found.', 404);
+    const updatedInvoice = { ...invoices[invoiceIndex], checkoutStatus: 'initialized' };
+    const updatedInvoices = [...invoices];
+    updatedInvoices[invoiceIndex] = updatedInvoice;
+    return {
+      updates: { payments: updatedPayments, invoices: updatedInvoices },
+      result: sanitizeFinanceRecord(initialized),
+    };
+  });
+}
+
+async function markInvoiceCheckoutFailed(schoolId, invoiceId, reference) {
+  return mutateSchoolFinance(schoolId, (school) => {
+    const payments = Array.isArray(school.payments) ? school.payments : [];
+    const paymentIndex = payments.findIndex((entry) => entry.reference === reference && entry.status === 'initializing');
+    if (paymentIndex < 0) return { updates: {}, result: null };
+    const failed = { ...payments[paymentIndex], status: 'initialization_failed' };
+    delete failed.checkoutUrl;
+    const updatedPayments = [...payments];
+    updatedPayments[paymentIndex] = failed;
+    const invoices = Array.isArray(school.invoices) ? school.invoices : [];
+    const invoiceIndex = invoices.findIndex((entry) => entry.id === invoiceId);
+    if (invoiceIndex < 0) return { updates: { payments: updatedPayments }, result: null };
+    const failedInvoice = { ...invoices[invoiceIndex], checkoutStatus: 'initialization_failed' };
+    const updatedInvoices = [...invoices];
+    updatedInvoices[invoiceIndex] = failedInvoice;
+    return {
+      updates: { payments: updatedPayments, invoices: updatedInvoices },
+      result: null,
+    };
+  });
+}
+
+async function createSchoolInvoice(schoolId, input = {}, actor = {}, idempotencyHeader) {
+  assertFinanceActor(schoolId, actor);
+  validateFinancePayloadKeys(input, ['invoiceNumber', 'studentId', 'amount', 'dueDate', 'description']);
+  const schoolSnapshot = await getSchoolBySchoolId(schoolId);
+  if (!schoolSnapshot) throw financeError('School not found.', 404);
+  const student = findFinanceStudent(schoolSnapshot, input.studentId);
+  const idempotencyKey = validatedIdempotencyKey(idempotencyHeader);
+  const idempotencyHash = financeRequestHash(idempotencyKey);
+  const invoiceNumber = String(input.invoiceNumber || '').trim();
+  if (!invoiceNumber || invoiceNumber.length > 64) throw financeError('A valid invoice number is required.');
+  const amount = parseFinanceAmount(input.amount, 'Invoice amount');
+  const dueDate = validateFinanceDate(input.dueDate);
+  const description = String(input.description || '').trim();
+  if (description.length > 500) throw financeError('Invoice description cannot exceed 500 characters.');
+  const request = { invoiceNumber: invoiceNumber.toLowerCase(), studentId: String(input.studentId || '').trim().toLowerCase(), amount, dueDate, description };
+  const requestHash = financeRequestHash(request);
+
+  return mutateSchoolFinance(schoolId, (school) => {
+    const invoices = Array.isArray(school.invoices) ? school.invoices : [];
+    const priorRequest = invoices.find((invoice) => invoice.idempotencyHash === idempotencyHash);
+    if (priorRequest) {
+      if (priorRequest.requestHash !== requestHash) throw financeError('Idempotency-Key was already used for a different request.', 409);
+      return { updates: {}, result: sanitizeFinanceRecord(priorRequest) };
+    }
+    if (invoices.some((invoice) => String(invoice.invoiceNumber || '').toLowerCase() === request.invoiceNumber)) {
+      throw financeError('Invoice number already exists for this school.', 409);
+    }
+    const invoice = {
+      id: crypto.randomUUID(),
+      schoolId,
+      invoiceNumber,
+      studentId: student.studentId || student.id || student.email,
+      student: student.fullName || student.name || student.email,
+      studentEmail: student.email || null,
+      className: student.className || student.gradeLevel || student.grade || '',
+      amount,
+      currency: school.currency || school.branding?.currency || school.settings?.currency || 'USD',
+      description,
+      dueDate,
+      status: 'pending',
+      idempotencyHash,
+      requestHash,
+      createdBy: actor.userId || null,
+      createdAt: new Date().toISOString(),
+    };
+    return { updates: { invoices: [...invoices, invoice] }, result: sanitizeFinanceRecord(invoice) };
+  });
+}
+
+async function listSchoolInvoices(schoolId, actor = {}) {
+  assertFinanceActor(schoolId, actor);
+  const school = await getSchoolBySchoolId(schoolId);
+  if (!school) throw financeError('School not found.', 404);
+  return sanitizeFinanceRecords(school.invoices);
+}
+
+async function cancelSchoolInvoice(schoolId, invoiceId, input = {}, actor = {}) {
+  assertFinanceActor(schoolId, actor);
+  validateFinancePayloadKeys(input, ['status']);
+  if (String(input.status || '').toLowerCase() !== 'cancelled') {
+    throw financeError('Invoices may only be cancelled through this operation.');
+  }
+  return mutateSchoolFinance(schoolId, (school) => {
+    const invoices = Array.isArray(school.invoices) ? school.invoices : [];
+    const index = invoices.findIndex((invoice) => invoice.id === invoiceId);
+    if (index < 0) throw financeError('Invoice not found.', 404);
+    if (invoices[index].status === 'paid') throw financeError('Paid invoices cannot be cancelled.', 409);
+    const invoice = { ...invoices[index], status: 'cancelled', updatedAt: new Date().toISOString() };
+    const updatedInvoices = [...invoices];
+    updatedInvoices[index] = invoice;
+    return { updates: { invoices: updatedInvoices }, result: sanitizeFinanceRecord(invoice) };
+  });
+}
+
+async function verifyAndLinkInvoicePayment(schoolId, invoiceId, input = {}, actor = {}, idempotencyHeader) {
+  assertFinanceActor(schoolId, actor);
+  assertFinanceProviderEnabled();
+  validateFinancePayloadKeys(input, ['reference']);
+  const reference = String(input.reference || '').trim();
+  if (!reference || reference.length > 100 || !/^[A-Za-z0-9._:-]+$/.test(reference)) {
+    throw financeError('A valid Paystack payment reference is required.');
+  }
+  validatedIdempotencyKey(idempotencyHeader);
+
+  const school = await getSchoolBySchoolId(schoolId);
+  if (!school) throw financeError('School not found.', 404);
+  const invoice = (Array.isArray(school.invoices) ? school.invoices : []).find((entry) => entry.id === invoiceId);
+  if (!invoice) throw financeError('Invoice not found.', 404);
+  if (invoice.status === 'paid' && invoice.paymentReference === reference) {
+    return { invoice: sanitizeFinanceRecord(invoice), payment: null, alreadyLinked: true };
+  }
+  if (invoice.status !== 'pending') throw financeError('Only a pending invoice can be settled.', 409);
+  const expectedPayment = (Array.isArray(school.payments) ? school.payments : []).find((entry) =>
+    String(entry.reference || '') === reference &&
+    entry.invoiceId === invoiceId &&
+    entry.provider === 'paystack' &&
+    entry.status === 'initialized' &&
+    Number(entry.amount) === Number(invoice.amount) &&
+    String(entry.currency || '').toUpperCase() === String(invoice.currency || '').toUpperCase());
+  if (!expectedPayment) {
+    throw financeError('Payment reference was not initialized for this invoice.', 409);
+  }
+
+  const secret = String(process.env.PAYSTACK_SECRET_KEY || '').trim();
+  if (!secret) throw financeError('Paystack payment verification is not configured.', 503);
+
+  let response;
+  let body;
+  try {
+    response = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
+      headers: { Authorization: `Bearer ${secret}` },
+    });
+    body = await response.json();
+  } catch {
+    throw financeError('Unable to verify the payment with Paystack. No invoice changes were made.', 502);
+  }
+  const transaction = body?.data;
+  const metadata = transaction?.metadata || {};
+  const expectedAmountMinor = Math.round(Number(invoice.amount) * 100);
+  if (!response.ok || body?.status !== true || transaction?.status !== 'success' ||
+      String(transaction.reference || '') !== reference ||
+      Number(transaction.amount) !== expectedAmountMinor ||
+      String(transaction.currency || '').toUpperCase() !== String(invoice.currency || '').toUpperCase() ||
+      String(metadata.schoolId || '') !== String(schoolId) ||
+      String(metadata.invoiceId || '') !== String(invoiceId) ||
+      String(metadata.studentId || '') !== String(invoice.studentId || '')) {
+    throw financeError('Paystack could not confirm a successful payment matching this invoice. No invoice changes were made.', 409);
+  }
+
+  const paidAt = transaction.paid_at || transaction.paidAt || new Date().toISOString();
+  return mutateSchoolFinance(schoolId, (currentSchool) => {
+    const invoices = Array.isArray(currentSchool.invoices) ? currentSchool.invoices : [];
+    const currentInvoiceIndex = invoices.findIndex((entry) => entry.id === invoiceId);
+    if (currentInvoiceIndex < 0) throw financeError('Invoice not found.', 404);
+    const currentInvoice = invoices[currentInvoiceIndex];
+    if (currentInvoice.status === 'paid' && currentInvoice.paymentReference === reference) {
+      return { updates: {}, result: { invoice: sanitizeFinanceRecord(currentInvoice), payment: null, alreadyLinked: true } };
+    }
+    if (currentInvoice.status !== 'pending') throw financeError('Invoice is no longer pending settlement.', 409);
+
+    const payments = Array.isArray(currentSchool.payments) ? currentSchool.payments : [];
+    const currentPaymentIndex = payments.findIndex((entry) =>
+      String(entry.reference || '') === reference &&
+      entry.invoiceId === invoiceId &&
+      entry.provider === 'paystack' &&
+      entry.status === 'initialized');
+    if (currentPaymentIndex < 0) {
+      throw financeError('This payment reference is already linked to a school payment.', 409);
+    }
+
+    const payment = {
+      ...payments[currentPaymentIndex],
+      providerTransactionId: transaction.id ? String(transaction.id) : null,
+      status: 'verified',
+      paidAt,
+      verifiedAt: new Date().toISOString(),
+      verifiedBy: actor.userId || null,
+    };
+    delete payment.checkoutUrl;
+    delete payment.idempotencyHash;
+    const updatedPayments = [...payments];
+    updatedPayments[currentPaymentIndex] = payment;
+    const receipt = {
+      receiptNumber: nextFinanceReference(Array.isArray(currentSchool.receipts) ? currentSchool.receipts : [], 'RCPT'),
+      paymentId: payment.id,
+      schoolId,
+      invoiceId,
+      studentId: currentInvoice.studentId,
+      student: currentInvoice.student,
+      amount: payment.amount,
+      currency: payment.currency,
+      paymentMethod: 'Paystack',
+      reference,
+      status: 'verified',
+      paidAt,
+      createdAt: new Date().toISOString(),
+    };
+    const updatedInvoice = {
+      ...currentInvoice,
+      status: 'paid',
+      paymentId: payment.id,
+      paymentReference: reference,
+      checkoutStatus: 'verified',
+      paidAt,
+      updatedAt: new Date().toISOString(),
+    };
+    const updatedInvoices = [...invoices];
+    updatedInvoices[currentInvoiceIndex] = updatedInvoice;
+    return {
+      updates: {
+        invoices: updatedInvoices,
+        payments: updatedPayments,
+        receipts: [...(Array.isArray(currentSchool.receipts) ? currentSchool.receipts : []), receipt],
+      },
+      result: { invoice: sanitizeFinanceRecord(updatedInvoice), payment, receipt, alreadyLinked: false },
+    };
+  });
+}
+
+async function createSchoolRefundRequest(schoolId, input = {}, actor = {}, idempotencyHeader) {
+  assertFinanceActor(schoolId, actor);
+  validateFinancePayloadKeys(input, ['paymentId', 'amount', 'reason']);
+  const idempotencyKey = validatedIdempotencyKey(idempotencyHeader);
+  const idempotencyHash = financeRequestHash(idempotencyKey);
+  const paymentId = String(input.paymentId || '').trim();
+  const amount = parseFinanceAmount(input.amount, 'Refund request amount');
+  const reason = String(input.reason || '').trim();
+  if (!paymentId) throw financeError('A recorded school payment is required.');
+  if (!reason || reason.length > 500) throw financeError('A refund reason of 1-500 characters is required.');
+  const requestHash = financeRequestHash({ paymentId, amount, reason });
+
+  return mutateSchoolFinance(schoolId, (school) => {
+    const refunds = Array.isArray(school.refunds) ? school.refunds : [];
+    const priorRequest = refunds.find((refund) => refund.idempotencyHash === idempotencyHash);
+    if (priorRequest) {
+      if (priorRequest.requestHash !== requestHash) throw financeError('Idempotency-Key was already used for a different request.', 409);
+      return { updates: {}, result: sanitizeFinanceRecord(priorRequest) };
+    }
+    const duplicateRequest = refunds.find((refund) =>
+      refund.paymentId === paymentId &&
+      Number(refund.amount) === amount &&
+      String(refund.reason || '').trim().toLowerCase() === reason.toLowerCase() &&
+      !['rejected', 'cancelled'].includes(String(refund.status || '').toLowerCase()));
+    if (duplicateRequest) return { updates: {}, result: sanitizeFinanceRecord(duplicateRequest) };
+    const payment = (Array.isArray(school.payments) ? school.payments : []).find((entry) => entry.id === paymentId);
+    if (!payment || !new Set(['received', 'paid', 'complete', 'completed', 'verified']).has(String(payment.status || '').toLowerCase())) {
+      throw financeError('A successfully recorded payment from this school is required.');
+    }
+    const reservedAmount = refunds
+      .filter((refund) => refund.paymentId === paymentId && !['rejected', 'cancelled'].includes(String(refund.status || '').toLowerCase()))
+      .reduce((total, refund) => total + Number(refund.amount || 0), 0);
+    if (amount > Number(payment.amount) - reservedAmount) {
+      throw financeError('Refund request exceeds the unrequested balance of this payment.', 409);
+    }
+    const refund = {
+      id: crypto.randomUUID(),
+      schoolId,
+      paymentId: payment.id,
+      paymentReference: payment.reference || null,
+      studentId: payment.studentId,
+      student: payment.studentName || payment.student || '',
+      amount,
+      currency: school.currency || school.branding?.currency || school.settings?.currency || 'USD',
+      reason,
+      status: 'pending_review',
+      idempotencyHash,
+      requestHash,
+      requestedBy: actor.userId || null,
+      requestedAt: new Date().toISOString(),
+    };
+    return { updates: { refunds: [...refunds, refund] }, result: sanitizeFinanceRecord(refund) };
+  });
+}
+
+async function listSchoolRefundRequests(schoolId, actor = {}) {
+  assertFinanceActor(schoolId, actor);
+  const school = await getSchoolBySchoolId(schoolId);
+  if (!school) throw financeError('School not found.', 404);
+  return sanitizeFinanceRecords(school.refunds);
 }
 
 function getTeacherSchoolView(school, user = {}) {
@@ -3165,6 +3715,7 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
         email: record.email || null,
         fullName: updated.fullName || record.fullName || '',
         role: field === 'teachers' ? 'teacher' : 'student',
+        status: updated.status || record.status || 'active',
         teacherId: record.teacherId || null,
         studentId: record.studentId || null,
         profilePhoto: updated.profilePhoto || null,
@@ -3260,6 +3811,23 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
     if (field === 'students') {
       const studentIndex = school.students.findIndex((item) => [item.studentId, item.id, item.email].filter(Boolean).some((value) => String(value).toLowerCase() === String(entityId).toLowerCase()));
       if (studentIndex !== -1) school.students[studentIndex] = { ...school.students[studentIndex], ...persistedUpdated };
+      const studentIdentifiers = [updated.studentId, updated.id, updated.email, updated.username]
+        .filter(Boolean).map((value) => String(value).trim().toLowerCase());
+      const userIndex = (Array.isArray(school.users) ? school.users : []).findIndex((item) =>
+        String(item.role || '').toLowerCase() === 'student' &&
+        [item.studentId, item.id, item.email, item.username]
+          .filter(Boolean).some((value) => studentIdentifiers.includes(String(value).trim().toLowerCase()))
+      );
+      if (userIndex !== -1) {
+        const user = school.users[userIndex];
+        const syncedFields = ['status', 'metadata', 'profilePhoto', 'profilePhotoPath', 'fullName', 'phone'];
+        school.users[userIndex] = {
+          ...user,
+          ...Object.fromEntries(syncedFields
+            .filter((key) => persistedUpdated[key] !== undefined)
+            .map((key) => [key, persistedUpdated[key]])),
+        };
+      }
     }
     saveSchoolData(schools);
     return field === 'students'
@@ -3408,16 +3976,396 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
   return prisma[model].update({ where: { id: existing.id }, data: updates });
 }
 
-async function deleteEntity(schoolId, entityType, entityId, actor = {}) {
+function assertAccountManagementAccess(actor, schoolId) {
+  const roles = getUserRoleList(actor);
+  if (!roles.some((role) => ['school_authority', 'school_head', 'super_admin'].includes(role))) {
+    throw new Error('Only School Authority can manage account deletion.');
+  }
+  if (roles.includes('super_admin') && actor.platformAdmin === true) return;
+  if (!actor.tenantId || String(actor.tenantId) !== String(schoolId)) {
+    throw new Error('Tenant mismatch');
+  }
+}
+
+function findSchoolAccount(school, field, entityId) {
+  const identifiers = [entityId].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean);
+  return (Array.isArray(school?.[field]) ? school[field] : []).find((entry) =>
+    [entry.id, entry.email, entry.username, entry.studentId, entry.teacherId]
+      .filter(Boolean).some((value) => identifiers.includes(String(value).trim().toLowerCase()))
+  ) || null;
+}
+
+function getSchoolAccountIdentifier(account, field) {
+  return String(account?.[field === 'teachers' ? 'teacherId' : 'studentId'] ||
+    account?.id || account?.email || account?.username || '').trim();
+}
+
+function getAccountDeletionJobId(schoolId, field, requestedEntityId) {
+  return crypto.createHash('sha256')
+    .update(`${schoolId}\0${field}\0${String(requestedEntityId || '').trim().toLowerCase()}`)
+    .digest('hex');
+}
+
+function getRetainedAccountFilePaths(record) {
+  return [...new Set([
+    record?.profilePhotoPath,
+    record?.metadata?.profilePhotoPath,
+  ].map((filePath) => String(filePath || '').trim()).filter(Boolean))];
+}
+
+function createAccountCleanupResult(retainedFilePaths) {
+  return {
+    status: 'completed',
+    retainedFilePaths: [...new Set((Array.isArray(retainedFilePaths) ? retainedFilePaths : [])
+      .map((filePath) => String(filePath || '').trim()).filter(Boolean))],
+    completeErasure: false,
+    fileRetentionStatus: 'retained_pending_policy',
+  };
+}
+
+function assertAccountDeletionConfirmation(field, identifier, confirmation) {
+  if (!identifier || String(confirmation || '').trim() !== identifier) {
+    throw new Error(`Type the ${field === 'students' ? 'student' : 'teacher'} ID to confirm permanent deletion.`);
+  }
+}
+
+function isFirebaseAuthUserMissing(error) {
+  return error?.code === 'auth/user-not-found';
+}
+
+async function updateAccountDeletionJob(jobId, job, updates) {
+  const updated = await firebaseCore.saveById('accountDeletionJobs', jobId, updates, true);
+  return { ...job, ...updated };
+}
+
+async function runAccountDeletionStep(jobId, job, step, action) {
+  try {
+    await action();
+    return await updateAccountDeletionJob(jobId, job, {
+      [step]: true,
+      currentStep: null,
+      lastFailureAt: null,
+      lastFailureCode: null,
+    });
+  } catch (error) {
+    const failureCode = String(error?.code || 'ACCOUNT_CLEANUP_FAILED')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 80) || 'ACCOUNT_CLEANUP_FAILED';
+    try {
+      await firebaseCore.saveById('accountDeletionJobs', jobId, {
+        status: 'in_progress',
+        currentStep: step,
+        lastFailureAt: new Date().toISOString(),
+        lastFailureCode: failureCode,
+      }, true);
+    } catch (journalError) {
+      const journalFailure = new Error('Account cleanup failed and retry metadata could not be saved.');
+      journalFailure.code = 'ACCOUNT_CLEANUP_JOURNAL_WRITE_FAILED';
+      journalFailure.cause = error;
+      journalFailure.journalErrorCode = String(journalError?.code || 'JOURNAL_WRITE_FAILED')
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/g, '_')
+        .slice(0, 80);
+      throw journalFailure;
+    }
+    throw error;
+  }
+}
+
+async function deleteFirebaseAccount(schoolId, field, requestedEntityId, actor, options) {
+  const jobRequestId = options.requestedEntityId || requestedEntityId;
+  const jobId = getAccountDeletionJobId(schoolId, field, jobRequestId);
+  const [school, existingJob] = await Promise.all([
+    firebaseCore.getSchoolAggregate(schoolId),
+    firebaseCore.getById('accountDeletionJobs', jobId),
+  ]);
+  const record = school ? findSchoolAccount(school, field, requestedEntityId) : null;
+  const isRetryableJob = existingJob?.status === 'in_progress' &&
+    existingJob.schoolId === schoolId &&
+    existingJob.entityType === field;
+  const isCompletedJob = existingJob?.status === 'completed' &&
+    existingJob.schoolId === schoolId &&
+    existingJob.entityType === field;
+
+  if (!record && !isRetryableJob && !isCompletedJob) {
+    if (!school) throw new Error('School not found');
+    throw new Error('Entity not found');
+  }
+
+  const identifier = record
+    ? getSchoolAccountIdentifier(record, field)
+    : String(existingJob.targetIdentifier || '');
+  assertAccountDeletionConfirmation(field, identifier, options.confirmation);
+
+  if (isCompletedJob && !record) {
+    return {
+      [field === 'teachers' ? 'teacherId' : 'studentId']: identifier,
+      accountCleanup: createAccountCleanupResult(existingJob.retainedFilePaths),
+    };
+  }
+  if (isCompletedJob && record) {
+    throw new Error('A previously deleted account with this identifier has been recreated. Do not retry the old deletion job.');
+  }
+
+  const roleName = field === 'teachers' ? 'teacher' : 'student';
+  const recordIdentifiers = [record?.teacherId, record?.studentId, record?.id, record?.email, record?.username]
+    .filter(Boolean).map((value) => String(value).trim().toLowerCase());
+  const user = school && (Array.isArray(school.users) ? school.users : []).find((entry) =>
+    (Array.isArray(entry.roles) ? entry.roles : [entry.role].filter(Boolean))
+      .some((role) => String(role).trim().toLowerCase() === roleName) &&
+    [entry.teacherId, entry.studentId, entry.id, entry.email, entry.username]
+      .filter(Boolean).some((value) => recordIdentifiers.includes(String(value).trim().toLowerCase()))
+  );
+  const userTenant = user?.tenantId || user?.schoolId;
+  if (userTenant && String(userTenant) !== String(schoolId)) {
+    throw new Error('Account tenant does not match the requested school.');
+  }
+  const currentUserId = user?.id || null;
+  if (isRetryableJob && currentUserId && existingJob.userDocumentId &&
+      currentUserId !== existingJob.userDocumentId) {
+    throw new Error('Account deletion is already in progress for a different account record.');
+  }
+  if (isRetryableJob && record &&
+      String(existingJob.targetIdentifier || '') !== identifier) {
+    throw new Error('Account deletion job does not match the requested account.');
+  }
+
+  const initialJob = {
+    schoolId,
+    entityType: field,
+    requestEntityId: String(jobRequestId || '').trim(),
+    targetIdentifier: identifier,
+    status: 'in_progress',
+    actorId: String(actor.userId || actor.username || actor.email || ''),
+    entityDocumentId: record?.id || `${schoolId}:${identifier}`,
+    userDocumentId: currentUserId || existingJob?.userDocumentId || null,
+    firebaseUid: user?.firebaseUid || user?.googleUid || record?.firebaseUid || existingJob?.firebaseUid || null,
+    userDisabled: isRetryableJob && existingJob.userDisabled === true,
+    sessionsRevoked: isRetryableJob && existingJob.sessionsRevoked === true,
+    authDeleted: isRetryableJob && existingJob.authDeleted === true,
+    entityDeleted: isRetryableJob && existingJob.entityDeleted === true,
+    userDeleted: isRetryableJob && existingJob.userDeleted === true,
+    retainedFilePaths: isRetryableJob
+      ? existingJob.retainedFilePaths || []
+      : getRetainedAccountFilePaths(record),
+    r2CleanupStatus: 'retained_pending_policy',
+    currentStep: null,
+    lastFailureAt: null,
+    lastFailureCode: null,
+    createdAt: existingJob?.createdAt || new Date().toISOString(),
+    completedAt: null,
+    accountCleanup: null,
+  };
+  let job;
+  if (isRetryableJob) {
+    job = existingJob;
+  } else if (isCompletedJob) {
+    job = await firebaseCore.saveById('accountDeletionJobs', jobId, initialJob, true);
+  } else {
+    try {
+      job = await firebaseCore.createById('accountDeletionJobs', jobId, initialJob);
+    } catch (error) {
+      const concurrentJob = await firebaseCore.getById('accountDeletionJobs', jobId);
+      if (!concurrentJob || concurrentJob.status !== 'in_progress' ||
+          concurrentJob.schoolId !== schoolId || concurrentJob.entityType !== field ||
+          concurrentJob.targetIdentifier !== identifier) {
+        throw error;
+      }
+      job = concurrentJob;
+    }
+  }
+
+  if (!job.userDisabled) {
+    if (job.userDocumentId) {
+      job = await runAccountDeletionStep(jobId, job, 'userDisabled', async () => {
+        const updated = await firebaseCore.updateById('users', job.userDocumentId, {
+          status: 'deletion_pending',
+          deletionJobId: jobId,
+        });
+        if (!updated) throw new Error('Account record could not be disabled before deletion.');
+      });
+    } else {
+      job = await runAccountDeletionStep(jobId, job, 'userDisabled', async () => {});
+    }
+  }
+
+  if (!job.sessionsRevoked) {
+    job = await runAccountDeletionStep(jobId, job, 'sessionsRevoked', async () => {
+      if (job.userDocumentId) await firebaseCore.deleteSessionsForUser(job.userDocumentId);
+    });
+  }
+
+  if (!job.authDeleted) {
+    job = await runAccountDeletionStep(jobId, job, 'authDeleted', async () => {
+      if (!job.firebaseUid) return;
+      try {
+        await firebaseAdmin.deleteUser(job.firebaseUid);
+      } catch (error) {
+        if (!isFirebaseAuthUserMissing(error)) throw error;
+      }
+    });
+  }
+
+  if (!job.entityDeleted) {
+    job = await runAccountDeletionStep(jobId, job, 'entityDeleted', async () => {
+      await firebaseCore.deleteById(field, job.entityDocumentId);
+    });
+  }
+
+  if (!job.userDeleted) {
+    job = await runAccountDeletionStep(jobId, job, 'userDeleted', async () => {
+      if (job.userDocumentId) await firebaseCore.deleteById('users', job.userDocumentId);
+    });
+  }
+
+  await firebaseCore.saveById('accountDeletionJobs', jobId, {
+    status: 'completed',
+    completedAt: new Date().toISOString(),
+    entityDocumentId: null,
+    userDocumentId: null,
+    firebaseUid: null,
+    accountCleanup: {
+      ...createAccountCleanupResult(job.retainedFilePaths),
+    },
+  }, true);
+
+  return {
+    ...(record
+      ? (field === 'teachers' ? sanitizeTeacherRecord(record) : sanitizeStudentRecord(record))
+      : { [field === 'teachers' ? 'teacherId' : 'studentId']: identifier }),
+    accountCleanup: createAccountCleanupResult(job.retainedFilePaths),
+  };
+}
+
+async function requestStudentDeletion(schoolId, studentId, reason, actor = {}) {
+  if (!getUserRoleList(actor).includes('teacher')) {
+    throw new Error('Only assigned teachers can request student deletion.');
+  }
+  if (!actor.tenantId || String(actor.tenantId) !== String(schoolId)) {
+    throw new Error('Tenant mismatch');
+  }
+
+  const school = await getSchoolBySchoolId(schoolId);
+  if (!school) throw new Error('School not found');
+  const student = findSchoolAccount(school, 'students', studentId);
+  if (!student) throw new Error('Student not found');
+  const classScope = student.classId || student.className || student.gradeLevel || student.grade;
+  if (!resolveTeacherAuthorization(school, actor, classScope)) {
+    throw new Error('Teacher is not authorized for this student');
+  }
+
+  const identifier = getSchoolAccountIdentifier(student, 'students');
+  const deletionRequest = {
+    status: 'pending',
+    requestedAt: new Date().toISOString(),
+    requestedBy: String(actor.userId || actor.username || actor.email || ''),
+    reason: String(reason || '').trim().slice(0, 500),
+  };
+  const updated = await updateEntity(schoolId, 'students', identifier, {
+    metadata: { ...(student.metadata || {}), deletionRequest },
+  }, actor);
+  return { studentId: identifier, deletionRequest: updated.metadata?.deletionRequest };
+}
+
+async function resolveStudentDeletionRequest(schoolId, studentId, decision, confirmation, actor = {}) {
+  assertAccountManagementAccess(actor, schoolId);
+  const normalizedDecision = String(decision || '').trim().toLowerCase();
+  if (!['approved', 'rejected'].includes(normalizedDecision)) {
+    throw new Error('Decision must be approved or rejected.');
+  }
+
+  if (normalizedDecision === 'approved') {
+    const school = await getSchoolBySchoolId(schoolId);
+    const student = school ? findSchoolAccount(school, 'students', studentId) : null;
+    const jobId = getAccountDeletionJobId(schoolId, 'students', studentId);
+    const job = firebaseCore.isFirebaseCoreMode()
+      ? await firebaseCore.getById('accountDeletionJobs', jobId)
+      : null;
+
+    if (!student) {
+      if (!job || !['in_progress', 'completed'].includes(job.status) ||
+          job.schoolId !== schoolId || job.entityType !== 'students') {
+        if (!school) throw new Error('School not found');
+        throw new Error('Student not found');
+      }
+      if (String(confirmation || '').trim() !== String(job.targetIdentifier || '')) {
+        throw new Error('Type the student ID to confirm permanent deletion.');
+      }
+      if (job.status === 'completed') {
+        return {
+          studentId: job.targetIdentifier,
+          status: 'approved',
+          accountCleanup: createAccountCleanupResult(
+            job.accountCleanup?.retainedFilePaths || job.retainedFilePaths,
+          ),
+        };
+      }
+      const resumed = await deleteEntity(schoolId, 'students', studentId, actor, {
+        confirmation,
+        approvedDeletion: true,
+        requestedEntityId: studentId,
+      });
+      return { ...resumed, studentId: job.targetIdentifier, status: 'approved' };
+    }
+
+    const identifier = getSchoolAccountIdentifier(student, 'students');
+    if (String(confirmation || '').trim() !== identifier) {
+      throw new Error('Type the student ID to confirm permanent deletion.');
+    }
+    if (student.metadata?.deletionRequest?.status !== 'pending' &&
+        !(job?.status === 'in_progress' && job.targetIdentifier === identifier)) {
+      throw new Error('There is no pending deletion request for this student.');
+    }
+    await deleteEntity(schoolId, 'students', identifier, actor, {
+      confirmation: identifier,
+      approvedDeletion: true,
+      requestedEntityId: studentId,
+    });
+    return {
+      studentId: identifier,
+      status: 'approved',
+      accountCleanup: createAccountCleanupResult(getRetainedAccountFilePaths(student)),
+    };
+  }
+
+  const school = await getSchoolBySchoolId(schoolId);
+  if (!school) throw new Error('School not found');
+  const student = findSchoolAccount(school, 'students', studentId);
+  if (!student) throw new Error('Student not found');
+  if (student.metadata?.deletionRequest?.status !== 'pending') {
+    throw new Error('There is no pending deletion request for this student.');
+  }
+  const identifier = getSchoolAccountIdentifier(student, 'students');
+  const updated = await updateEntity(schoolId, 'students', identifier, {
+    metadata: {
+      ...(student.metadata || {}),
+      deletionRequest: {
+        ...student.metadata.deletionRequest,
+        status: 'rejected',
+        resolvedAt: new Date().toISOString(),
+        resolvedBy: String(actor.userId || actor.username || actor.email || ''),
+      },
+    },
+  }, actor);
+  return { studentId: identifier, status: 'rejected', deletionRequest: updated.metadata?.deletionRequest };
+}
+
+async function deleteEntity(schoolId, entityType, entityId, actor = {}, options = {}) {
   const field = normalizeEntityType(entityType);
   if (!field) {
     throw new Error('Unsupported entity type');
   }
 
   const actorRoles = getUserRoleList(actor);
-  const teacherStudentAccess = actorRoles.includes('teacher') && field === 'students';
-  if (actorRoles.length > 0 && !hasSchoolAuthorityRole(actor) && !teacherStudentAccess) {
+  if (['students', 'teachers'].includes(field)) {
+    assertAccountManagementAccess(actor, schoolId);
+  } else if (actorRoles.length > 0 && !hasSchoolAuthorityRole(actor)) {
     throw new Error('Only School Authority can delete or deactivate school records.');
+  }
+  if (firebaseCore.isFirebaseCoreMode() && ['teachers', 'students'].includes(field)) {
+    return deleteFirebaseAccount(schoolId, field, entityId, actor, options);
   }
 
   if (prisma && prisma.__stub) {
@@ -3425,10 +4373,29 @@ async function deleteEntity(schoolId, entityType, entityId, actor = {}) {
     const school = findSchoolBySchoolId(schools, schoolId);
     if (!school) throw new Error('School not found');
     ensureSchoolEntities(school);
+    const currentAccount = ['teachers', 'students'].includes(field) ? findSchoolAccount(school, field, entityId) : null;
+    let accountCleanup;
+    if (['teachers', 'students'].includes(field)) {
+      if (!currentAccount) throw new Error('Entity not found');
+      const identifier = getSchoolAccountIdentifier(currentAccount, field);
+      assertAccountDeletionConfirmation(field, identifier, options.confirmation);
+      accountCleanup = createAccountCleanupResult(getRetainedAccountFilePaths(currentAccount));
+    }
     const deleted = deleteSchoolEntity(school, field, entityId);
     if (!deleted) throw new Error('Entity not found');
-    if (field === 'teachers') return sanitizeTeacherRecord(deleted);
-    if (field === 'students') return sanitizeStudentRecord(deleted);
+    if (['teachers', 'students'].includes(field)) {
+      const identifiers = [deleted.teacherId, deleted.studentId, deleted.id, deleted.email, deleted.username]
+        .filter(Boolean).map((value) => String(value).trim().toLowerCase());
+      school.users = (Array.isArray(school.users) ? school.users : []).filter((entry) =>
+        !identifiers.some((identifier) => [entry.teacherId, entry.studentId, entry.id, entry.email, entry.username]
+          .filter(Boolean).some((value) => String(value).trim().toLowerCase() === identifier))
+      );
+      saveSchoolData(schools);
+      return {
+        ...(field === 'teachers' ? sanitizeTeacherRecord(deleted) : sanitizeStudentRecord(deleted)),
+        accountCleanup,
+      };
+    }
     if (['departments','streams','subjects','academicYears','terms','semesters','classes'].includes(field)) {
       deleted.status = 'archived';
     }
@@ -3438,8 +4405,17 @@ async function deleteEntity(schoolId, entityType, entityId, actor = {}) {
 
   const tenant = await prisma.tenant.findUnique({ where: { schoolId } });
   if (!tenant) throw new Error('School not found');
+  if (['students', 'teachers'].includes(field) && !actorRoles.includes('super_admin') && tenant.id !== actor.tenantId) {
+    throw new Error('Tenant mismatch');
+  }
 
   if (field === 'teachers' || field === 'students') {
+    const school = await getSchoolBySchoolId(schoolId);
+    const account = findSchoolAccount(school, field, entityId);
+    const identifier = getSchoolAccountIdentifier(account, field);
+    if (!account || !identifier) throw new Error('Entity not found');
+    assertAccountDeletionConfirmation(field, identifier, options.confirmation);
+    const accountCleanup = createAccountCleanupResult(getRetainedAccountFilePaths(account));
     const roleName = field === 'teachers' ? 'teacher' : 'student';
     const user = await findUserByIdentifier(entityId, tenant.id);
     if (!user || user.tenantId !== tenant.id) {
@@ -3451,7 +4427,7 @@ async function deleteEntity(schoolId, entityType, entityId, actor = {}) {
     if (remainingRoles === 0) {
       await prisma.user.delete({ where: { id: user.id } });
     }
-    return mapUserEntity(user, roleName);
+    return { ...mapUserEntity(user, roleName), accountCleanup };
   }
 
   const model = getEntityModel(entityType);
@@ -3627,9 +4603,13 @@ async function createAssignment(schoolId, payload = {}, actor = {}) {
   if (roles.includes('teacher') && !resolveTeacherAuthorization(school, actor, assignedClassId)) {
     throw new Error('Teacher is not authorized for this class');
   }
+  const actorId = String(actor.username || actor.email || getUserIdentifier(actor) || '').split(':').pop().trim();
+  const isTeacher = roles.includes('teacher') && !hasSchoolAuthorityRole(actor);
 
   const assignment = {
-    id: payload.id || `assignment-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    id: isTeacher
+      ? `assignment-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+      : payload.id || `assignment-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     title: String(payload.title || '').trim() || 'Untitled assignment',
     description: String(payload.description || payload.instructions || '').trim(),
     instructions: String(payload.instructions || payload.description || '').trim(),
@@ -3638,9 +4618,9 @@ async function createAssignment(schoolId, payload = {}, actor = {}) {
     subject: String(payload.subject || '').trim() || 'General',
     dueDate: payload.dueDate || new Date(Date.now() + 86400000).toISOString(),
     status: normalizeAssignmentStatus(payload.dueDate || new Date(Date.now() + 86400000).toISOString(), payload.status || 'assigned'),
-    teacherId: String(payload.teacherId || actor.username || actor.userId || '').split(':').pop().trim() || 'teacher',
-    createdBy: String(payload.createdBy || actor.username || actor.userId || '').split(':').pop().trim() || 'teacher',
-    submissions: Array.isArray(payload.submissions) ? payload.submissions : [],
+    teacherId: isTeacher ? actorId : String(payload.teacherId || actorId).split(':').pop().trim() || 'teacher',
+    createdBy: isTeacher ? actorId : String(payload.createdBy || actorId).split(':').pop().trim() || 'teacher',
+    submissions: [],
     attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
     createdAt: payload.createdAt || new Date().toISOString(),
     updatedAt: payload.updatedAt || new Date().toISOString(),
@@ -3662,9 +4642,16 @@ async function listAssignments(schoolId, query = {}, actor = {}) {
   if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
   ensureSchoolEntities(school);
 
-  const teacherFilter = String(query.teacherId || query.createdBy || '').trim();
-  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId) : school.assignments;
+  const roles = getUserRoleList(actor);
+  const isTeacher = roles.includes('teacher') && !hasSchoolAuthorityRole(actor);
+  if (!isTeacher && !hasSchoolAuthorityRole(actor)) throw new Error('Teacher or school authority role required');
+  const teacherFilter = isTeacher ? '' : String(query.teacherId || query.createdBy || '').trim();
+  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId, { preserveDataId: true }) : school.assignments;
   const items = (Array.isArray(assignments) ? assignments : []).filter((entry) => {
+    if (isTeacher) {
+      return resolveAssignmentOwnership(school, entry, actor)
+        && isTeacherAssignedToAcademicItem(school, entry, actor);
+    }
     const matchesTeacher = !teacherFilter || String(entry.teacherId || entry.createdBy || '').trim() === teacherFilter;
     return matchesTeacher;
   });
@@ -3676,6 +4663,7 @@ async function listAssignmentsForStudent(schoolId, query = {}, actor = {}) {
   const school = firebaseMode ? await firebaseCore.getSchoolAggregate(schoolId) : findSchoolBySchoolId(loadSchoolData(), schoolId);
   if (!school) throw new Error('School not found');
   if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
+  if (!getUserRoleList(actor).includes('student')) throw new Error('Student role required');
   ensureSchoolEntities(school);
 
   const student = resolveStudentByActor(school, actor);
@@ -3684,7 +4672,7 @@ async function listAssignmentsForStudent(schoolId, query = {}, actor = {}) {
   const studentIds = new Set([student.studentId, student.id, student.email]
     .filter(Boolean).map((value) => String(value).trim().toLowerCase()));
   const classKeys = resolveStudentClassKeys(school, student);
-  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId) : school.assignments;
+  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId, { preserveDataId: true }) : school.assignments;
   const items = (Array.isArray(assignments) ? assignments : [])
     .filter((entry) => classKeys.has(String(entry.classId || '').trim().toLowerCase()) || classKeys.has(String(entry.className || '').trim().toLowerCase()))
     .map((entry) => ({
@@ -3706,7 +4694,7 @@ async function submitAssignment(schoolId, assignmentId, payload = {}, actor = {}
   const roles = getUserRoleList(actor);
   if (!roles.includes('student')) throw new Error('Student role required');
 
-  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId) : school.assignments;
+  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId, { preserveDataId: true }) : school.assignments;
   const assignment = (Array.isArray(assignments) ? assignments : []).find((entry) => entry.id === assignmentId);
   if (!assignment) throw new Error('Assignment not found');
 
@@ -3758,10 +4746,12 @@ async function getAssignmentSubmissions(schoolId, assignmentId, actor = {}) {
     throw new Error('Teacher or school authority role required');
   }
 
-  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId) : school.assignments;
+  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId, { preserveDataId: true }) : school.assignments;
   const assignment = (Array.isArray(assignments) ? assignments : []).find((entry) => entry.id === assignmentId);
   if (!assignment) throw new Error('Assignment not found');
-  if (roles.includes('teacher') && !resolveAssignmentOwnership(school, assignment, actor)) {
+  if (roles.includes('teacher') && !hasSchoolAuthorityRole(actor) &&
+      (!resolveAssignmentOwnership(school, assignment, actor) ||
+       !isTeacherAssignedToAcademicItem(school, assignment, actor))) {
     throw new Error('Teacher is not assigned to this assignment');
   }
 
@@ -3777,7 +4767,7 @@ async function updateAssignment(schoolId, assignmentId, updates = {}, actor = {}
   ensureSchoolEntities(school);
 
   const roles = getUserRoleList(actor);
-  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId) : school.assignments;
+  const assignments = firebaseMode ? await firebaseCore.listBySchool('assignments', schoolId, { preserveDataId: true }) : school.assignments;
   const assignment = (Array.isArray(assignments) ? assignments : []).find((entry) => entry.id === assignmentId);
   if (!assignment) throw new Error('Assignment not found');
   if (roles.includes('student')) throw new Error('Students are not permitted to modify assignment definitions');
@@ -3787,17 +4777,16 @@ async function updateAssignment(schoolId, assignmentId, updates = {}, actor = {}
   if (roles.includes('teacher') && !resolveAssignmentOwnership(school, assignment, actor)) {
     throw new Error('Teacher is not permitted to modify this assignment');
   }
+  const nextClass = String(updates.classId || updates.className || assignment.classId || assignment.className || '').trim();
+  if (roles.includes('teacher') && !resolveTeacherAuthorization(school, actor, nextClass)) {
+    throw new Error('Teacher is not authorized for this class');
+  }
 
-  Object.assign(assignment, {
-    ...updates,
-    title: updates.title || assignment.title,
-    description: updates.description || updates.instructions || assignment.description,
-    instructions: updates.instructions || updates.description || assignment.instructions,
-    dueDate: updates.dueDate || assignment.dueDate,
-    classId: updates.classId || assignment.classId,
-    subject: updates.subject || assignment.subject,
-    updatedAt: new Date().toISOString(),
-  });
+  const mutableFields = ['title', 'description', 'instructions', 'dueDate', 'classId', 'className', 'subject', 'attachments', 'status'];
+  const safeUpdates = Object.fromEntries(mutableFields
+    .filter((field) => Object.prototype.hasOwnProperty.call(updates, field))
+    .map((field) => [field, updates[field]]));
+  Object.assign(assignment, safeUpdates, { updatedAt: new Date().toISOString() });
   assignment.status = normalizeAssignmentStatus(assignment.dueDate, assignment.status);
   if (firebaseMode) return firebaseCore.saveById('assignments', `${schoolId}:${assignment.id}`, assignment);
   saveSchoolData(schools);
@@ -3822,17 +4811,21 @@ async function createLesson(schoolId, payload = {}, actor = {}) {
   if (roles.includes('teacher') && !resolveTeacherAuthorization(school, actor, classId)) {
     throw new Error('Teacher is not authorized for this class');
   }
+  const actorId = String(actor.username || actor.email || getUserIdentifier(actor) || '').split(':').pop().trim();
+  const isTeacher = roles.includes('teacher') && !hasSchoolAuthorityRole(actor);
 
   const lesson = {
-    id: payload.id || `lesson-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    id: isTeacher
+      ? `lesson-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+      : payload.id || `lesson-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     title: String(payload.title || '').trim() || 'Untitled lesson',
     description: String(payload.description || '').trim(),
     content: String(payload.content || payload.description || '').trim(),
     classId,
     className: String(payload.className || (Array.isArray(school.classes) ? school.classes.find((entry) => String(entry.classId || entry.id || '').trim() === classId)?.name || '' : '')).trim(),
     subject: String(payload.subject || '').trim() || 'General',
-    teacherId: String(payload.teacherId || actor.username || actor.userId || '').split(':').pop().trim() || 'teacher',
-    createdBy: String(payload.createdBy || actor.username || actor.userId || '').split(':').pop().trim() || 'teacher',
+    teacherId: isTeacher ? actorId : String(payload.teacherId || actorId).split(':').pop().trim() || 'teacher',
+    createdBy: isTeacher ? actorId : String(payload.createdBy || actorId).split(':').pop().trim() || 'teacher',
     attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
     createdAt: payload.createdAt || new Date().toISOString(),
     updatedAt: payload.updatedAt || new Date().toISOString(),
@@ -3853,8 +4846,18 @@ async function listLessons(schoolId, query = {}, actor = {}) {
   if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
   ensureSchoolEntities(school);
 
-  const lessons = firebaseMode ? await firebaseCore.listBySchool('lessons', schoolId) : school.lessons;
-  const items = (Array.isArray(lessons) ? lessons : []).filter((entry) => !query.teacherId || String(entry.teacherId || entry.createdBy || '').trim() === String(query.teacherId || '').trim());
+  const roles = getUserRoleList(actor);
+  const isTeacher = roles.includes('teacher') && !hasSchoolAuthorityRole(actor);
+  if (!isTeacher && !hasSchoolAuthorityRole(actor)) throw new Error('Teacher or school authority role required');
+  const teacherFilter = isTeacher ? '' : String(query.teacherId || query.createdBy || '').trim();
+  const lessons = firebaseMode ? await firebaseCore.listBySchool('lessons', schoolId, { preserveDataId: true }) : school.lessons;
+  const items = (Array.isArray(lessons) ? lessons : []).filter((entry) => {
+    if (isTeacher) {
+      return resolveLessonOwnership(school, entry, actor)
+        && isTeacherAssignedToAcademicItem(school, entry, actor);
+    }
+    return !teacherFilter || String(entry.teacherId || entry.createdBy || '').trim() === teacherFilter;
+  });
   return { schoolId, items, total: items.length };
 }
 
@@ -3865,12 +4868,12 @@ async function listLessonsForStudent(schoolId, query = {}, actor = {}) {
   if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
   ensureSchoolEntities(school);
 
-  const studentId = String(query.studentId || actor.username || actor.userId || '').split(':').pop().trim();
-  const student = resolveStudentByActor(school, { ...actor, username: studentId, userId: `${schoolId}:${studentId}` });
+  if (!getUserRoleList(actor).includes('student')) throw new Error('Student role required');
+  const student = resolveStudentByActor(school, actor);
   if (!student) return { schoolId, items: [], total: 0 };
 
   const classKeys = resolveStudentClassKeys(school, student);
-  const lessons = firebaseMode ? await firebaseCore.listBySchool('lessons', schoolId) : school.lessons;
+  const lessons = firebaseMode ? await firebaseCore.listBySchool('lessons', schoolId, { preserveDataId: true }) : school.lessons;
   const items = (Array.isArray(lessons) ? lessons : []).filter((entry) => {
     const matchesClassId = classKeys.has(String(entry.classId || '').trim().toLowerCase());
     const matchesClassName = classKeys.has(String(entry.className || '').trim().toLowerCase());
@@ -3889,7 +4892,7 @@ async function updateLesson(schoolId, lessonId, updates = {}, actor = {}) {
   ensureSchoolEntities(school);
 
   const roles = getUserRoleList(actor);
-  const lessons = firebaseMode ? await firebaseCore.listBySchool('lessons', schoolId) : school.lessons;
+  const lessons = firebaseMode ? await firebaseCore.listBySchool('lessons', schoolId, { preserveDataId: true }) : school.lessons;
   const lesson = (Array.isArray(lessons) ? lessons : []).find((entry) => entry.id === lessonId);
   if (!lesson) throw new Error('Lesson not found');
   if (roles.includes('student')) throw new Error('Students are not permitted to modify learning materials');
@@ -3899,16 +4902,16 @@ async function updateLesson(schoolId, lessonId, updates = {}, actor = {}) {
   if (roles.includes('teacher') && !resolveLessonOwnership(school, lesson, actor)) {
     throw new Error('Teacher is not permitted to modify this lesson');
   }
+  const nextClass = String(updates.classId || updates.className || lesson.classId || lesson.className || '').trim();
+  if (roles.includes('teacher') && !resolveTeacherAuthorization(school, actor, nextClass)) {
+    throw new Error('Teacher is not authorized for this class');
+  }
 
-  Object.assign(lesson, {
-    ...updates,
-    title: updates.title || lesson.title,
-    description: updates.description || lesson.description,
-    content: updates.content || updates.description || lesson.content,
-    classId: updates.classId || lesson.classId,
-    subject: updates.subject || lesson.subject,
-    updatedAt: new Date().toISOString(),
-  });
+  const mutableFields = ['title', 'description', 'content', 'classId', 'className', 'subject', 'attachments'];
+  const safeUpdates = Object.fromEntries(mutableFields
+    .filter((field) => Object.prototype.hasOwnProperty.call(updates, field))
+    .map((field) => [field, updates[field]]));
+  Object.assign(lesson, safeUpdates, { updatedAt: new Date().toISOString() });
   if (firebaseMode) return firebaseCore.saveById('lessons', `${schoolId}:${lesson.id}`, lesson);
   saveSchoolData(schools);
   return lesson;
@@ -3918,7 +4921,7 @@ async function updateWorkspaceMessage(schoolId, messageId, updates = {}, actor =
   if (firebaseCore.isFirebaseCoreMode()) {
     const roles = getMessagingRoles(actor);
     if (roles.length && !isTenantMatch(actor, schoolId)) throw new Error('School access denied');
-    const current = await firebaseCore.getById('messages', `${schoolId}:${messageId}`);
+    const current = await firebaseCore.getById('messages', `${schoolId}:${messageId}`, { preserveDataId: true });
     if (!current || current.schoolId !== schoolId) throw new Error('Message not found');
     const actorId = normalizeMessagingIdentifier(actor.userId || actor.username || actor.email);
     if (roles.length && current.recipientId && normalizeMessagingIdentifier(current.recipientId) !== actorId) throw new Error('Message access denied');
@@ -3951,7 +4954,7 @@ async function deleteWorkspaceMessage(schoolId, messageId, actor = {}) {
   if (firebaseCore.isFirebaseCoreMode()) {
     const roles = getMessagingRoles(actor);
     if (roles.length && !isTenantMatch(actor, schoolId)) throw new Error('School access denied');
-    const current = await firebaseCore.getById('messages', `${schoolId}:${messageId}`);
+    const current = await firebaseCore.getById('messages', `${schoolId}:${messageId}`, { preserveDataId: true });
     if (!current || current.schoolId !== schoolId) throw new Error('Message not found');
     const actorId = normalizeMessagingIdentifier(actor.userId || actor.username || actor.email);
     if (roles.length && current.recipientId && ![current.recipientId, current.senderId].map(normalizeMessagingIdentifier).includes(actorId)) throw new Error('Message access denied');
@@ -3984,7 +4987,7 @@ async function listWorkspaceMessages(schoolId, query = {}, actor = {}) {
     if (!school) throw new Error('School not found');
     if (!isTenantMatch(actor, schoolId)) throw new Error('School access denied');
     ensureSchoolEntities(school);
-    const messages = await firebaseCore.listBySchool('messages', schoolId);
+    const messages = await firebaseCore.listBySchool('messages', schoolId, { preserveDataId: true });
     const folder = query.folder || '';
     const actorId = normalizeMessagingIdentifier(actor.userId || actor.username || actor.email);
     const roles = getMessagingRoles(actor);
@@ -4110,9 +5113,9 @@ async function listSupportTickets(schoolId, query = {}) {
   throw new Error('Workspace support is only available in fallback mode');
 }
 
-async function getDashboardSummary(schoolId) {
+async function getDashboardSummary(schoolId, tenantOverride = null) {
   if (firebaseCore.isFirebaseCoreMode()) {
-    const tenant = await firebaseCore.getSchoolAggregate(schoolId);
+    const tenant = tenantOverride || await firebaseCore.getSchoolAggregate(schoolId);
     if (!tenant) throw new Error('School not found');
     const users = Array.isArray(tenant.users) ? tenant.users : [];
     const teacherUsers = getSchoolRoleRecords(tenant, 'teacher');
@@ -4129,7 +5132,7 @@ async function getDashboardSummary(schoolId) {
           acc.onLeave += 1;
         } else if (status === 'inactive') {
           acc.inactive += 1;
-        } else if (Boolean(user.metadata?.pendingApproval)) {
+        } else if (user.metadata?.pendingApproval) {
           acc.pendingApproval += 1;
         } else {
           acc.active += 1;
@@ -4302,7 +5305,7 @@ async function getDashboardSummary(schoolId) {
         acc.onLeave += 1;
       } else if (status === 'inactive') {
         acc.inactive += 1;
-      } else if (Boolean(user.metadata?.pendingApproval)) {
+      } else if (user.metadata?.pendingApproval) {
         acc.pendingApproval += 1;
       } else {
         acc.active += 1;
@@ -4462,6 +5465,13 @@ module.exports = {
   getStudentSchoolView,
   getTeacherSchoolView,
   createFeePayment,
+  createSchoolInvoice,
+  listSchoolInvoices,
+  cancelSchoolInvoice,
+  initializeInvoicePayment,
+  verifyAndLinkInvoicePayment,
+  createSchoolRefundRequest,
+  listSchoolRefundRequests,
   resendFirebaseTeacherInvitation,
   updateTeacherWorkspace,
   updateSchool,
@@ -4497,6 +5507,8 @@ module.exports = {
   getEntities,
   createEntity,
   updateEntity,
+  requestStudentDeletion,
+  resolveStudentDeletionRequest,
   deleteEntity,
   searchEntities,
 };

@@ -1,6 +1,12 @@
+const useIsolatedSchoolStore = require('./isolated-school-store');
+const cleanupIsolatedSchoolStore = useIsolatedSchoolStore();
 const { ensureDemoSchool } = require('../fallback.school');
 
 describe('development school seeding', () => {
+  afterAll(() => {
+    cleanupIsolatedSchoolStore();
+  });
+
   afterEach(() => {
     delete global.__workspaceSnapshot;
   });

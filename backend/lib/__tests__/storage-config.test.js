@@ -55,6 +55,12 @@ describe('Cloudflare R2 configuration', () => {
     });
   });
 
+  it('identifies all missing credentials, including the account ID, when creating the client', () => {
+    expect(() => storage.getR2Client()).toThrow(
+      'Cloudflare R2 configuration is unavailable: missing CLOUDFLARE_R2_ACCOUNT_ID, missing CLOUDFLARE_R2_ENDPOINT, missing CLOUDFLARE_R2_ACCESS_KEY_ID, missing CLOUDFLARE_R2_SECRET_ACCESS_KEY, missing CLOUDFLARE_R2_BUCKET.',
+    );
+  });
+
   it('rejects placeholder public URLs and builds tenant-path URLs only from a configured base', () => {
     process.env.CLOUDFLARE_R2_ACCOUNT_ID = 'account-test';
     process.env.CLOUDFLARE_R2_ACCESS_KEY_ID = 'access-test';

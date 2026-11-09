@@ -3,10 +3,19 @@
 
 import { heroDashboardImage } from '../assets/asset-paths.js';
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export function Hero(cms = {}) {
-  const title = cms.heroTitle || 'The premium operating system for modern schools.';
-  const subtitle = cms.heroSubtitle || 'Unify admissions, attendance, lesson planning, finance, messaging, and reporting in one elegant school operations experience built for growth.';
-  const companyName = cms.companyName || 'GlobyEdu OS';
+  const title = escapeHtml(cms.heroTitle || 'The premium operating system for modern schools.');
+  const subtitle = escapeHtml(cms.heroSubtitle || 'Unify admissions, attendance, lesson planning, finance, messaging, and reporting in one elegant school operations experience built for growth.');
+  const companyName = escapeHtml(cms.companyName || 'GlobyEdu OS');
   const heroImage = cms.heroImage || heroDashboardImage;
   const highlights = ['Admissions', 'Attendance', 'Finance', 'Reporting'];
   const values = ['Secure by design', 'Cloud-first platform', 'Multi-tenant scale', 'Role-based access'];

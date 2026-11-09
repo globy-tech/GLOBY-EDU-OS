@@ -1,4 +1,5 @@
 const firebaseData = require('./firebase.data');
+const { sanitizeFirestoreData } = require('./firestore-data');
 
 const CORE_COLLECTIONS = Object.freeze({
   tenants: 'tenants',
@@ -16,6 +17,7 @@ const CORE_COLLECTIONS = Object.freeze({
   messages: 'messages',
   platformSettings: 'platformSettings',
   schoolIdReservations: 'schoolIdReservations',
+  accountDeletionJobs: 'accountDeletionJobs',
 });
 
 function isFirebaseCoreMode() {
@@ -51,12 +53,12 @@ async function findTenantByHeadEmail(email) {
     .get();
   if (snapshot.empty) return null;
   const document = snapshot.docs[0];
-  return { id: document.id, ...document.data() };
+  return { ...document.data(), id: document.id };
 }
 
 async function listTenants() {
   const snapshot = await collectionRef(CORE_COLLECTIONS.tenants).get();
-  return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+  return snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id }));
 }
 
 async function findUserByEmail(email) {
@@ -68,7 +70,7 @@ async function findUserByEmail(email) {
     .get();
   if (snapshot.empty) return null;
   const document = snapshot.docs[0];
-  return { id: document.id, ...document.data() };
+  return { ...document.data(), id: document.id };
 }
 
 async function createTenantRegistration(schoolId, registration) {
@@ -105,11 +107,11 @@ async function createTenantRegistration(schoolId, registration) {
       throw error;
     }
 
-    transaction.create(tenantDocument, { ...registration.tenant, id, schoolId: id });
-    transaction.create(userDocument, registration.user);
-    transaction.create(roleDocument, registration.role);
-    transaction.create(classDocument, registration.defaultClass);
-    transaction.create(enrollmentDocument, registration.enrollment);
+    transaction.create(tenantDocument, sanitizeFirestoreData({ ...registration.tenant, id, schoolId: id }));
+    transaction.create(userDocument, sanitizeFirestoreData(registration.user));
+    transaction.create(roleDocument, sanitizeFirestoreData(registration.role));
+    transaction.create(classDocument, sanitizeFirestoreData(registration.defaultClass));
+    transaction.create(enrollmentDocument, sanitizeFirestoreData(registration.enrollment));
   });
 
   return { id, schoolId: id, ...registration.tenant };
@@ -144,7 +146,7 @@ async function deletePendingTenantRegistration(schoolId, email) {
 
 async function saveTenant(schoolId, data, merge = true) {
   const id = assertSchoolId(schoolId);
-  const payload = { ...data, schoolId: id, updatedAt: new Date().toISOString() };
+  const payload = sanitizeFirestoreData({ ...data, schoolId: id, updatedAt: new Date().toISOString() });
   await tenantRef(id).set(payload, { merge });
   return { id, ...payload };
 }
@@ -158,7 +160,7 @@ async function updateTenantInTransaction(schoolId, update) {
 
     const tenant = { id: snapshot.id, ...snapshot.data() };
     const { updates = {}, result } = update(tenant);
-    const payload = { ...updates, schoolId: id, updatedAt: new Date().toISOString() };
+    const payload = sanitizeFirestoreData({ ...updates, schoolId: id, updatedAt: new Date().toISOString() });
     transaction.set(document, payload, { merge: true });
     return { tenant: { ...tenant, ...payload }, result };
   });
@@ -217,41 +219,75 @@ async function deleteArchivedTenantIfEmpty(schoolId) {
     }
 
     if (!reservationSnapshot.exists) {
-      transaction.create(reservationDocument, { schoolId: id, reservedAt: new Date().toISOString() });
+      transaction.create(reservationDocument, sanitizeFirestoreData({ schoolId: id, reservedAt: new Date().toISOString() }));
     }
     transaction.delete(tenantDocument);
     return { schoolId: id, name: tenant.name || null, archivedAt: tenant.archivedAt };
   });
 }
 
-async function listBySchool(collectionName, schoolId) {
+async function listBySchool(collectionName, schoolId, { preserveDataId = false } = {}) {
   const snapshot = await collectionRef(collectionName).where('schoolId', '==', assertSchoolId(schoolId)).get();
-  return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+  return snapshot.docs.map((doc) => {
+    const data = doc.data();
+    return { ...data, id: preserveDataId && data.id ? data.id : doc.id };
+  });
 }
 
-async function getById(collectionName, id) {
+async function getById(collectionName, id, { preserveDataId = false } = {}) {
   const snapshot = await collectionRef(collectionName).doc(String(id)).get();
-  return snapshot.exists ? { id: snapshot.id, ...snapshot.data() } : null;
+  if (!snapshot.exists) return null;
+  const data = snapshot.data();
+  return { ...data, id: preserveDataId && data.id ? data.id : snapshot.id };
 }
 
 async function saveById(collectionName, id, data, merge = true) {
   const documentId = String(id || '').trim();
   if (!documentId) throw new Error('A Firebase document ID is required.');
-  const payload = { ...data, updatedAt: new Date().toISOString() };
+  const payload = sanitizeFirestoreData({ ...data, updatedAt: new Date().toISOString() });
   await collectionRef(collectionName).doc(documentId).set(payload, { merge });
   return { id: documentId, ...payload };
+}
+
+async function updateById(collectionName, id, data) {
+  const documentId = String(id || '').trim();
+  if (!documentId) throw new Error('A Firebase document ID is required.');
+  const payload = sanitizeFirestoreData({ ...data, updatedAt: new Date().toISOString() });
+  const reference = collectionRef(collectionName).doc(documentId);
+  return firebaseData.getFirestore().runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(reference);
+    if (!snapshot.exists) return false;
+    transaction.update(reference, payload);
+    return true;
+  });
 }
 
 async function createById(collectionName, id, data) {
   const documentId = String(id || '').trim();
   if (!documentId) throw new Error('A Firebase document ID is required.');
-  const payload = { ...data, updatedAt: new Date().toISOString() };
+  const payload = sanitizeFirestoreData({ ...data, updatedAt: new Date().toISOString() });
   await collectionRef(collectionName).doc(documentId).create(payload);
   return { id: documentId, ...payload };
 }
 
 async function deleteById(collectionName, id) {
   await collectionRef(collectionName).doc(String(id)).delete();
+}
+
+async function deleteSessionsForUser(userId) {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) throw new Error('A Firebase user ID is required.');
+  const firestore = firebaseData.getFirestore();
+  const snapshot = await firestore.collection('authSessions')
+    .where('userId', '==', normalizedUserId)
+    .get();
+  const documents = snapshot.docs || [];
+  for (let offset = 0; offset < documents.length; offset += 500) {
+    const batch = firestore.batch();
+    documents.slice(offset, offset + 500).forEach((document) => batch.delete(document.ref));
+    await batch.commit();
+  }
+  return documents.length;
 }
 
 async function getMaintenanceMode() {
@@ -303,8 +339,10 @@ module.exports = {
   listBySchool,
   getById,
   saveById,
+  updateById,
   createById,
   deleteById,
+  deleteSessionsForUser,
   getMaintenanceMode,
   setMaintenanceMode,
   getSchoolAggregate,

@@ -6,6 +6,7 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const dotenv = require('dotenv');
+const { createCorsOriginValidator } = require('./config/cors.config');
 
 // Load backend configuration consistently for both workspace-root and backend launches.
 const isolatedQaMode = String(process.env.GLOBY_QA_MODE || '').trim().toLowerCase() === 'true';
@@ -18,50 +19,9 @@ const apiRoutes = require('./routes/api');
 
 const app = express();
 
-const developmentOrigins = [
-  'http://localhost:4000',
-  'http://127.0.0.1:4000',
-  'http://localhost:4001',
-  'http://127.0.0.1:4001',
-  'http://localhost:4002',
-  'http://127.0.0.1:4002',
-  'http://localhost:4003',
-  'http://127.0.0.1:4003',
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-];
-const productionOrigins = [
-  'https://globyedu.com',
-  'https://www.globyedu.com',
-  'https://globy-edu-os.onrender.com',
-  'http://localhost:4000',
-  'http://127.0.0.1:4000',
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-];
-const configuredOrigins = String(process.env.CORS_ORIGINS || '')
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean);
-const allowedOrigins = new Set([
-  ...productionOrigins,
-  ...configuredOrigins,
-  ...(process.env.NODE_ENV !== 'production' ? developmentOrigins : []),
-]);
+if (process.env.RENDER_SERVICE_ID) app.set('trust proxy', 1);
 
-function isAllowedOrigin(origin) {
-  if (!origin) return true;
-  if (allowedOrigins.has(origin)) return true;
-
-  try {
-    const { hostname } = new URL(origin);
-    return hostname === 'globyedu.com' || hostname.endsWith('.globyedu.com');
-  } catch (error) {
-    return false;
-  }
-}
+const isAllowedOrigin = createCorsOriginValidator();
 
 app.use(cors({
   origin(origin, callback) {

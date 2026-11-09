@@ -1,6 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
+const originalQaMode = process.env.GLOBY_QA_MODE;
+process.env.GLOBY_QA_MODE = 'false';
 const apiRouter = require('../../../routes/api');
 const { signAccessToken } = require('../../auth/utils/token');
 
@@ -22,8 +24,13 @@ describe('pricing API permissions', () => {
   });
 
   afterAll(async () => {
-    fs.writeFileSync(pricingFile, originalPricing, 'utf8');
-    await new Promise((resolve) => server.close(resolve));
+    try {
+      fs.writeFileSync(pricingFile, originalPricing, 'utf8');
+      await new Promise((resolve) => server.close(resolve));
+    } finally {
+      if (originalQaMode === undefined) delete process.env.GLOBY_QA_MODE;
+      else process.env.GLOBY_QA_MODE = originalQaMode;
+    }
   });
 
   it('allows public active pricing reads', async () => {

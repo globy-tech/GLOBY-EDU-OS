@@ -8,8 +8,10 @@ import { activateAdminSchool, archiveAdminSchool, deleteAdminSchool, fetchArchiv
 import { fetchMaintenanceMode, updateMaintenanceMode, updatePricingPlan } from '../api/pricing.js';
 import { getAdminSchoolStatus, getAdminSchoolSubscriptionStatus, getAdminSchoolStatuses } from '../utils/school-management-filters.mjs';
 import { validateImageUpload } from '../utils/file-upload-validation.js';
+import { fetchAdminWebsiteCMS, publishWebsiteCMS, uploadWebsiteCMSLogo } from '../api/website-cms.js';
 
 const WEBSITE_CMS_STORAGE_KEY = 'globyedu_websiteCms';
+let cachedWebsiteCMSSettings = null;
 const SUPER_ADMIN_ONLY_SECTIONS = new Set(['pricing', 'payments', 'features', 'website-cms', 'ai-settings', 'analytics', 'reports', 'messages', 'announcements', 'support', 'plugins', 'audit-logs', 'system-settings', 'settings', 'backups', 'security', 'subscriptions', 'archived-schools']);
 const ADMIN_NAV_ITEMS = [
   { id: 'overview', label: 'Dashboard', icon: 'chart-square-bar' },
@@ -267,6 +269,20 @@ function renderPlatformProfile(userFullName) {
     <section class="rounded-[1.5rem] border border-slate-200 bg-white p-6 shadow-sm">
       <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Platform account</p>
       <h2 class="mt-2 text-2xl font-semibold text-slate-900">Profile</h2>
+      <div class="mt-6 flex flex-wrap items-center gap-4">
+        <div class="flex h-20 w-20 items-center justify-center overflow-hidden rounded-full bg-sky-100 text-2xl font-semibold text-sky-700">
+          <span data-platform-profile-initial>${escape(userFullName).slice(0, 1)}</span>
+          <img data-platform-profile-photo alt="Profile photo" class="hidden h-full w-full object-cover" />
+        </div>
+        <div>
+          <label class="inline-flex cursor-pointer rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white">
+            Upload profile photo
+            <input data-account-profile-photo-input type="file" accept="image/jpeg,image/png,image/gif,image/webp" class="sr-only" />
+          </label>
+          <button type="button" data-account-profile-camera class="ml-2 rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700">Use camera</button>
+          <p data-account-profile-photo-status class="mt-2 text-sm text-slate-600" role="status" aria-live="polite"></p>
+        </div>
+      </div>
       <dl class="mt-6 grid gap-4 sm:grid-cols-2">
         <div class="rounded-xl bg-slate-50 p-4"><dt class="text-sm text-slate-500">Name</dt><dd class="mt-1 font-semibold text-slate-900">${escape(userFullName)}</dd></div>
         <div class="rounded-xl bg-slate-50 p-4"><dt class="text-sm text-slate-500">Email</dt><dd class="mt-1 break-all font-semibold text-slate-900">${escape(email)}</dd></div>
@@ -925,16 +941,17 @@ function getWebsiteCMSSettings() {
     heroTitle: 'The premium operating system for modern schools.',
     heroSubtitle: 'Unify admissions, attendance, lesson planning, finance, messaging, and reporting in one elegant school operations experience built for growth.',
     contactEmail: 'hello@globyedu.com',
-    contactPhone: '+1 (555) 123-4567',
-    address: '123 Education Lane, Learning City',
+    contactPhone: '+233 53 749 7607',
+    address: '',
     businessHours: 'Monday-Friday • 8am to 6pm',
-    whatsApp: '+1 (555) 123-4567',
+    whatsApp: '+233 53 749 7607',
     googleMapsUrl: 'https://maps.google.com',
     themeColor: '#0ea5e9',
     socialLinks: 'LinkedIn, Twitter, Facebook, Instagram',
   };
 
   try {
+    if (cachedWebsiteCMSSettings) return { ...defaultSettings, ...cachedWebsiteCMSSettings };
     const stored = localStorage.getItem(WEBSITE_CMS_STORAGE_KEY);
     if (!stored) return { ...defaultSettings };
     const settings = { ...defaultSettings, ...JSON.parse(stored) };
@@ -949,6 +966,10 @@ function getWebsiteCMSSettings() {
 
 function saveWebsiteCMSSettings(values = {}) {
   const merged = { ...getWebsiteCMSSettings(), ...values };
+  cachedWebsiteCMSSettings = merged;
+  const state = getAdminState();
+  state.cms = merged;
+  saveAdminState(state);
   localStorage.setItem(WEBSITE_CMS_STORAGE_KEY, JSON.stringify(merged));
   return merged;
 }
@@ -958,7 +979,44 @@ export function attachWebsiteCMSHandlers() {
   const cancelButton = document.getElementById('cancel-website-cms');
   const status = document.getElementById('website-cms-status');
   const form = document.getElementById('website-cms-form');
+  const logoPreview = form ? form.querySelector('[data-cms-logo-preview]') : null;
   let uploadedLogoPath = '';
+  let initialLogoUrl = '';
+  let initialSettings = null;
+
+  function showStatus(message, tone = 'success') {
+    if (!status) return;
+    status.textContent = message;
+    status.className = tone === 'error'
+      ? 'mb-4 rounded-3xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800'
+      : tone === 'pending'
+        ? 'mb-4 rounded-3xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-800'
+        : 'mb-4 rounded-3xl border border-emerald-100 bg-emerald-50 p-4 text-sm text-emerald-800';
+    status.classList.remove('hidden');
+  }
+
+  function hydrateForm(settings) {
+    cachedWebsiteCMSSettings = { ...getWebsiteCMSSettings(), ...settings };
+    initialSettings = { ...cachedWebsiteCMSSettings };
+    uploadedLogoPath = String(settings.logoPath || '');
+    initialLogoUrl = String(settings.logoUrl || '');
+    document.querySelectorAll('[data-cms-field]').forEach((input) => {
+      const fieldName = input.getAttribute('data-cms-field');
+      if (fieldName && settings[fieldName] !== undefined) input.value = String(settings[fieldName] ?? '');
+    });
+    if (logoPreview) logoPreview.src = initialLogoUrl || '/src/assets/images/ui/globyedu-logo.jpg';
+  }
+
+  async function loadPublishedSettings() {
+    const token = typeof getAccessToken === 'function' ? getAccessToken() : localStorage.getItem('globyedu_accessToken');
+    const result = await fetchAdminWebsiteCMS(token);
+    if (!result.ok || result.data?.status !== 'ok' || !result.data.settings) {
+      showStatus(result.data?.message || 'Unable to load the published website settings.', 'error');
+      return;
+    }
+    hydrateForm(result.data.settings);
+    showStatus('Published website settings loaded from the shared platform configuration.', 'success');
+  }
 
   async function uploadBrandingAsset(file) {
     const validationError = validateImageUpload(file);
@@ -968,57 +1026,17 @@ export function attachWebsiteCMSHandlers() {
       throw new Error('You must sign in before uploading branding assets to the cloud.');
     }
 
-    const safeName = String(file.name || 'branding-logo.png').replace(/\\/g, '/').split('/').pop().replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'branding-logo.png';
-    const storagePath = `website-branding/${Date.now()}-${safeName}`;
-
-    const uploadResponse = await fetch(`/api/v1/files/upload?filename=${encodeURIComponent(storagePath)}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': file.type || 'application/octet-stream',
-      },
-      body: file,
-    });
-
-    const uploadData = await uploadResponse.json().catch(() => null);
-    if (!uploadResponse.ok || uploadData?.status !== 'ok') {
-      throw new Error(uploadData?.message || 'Unable to upload the branding image to storage.');
+    const result = await uploadWebsiteCMSLogo(token, file);
+    if (!result.ok || result.data?.status !== 'ok' || !result.data.path || !result.data.url) {
+      throw new Error(result.data?.message || 'Unable to upload the branding image to storage.');
     }
-    if (!uploadData.path) throw new Error('The uploaded branding image path could not be saved.');
-
-    const signedUrlResponse = await fetch(`/api/v1/files/${encodeURIComponent(storagePath)}?expiresIn=86400`, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    const signedUrlData = await signedUrlResponse.json().catch(() => null);
-    if (!signedUrlResponse.ok || signedUrlData?.status !== 'ok' || !signedUrlData.url) {
-      throw new Error(signedUrlData?.message || 'The uploaded branding image could not be published.');
-    }
-    return { url: signedUrlData.url, path: uploadData.path };
+    return { url: result.data.url, path: result.data.path };
   }
 
   if (form) {
     const logoFileInput = form.querySelector('[data-cms-logo-file]');
     const logoUrlInput = form.querySelector('[data-cms-field="logoUrl"]');
-    const logoPreview = form.querySelector('[data-cms-logo-preview]');
-    const storedSettings = getWebsiteCMSSettings();
-    if (storedSettings.logoPath && logoUrlInput) {
-      const token = typeof getAccessToken === 'function' ? getAccessToken() : localStorage.getItem('globyedu_accessToken');
-      const encodedPath = String(storedSettings.logoPath).split('/').map(encodeURIComponent).join('/');
-      if (token) {
-        fetch(`/api/v1/files/${encodedPath}?expiresIn=3600`, {
-          method: 'GET',
-          headers: { Authorization: `Bearer ${token}` },
-          cache: 'no-store',
-        }).then(async (response) => {
-          const data = await response.json().catch(() => null);
-          if (!response.ok || data?.status !== 'ok' || !data.url) throw new Error(data?.message || 'Unable to refresh the website logo URL.');
-          logoUrlInput.value = data.url;
-          if (logoPreview) logoPreview.src = data.url;
-        }).catch((error) => console.warn('Unable to refresh saved CMS logo URL.', error));
-      }
-    }
+    void loadPublishedSettings();
     logoFileInput?.addEventListener('change', async () => {
       const file = logoFileInput.files?.[0];
       if (!file) return;
@@ -1040,23 +1058,21 @@ export function attachWebsiteCMSHandlers() {
         return;
       }
       try {
+        if (logoFileInput) logoFileInput.disabled = true;
         const uploadedAsset = await uploadBrandingAsset(file);
         uploadedLogoPath = uploadedAsset.path;
+        if (logoUrlInput) initialLogoUrl = uploadedAsset.url;
         if (logoUrlInput) logoUrlInput.value = uploadedAsset.url;
         if (logoPreview) logoPreview.src = uploadedAsset.url;
-        if (status) {
-          status.textContent = 'Logo uploaded to private storage. It is not publicly published; no platform CMS API is available.';
-          status.className = 'mb-4 rounded-3xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900';
-        }
+        showStatus('Logo uploaded. Save changes to publish it.', 'pending');
       } catch (error) {
-        if (status) {
-          status.textContent = error.message || 'Unable to upload the logo to cloud storage.';
-          status.className = 'mb-4 rounded-3xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800';
-        }
+        showStatus(error.message || 'Unable to upload the logo to cloud storage.', 'error');
+      } finally {
+        if (logoFileInput) logoFileInput.disabled = false;
       }
     });
 
-    form.addEventListener('submit', (event) => {
+    form.addEventListener('submit', async (event) => {
       event.preventDefault();
       const values = {};
       let hasError = false;
@@ -1070,31 +1086,38 @@ export function attachWebsiteCMSHandlers() {
         }
       });
       if (hasError) {
-        if (status) {
-          status.textContent = 'Company name, hero title, and contact email are required.';
-          status.className = 'mb-4 rounded-3xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800';
-        }
+        showStatus('Company name, hero title, and contact email are required.', 'error');
         return;
       }
-      values.logoPath = uploadedLogoPath || getWebsiteCMSSettings().logoPath || '';
-      saveWebsiteCMSSettings(values);
-      if (status) {
-        status.textContent = 'Website draft saved in this browser only. It has not been published because no platform CMS API is available.';
-        status.className = 'mb-4 rounded-3xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900';
+      const currentSettings = getWebsiteCMSSettings();
+      values.logoPath = uploadedLogoPath || (values.logoUrl === initialLogoUrl ? currentSettings.logoPath || '' : '');
+      const token = typeof getAccessToken === 'function' ? getAccessToken() : localStorage.getItem('globyedu_accessToken');
+      const saveButton = document.getElementById('save-website-cms');
+      if (saveButton) saveButton.disabled = true;
+      showStatus('Publishing website settings…', 'pending');
+      try {
+        const result = await publishWebsiteCMS(token, values);
+        if (!result.ok || result.data?.status !== 'ok' || !result.data.settings) {
+          throw new Error(result.data?.message || 'Website settings could not be published.');
+        }
+        const saved = saveWebsiteCMSSettings(result.data.settings);
+        initialLogoUrl = String(saved.logoUrl || '');
+        uploadedLogoPath = String(saved.logoPath || '');
+        if (logoUrlInput) logoUrlInput.value = initialLogoUrl;
+        if (logoPreview) logoPreview.src = initialLogoUrl || '/src/assets/images/ui/globyedu-logo.jpg';
+        showStatus('Website settings published and shared with visitors.', 'success');
+        window.dispatchEvent(new CustomEvent('globyedu-cms-updated', { detail: { settings: saved } }));
+      } catch (error) {
+        showStatus(error.message || 'Website settings could not be published.', 'error');
+      } finally {
+        if (saveButton) saveButton.disabled = false;
       }
-      window.dispatchEvent(new CustomEvent('globyedu-cms-updated', { detail: values }));
     });
 
     if (cancelButton) {
       cancelButton.addEventListener('click', () => {
-        const settings = getWebsiteCMSSettings();
-        uploadedLogoPath = settings.logoPath || '';
-        document.querySelectorAll('[data-cms-field]').forEach((input) => {
-          const fieldName = input.getAttribute('data-cms-field');
-          if (fieldName && settings[fieldName] !== undefined) {
-            input.value = settings[fieldName];
-          }
-        });
+        const settings = initialSettings || getWebsiteCMSSettings();
+        hydrateForm(settings);
         if (status) {
           status.textContent = 'Changes cancelled. The latest saved version remains active.';
           status.className = 'mb-4 rounded-3xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700';
@@ -1120,8 +1143,7 @@ function renderWebsiteCMS() {
           <div>
             <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Website CMS</p>
             <h2 class="mt-2 text-2xl font-semibold text-slate-900">Manage homepage content and branding</h2>
-            <p class="mt-3 text-sm text-amber-800">CMS changes are currently browser-only and are not published across devices.</p>
-            <p class="mt-3 text-slate-600">These values update the public marketing site immediately in the current session and persist in local storage.</p>
+            <p class="mt-3 text-slate-600">Published settings are shared with public visitors and other administrators.</p>
           </div>
           <div class="flex flex-wrap gap-3">
             <button id="cancel-website-cms" type="button" class="rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50">Cancel</button>
@@ -1134,7 +1156,7 @@ function renderWebsiteCMS() {
             ${renderSettingInput('Company name', settings.companyName, 'companyName')}
             <label class="block text-sm text-slate-700">Logo URL or uploaded image
               <input type="text" value="${String(settings.logoUrl || '').replace(/"/g, '&quot;')}" name="logoUrl" data-cms-field="logoUrl" class="mt-3 w-full rounded-3xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100" />
-              <input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" data-cms-logo-file class="mt-3 block w-full text-sm text-slate-600" />
+              <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" data-cms-logo-file class="mt-3 block w-full text-sm text-slate-600" />
               <img src="${String(settings.logoUrl || '').replace(/"/g, '&quot;')}" alt="Current website logo" data-cms-logo-preview class="mt-3 h-12 w-12 rounded-xl border border-slate-200 bg-white object-contain p-2" />
             </label>
             ${renderSettingInput('Hero title', settings.heroTitle, 'heroTitle')}
@@ -1770,13 +1792,27 @@ export function attachAdminSectionHandlers(section) {
 
     const restoreButton = document.getElementById('restore-backup');
     if (restoreButton) {
-      restoreButton.addEventListener('click', () => {
-        const result = restoreLatestBackup();
+      restoreButton.addEventListener('click', async () => {
         const status = document.getElementById('backup-status');
+        restoreButton.disabled = true;
         if (status) {
-          status.textContent = result.success ? `Restore completed: ${result.backupId}` : `Restore blocked: ${result.reason}`;
-          status.className = result.success ? 'mt-4 rounded-3xl border border-emerald-100 bg-emerald-50 p-4 text-sm text-emerald-800' : 'mt-4 rounded-3xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800';
+          status.textContent = 'Restoring backup…';
+          status.className = 'mt-4 rounded-3xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-800';
           status.classList.remove('hidden');
+        }
+        try {
+          const result = await restoreLatestBackup();
+          if (status) {
+            status.textContent = result.success ? `Restore completed: ${result.backupId}` : `Restore blocked: ${result.reason}`;
+            status.className = result.success ? 'mt-4 rounded-3xl border border-emerald-100 bg-emerald-50 p-4 text-sm text-emerald-800' : 'mt-4 rounded-3xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800';
+          }
+        } catch (error) {
+          if (status) {
+            status.textContent = `Restore failed: ${error?.message || 'Unexpected error. Check the published website settings before retrying.'}`;
+            status.className = 'mt-4 rounded-3xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800';
+          }
+        } finally {
+          restoreButton.disabled = false;
         }
       });
     }
@@ -3097,7 +3133,7 @@ function createPlatformBackupSnapshot() {
   return { success: true, backup: snapshot, catalog: list };
 }
 
-function restoreLatestBackup() {
+async function restoreLatestBackup() {
   const role = localStorage.getItem('globyedu_userRole') || 'super_admin';
   const platformAdmin = localStorage.getItem('globyedu_platformAdmin') === 'true';
   if (role !== 'super_admin' && !platformAdmin) {
@@ -3127,10 +3163,23 @@ function restoreLatestBackup() {
     return { success: false, reason: 'Restore cancelled by the Super Admin.' };
   }
 
-  const nextState = getAdminState();
   const backupData = backup.data || {};
+  let restoredCms = null;
+  if (backupData.cms) {
+    const token = getAccessToken();
+    if (!token) {
+      return { success: false, reason: 'Sign in as Super Admin to publish restored website settings.' };
+    }
+    const result = await publishWebsiteCMS(token, backupData.cms);
+    if (!result.ok || result.data?.status !== 'ok' || !result.data.settings) {
+      return { success: false, reason: result.data?.message || 'Website settings could not be published; restore was not applied.' };
+    }
+    restoredCms = result.data.settings;
+  }
+
+  const nextState = getAdminState();
   if (backupData.settings) nextState.settings = { ...(nextState.settings || {}), ...backupData.settings };
-  if (backupData.cms) nextState.cms = { ...(nextState.cms || {}), ...backupData.cms };
+  if (restoredCms) nextState.cms = { ...(nextState.cms || {}), ...restoredCms };
   if (Array.isArray(backupData.schools)) nextState.schools = backupData.schools;
   if (Array.isArray(backupData.messages)) nextState.messages = backupData.messages;
   if (Array.isArray(backupData.announcements)) nextState.announcements = backupData.announcements;
@@ -3143,6 +3192,9 @@ function restoreLatestBackup() {
   saveAdminState(nextState);
   localStorage.setItem('globyedu_schoolDirectory', JSON.stringify(nextState.schools || []));
   localStorage.setItem('globyedu_websiteCms', JSON.stringify(nextState.cms || {}));
+  if (restoredCms) {
+    window.dispatchEvent(new CustomEvent('globyedu-cms-updated', { detail: { settings: nextState.cms } }));
+  }
 
   appendAuditLog('Restored backup', `Recovered backup ${backup.id} and rehydrated platform state.`, {
     target: 'platform',

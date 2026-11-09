@@ -85,7 +85,7 @@ describe('Super Admin school directory filters', () => {
 
   it('uses the existing details API result to open the school details modal', () => {
     const adminSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'admin.js'), 'utf8');
-    const viewHandler = adminSource.match(/if \(action === 'view'\) \{([\s\S]*?)\n      \} else if \(action === 'edit'\)/)?.[1] || '';
+    const viewHandler = adminSource.match(/if \(action === 'view'\) \{([\s\S]*?)\n {6}\} else if \(action === 'edit'\)/)?.[1] || '';
 
     expect(adminSource).toMatch(/import \{[^}]*fetchSchoolDetails[^}]*\} from '\.\.\/api\/school\.js'/);
     expect(viewHandler).toContain('const schoolResult = await fetchSchoolDetails(token, schoolId);');
@@ -131,7 +131,7 @@ describe('Super Admin school directory filters', () => {
   it('does not request a school credential update when the head email is unchanged', () => {
     const adminSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'admin.js'), 'utf8');
     const editHandler = adminSource.match(/function attachSchoolEditForm\(token, schoolId, onSuccess\) \{([\s\S]*?)\n\}/)?.[1] || '';
-    const credentialUpdate = editHandler.match(/if \(updatedHeadEmail !== originalHeadEmail\) \{([\s\S]*?)\n      \}/)?.[1] || '';
+    const credentialUpdate = editHandler.match(/if \(updatedHeadEmail !== originalHeadEmail\) \{([\s\S]*?)\n {6}\}/)?.[1] || '';
 
     expect(editHandler).toContain("const originalHeadEmail = String(form.querySelector('[name=\"headEmail\"]')?.value || '').trim().toLowerCase();");
     expect(editHandler).toContain("const updatedHeadEmail = String(updateData.headEmail || '').trim().toLowerCase();");
@@ -213,5 +213,19 @@ describe('Super Admin school directory filters', () => {
     expect(deleteHandler).toContain('This cannot be undone');
     expect(deleteHandler).toContain('if (confirmation !== `DELETE ${schoolId}`) return;');
     expect(deleteHandler.indexOf('window.prompt(')).toBeLessThan(deleteHandler.indexOf('permanentlyDeleteArchivedSchool('));
+  });
+
+  it('publishes restored CMS settings before applying the local backup snapshot', () => {
+    const adminSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'admin.js'), 'utf8');
+    const restoreHandler = adminSource.match(/async function restoreLatestBackup\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
+
+    expect(restoreHandler).toContain('if (!token)');
+    expect(restoreHandler).toContain('await publishWebsiteCMS(token, backupData.cms)');
+    expect(restoreHandler).toContain('if (!result.ok || result.data?.status !== \'ok\' || !result.data.settings)');
+    expect(restoreHandler).toContain('if (restoredCms) nextState.cms');
+    expect(restoreHandler.indexOf('await publishWebsiteCMS(token, backupData.cms)')).toBeLessThan(restoreHandler.indexOf('saveAdminState(nextState)'));
+    expect(restoreHandler.indexOf('await publishWebsiteCMS(token, backupData.cms)'))
+      .toBeLessThan(restoreHandler.indexOf("localStorage.setItem('globyedu_websiteCms'"));
+    expect(restoreHandler).toContain("window.dispatchEvent(new CustomEvent('globyedu-cms-updated'");
   });
 });

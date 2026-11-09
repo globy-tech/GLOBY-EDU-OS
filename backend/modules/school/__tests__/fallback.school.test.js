@@ -1,19 +1,174 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const bcrypt = require('bcrypt');
-const { ensureDemoSchool } = require('../fallback.school');
+const { EXTERNAL_SERVICE_VARIABLES } = require('../../../config/qa-config');
+const schoolsDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'globy-fallback-school-tests-'));
+const schoolsFile = path.join(schoolsDirectory, 'schools.json');
+const isolatedPaths = {
+  GLOBY_QA_HOME: schoolsDirectory,
+  GLOBY_SCHOOLS_FILE: schoolsFile,
+  GLOBY_AUDIT_FILE: path.join(schoolsDirectory, 'audit-logs.json'),
+  GLOBY_PASSWORD_RESET_TOKENS_FILE: path.join(schoolsDirectory, 'password-reset-tokens.json'),
+};
+const environmentKeys = [
+  ...EXTERNAL_SERVICE_VARIABLES,
+  'DATABASE_URL',
+  'USE_REAL_DATABASE',
+  'RENDER_SERVICE_ID',
+  'NODE_ENV',
+  'DATA_STORE_MODE',
+  'GLOBY_QA_MODE',
+  ...Object.keys(isolatedPaths),
+];
+const previousEnvironment = new Map(environmentKeys.map((key) => [key, process.env[key]]));
+EXTERNAL_SERVICE_VARIABLES.forEach((key) => { delete process.env[key]; });
+delete process.env.DATABASE_URL;
+delete process.env.USE_REAL_DATABASE;
+delete process.env.RENDER_SERVICE_ID;
+process.env.NODE_ENV = 'test';
+process.env.DATA_STORE_MODE = 'json';
+process.env.GLOBY_QA_MODE = 'true';
+Object.assign(process.env, isolatedPaths);
+const fallbackSchool = require('../fallback.school');
+const { ensureDemoSchool, loadSchoolData } = fallbackSchool;
 const schoolService = require('../school.service');
 const firebaseCore = require('../../../firebase.core');
 const firebaseData = require('../../../firebase.data');
 const tenantMiddleware = require('../middleware/tenant.middleware');
 const { generateSchoolSubdomain, resolveTenantFromHostname } = require('../tenant-hostname');
 
-const schoolsFile = path.join(__dirname, '../../../data/schools.json');
-const originalData = fs.existsSync(schoolsFile) ? fs.readFileSync(schoolsFile, 'utf8') : '';
-
 afterEach(() => {
-  fs.writeFileSync(schoolsFile, originalData, 'utf8');
+  delete global.__workspaceSnapshot;
+  fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
   jest.restoreAllMocks();
+});
+
+afterAll(() => {
+  try {
+    for (const [key, value] of previousEnvironment) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  } finally {
+    fs.rmSync(schoolsDirectory, { recursive: true, force: true });
+  }
+});
+
+test('QA fallback requires a separately configured QA data root before reading school data', () => {
+  const variables = [
+    'GLOBY_QA_MODE',
+    'DATA_STORE_MODE',
+    'GLOBY_QA_HOME',
+    'GLOBY_AUDIT_FILE',
+    'GLOBY_PASSWORD_RESET_TOKENS_FILE',
+    'FIREBASE_PROJECT_ID',
+    'FIREBASE_CLIENT_EMAIL',
+    'FIREBASE_PRIVATE_KEY',
+    'FIREBASE_API_KEY',
+    'FIREBASE_AUTH_DOMAIN',
+    'FIREBASE_APP_ID',
+    'GCLOUD_PROJECT',
+    'GOOGLE_CLOUD_PROJECT',
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'SUPABASE_URL',
+    'SUPABASE_SERVICE_ROLE_KEY',
+    'CLOUDFLARE_R2_ACCOUNT_ID',
+    'CLOUDFLARE_R2_ENDPOINT',
+    'CLOUDFLARE_R2_ACCESS_KEY_ID',
+    'CLOUDFLARE_R2_SECRET_ACCESS_KEY',
+    'CLOUDFLARE_R2_BUCKET',
+    'PAYSTACK_SECRET_KEY',
+    'PAYSTACK_WEBHOOK_SECRET',
+    'SMTP_HOST',
+    'SMTP_USER',
+    'SMTP_PASSWORD',
+    'RESEND_API_KEY',
+    'BREVO_API_KEY',
+    'SENDGRID_API_KEY',
+    'MAILGUN_API_KEY',
+    'AWS_ACCESS_KEY_ID',
+    'AWS_SECRET_ACCESS_KEY',
+    'AWS_SESSION_TOKEN',
+  ];
+  const originalValues = new Map(variables.map((variable) => [variable, process.env[variable]]));
+
+  try {
+    variables.forEach((variable) => { delete process.env[variable]; });
+    process.env.GLOBY_QA_MODE = 'true';
+    process.env.DATA_STORE_MODE = 'json';
+
+    expect(() => loadSchoolData()).toThrow('GLOBY_QA_HOME is required in isolated QA mode.');
+  } finally {
+    variables.forEach((variable) => {
+      const originalValue = originalValues.get(variable);
+      if (originalValue === undefined) delete process.env[variable];
+      else process.env[variable] = originalValue;
+    });
+  }
+});
+
+test.each([
+  ['missing', {}],
+  ['invalid', { confirmation: 'WRONG-ID' }],
+])('JSON fallback refuses %s account-deletion confirmation without changing the fixture', async (_label, options) => {
+  const schoolId = 'isolated-delete-school';
+  const teacher = {
+    id: 'isolated-teacher-record',
+    teacherId: 'T-ISOLATED',
+    email: 'isolated-teacher@example.test',
+    profilePhotoPath: 'teacher-profile/T-ISOLATED.png',
+    status: 'active',
+  };
+  fs.writeFileSync(schoolsFile, JSON.stringify({
+    schools: [{
+      schoolId,
+      users: [{ id: teacher.id, teacherId: teacher.teacherId, email: teacher.email, role: 'teacher' }],
+      teachers: [teacher],
+      students: [],
+    }],
+  }), 'utf8');
+  jest.spyOn(firebaseCore, 'isFirebaseCoreMode').mockReturnValue(false);
+
+  await expect(schoolService.deleteEntity(schoolId, 'teachers', teacher.teacherId, {
+    roles: ['school_authority'],
+    tenantId: schoolId,
+  }, options)).rejects.toThrow('Type the teacher ID to confirm permanent deletion.');
+
+  expect(loadSchoolData().find((school) => school.schoolId === schoolId).teachers).toEqual([teacher]);
+});
+
+test('JSON fallback deletion response reports retained uploaded files and does not claim complete erasure', async () => {
+  const schoolId = 'isolated-retention-school';
+  const teacher = {
+    id: 'isolated-retention-teacher',
+    teacherId: 'T-RETAINED',
+    email: 'retained-teacher@example.test',
+    profilePhotoPath: 'teacher-profile/T-RETAINED.png',
+    status: 'active',
+  };
+  fs.writeFileSync(schoolsFile, JSON.stringify({
+    schools: [{
+      schoolId,
+      users: [{ id: teacher.id, teacherId: teacher.teacherId, email: teacher.email, role: 'teacher' }],
+      teachers: [teacher],
+      students: [],
+    }],
+  }), 'utf8');
+  jest.spyOn(firebaseCore, 'isFirebaseCoreMode').mockReturnValue(false);
+
+  const result = await schoolService.deleteEntity(schoolId, 'teachers', teacher.teacherId, {
+    roles: ['school_authority'],
+    tenantId: schoolId,
+  }, { confirmation: teacher.teacherId });
+
+  expect(result.accountCleanup).toEqual({
+    status: 'completed',
+    retainedFilePaths: [teacher.profilePhotoPath],
+    completeErasure: false,
+    fileRetentionStatus: 'retained_pending_policy',
+  });
+  expect(loadSchoolData().find((school) => school.schoolId === schoolId).teachers).toEqual([]);
 });
 
 test('ensureDemoSchool seeds the required development accounts and school identifiers', () => {
@@ -231,7 +386,7 @@ test('entity onboarding generates usable teacher and student credentials without
   expect(reloaded.students.find((entry) => entry.studentId === student.studentId).profilePhoto).toContain('data:image/png');
 });
 
-test('teachers can create, update, and delete students within their own school', async () => {
+test('teachers can create and update students but must request deletion approval', async () => {
   fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
 
   const school = ensureDemoSchool();
@@ -256,11 +411,29 @@ test('teachers can create, update, and delete students within their own school',
     fullName: 'Teacher Updated Student',
   }, actor);
 
-  const deleted = await schoolService.deleteEntity(school.schoolId, 'students', created.studentId, actor);
+  await expect(schoolService.deleteEntity(school.schoolId, 'students', created.studentId, actor, {
+    confirmation: created.studentId,
+  })).rejects.toThrow('Only School Authority can manage account deletion.');
+  await schoolService.requestStudentDeletion(school.schoolId, created.studentId, 'Duplicate enrollment', actor);
+  const authority = {
+    userId: `${school.schoolId}:authority@globyedu.test`,
+    roles: ['school_authority'],
+    schoolId: school.schoolId,
+    tenantId: school.schoolId,
+  };
+  await expect(schoolService.resolveStudentDeletionRequest(
+    school.schoolId,
+    created.studentId,
+    'approved',
+    created.studentId,
+    authority,
+  )).resolves.toEqual(expect.objectContaining({ studentId: created.studentId, status: 'approved' }));
 
   expect(created.studentId).toMatch(/^STD-/);
   expect(updated.fullName).toBe('Teacher Updated Student');
-  expect(deleted.studentId).toBe(created.studentId);
+  const remainingSchool = require('../fallback.school').loadSchoolData().find((entry) => entry.schoolId === school.schoolId);
+  expect(remainingSchool.students.some((entry) => entry.studentId === created.studentId)).toBe(false);
+  expect(remainingSchool.users.some((entry) => entry.studentId === created.studentId)).toBe(false);
 });
 
 test('assigned teacher can create and update students using an assigned class grade', async () => {

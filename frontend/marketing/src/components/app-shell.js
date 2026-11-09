@@ -93,7 +93,11 @@ export function AppShell({
                   <button type="button" data-app-action="messages" aria-label="Messages" class="inline-flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-white text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">💬</button>
                   <button type="button" data-app-action="help" aria-label="Help" class="inline-flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-white text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">❓</button>
                   <div class="relative" data-account-menu>
-                    <button type="button" data-account-menu-toggle aria-haspopup="true" aria-expanded="false" aria-controls="account-actions-menu" class="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">${profileName}</button>
+                    <button type="button" data-account-menu-toggle aria-haspopup="true" aria-expanded="false" aria-controls="account-actions-menu" class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">
+                      <span data-account-profile-initial class="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-sky-100 text-sky-700">${profileName.slice(0, 1)}</span>
+                      <img data-account-profile-photo alt="Profile photo" class="hidden h-8 w-8 rounded-full object-cover" />
+                      <span>${profileName}</span>
+                    </button>
                     <div id="account-actions-menu" data-account-menu-panel class="absolute right-0 top-full z-30 mt-2 hidden w-48 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
                       <button type="button" data-app-action="profile" class="w-full rounded-xl px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-50">Profile</button>
                       <button type="button" data-app-action="settings" class="w-full rounded-xl px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-50">Settings</button>

@@ -39,6 +39,10 @@ model Tenant {
   academicStructure Json?
   announcements    Json?
   events           Json?
+  invoices         Json     @default("[]")
+  payments         Json     @default("[]")
+  receipts         Json     @default("[]")
+  refunds          Json     @default("[]")
   status           String   @default("trial") // active | suspended | trial
 
   departments      Department[]

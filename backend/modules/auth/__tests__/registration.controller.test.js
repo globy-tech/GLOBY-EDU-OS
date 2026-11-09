@@ -1,4 +1,6 @@
 const express = require('express');
+const useIsolatedSchoolStore = require('../../school/__tests__/isolated-school-store');
+const cleanupIsolatedSchoolStore = useIsolatedSchoolStore();
 
 jest.mock('../../school/school.service', () => ({ createSchool: jest.fn() }));
 jest.mock('../auth.service', () => ({ login: jest.fn() }));
@@ -15,7 +17,10 @@ jest.mock('../../../firebase.core', () => ({
   findUserByEmail: jest.fn(),
   deletePendingTenantRegistration: jest.fn(),
 }));
-jest.mock('../../../config/app-url.config', () => ({ getAppUrl: jest.fn() }));
+jest.mock('../../../config/app-url.config', () => ({
+  getAppUrl: jest.fn(),
+  isProductionRuntime: jest.fn(() => false),
+}));
 jest.mock('../utils/email', () => ({ sendEmail: jest.fn(), verificationTemplate: jest.fn(), resetTemplate: jest.fn() }));
 
 const schoolService = require('../../school/school.service');
@@ -57,7 +62,13 @@ describe('public registration controller diagnostics', () => {
     server = createTestServer();
   });
 
-  afterAll(() => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))));
+  afterAll(async () => {
+    try {
+      await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    } finally {
+      cleanupIsolatedSchoolStore();
+    }
+  });
 
   beforeEach(() => {
     jest.clearAllMocks();

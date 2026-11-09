@@ -8,8 +8,8 @@ const path = require('path');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const config = require('../config/auth.config');
-const { getAppUrl } = require('../config/app-url.config');
-const { signAccessToken } = require('../modules/auth/utils/token');
+const { getAppUrl, isProductionRuntime } = require('../config/app-url.config');
+const { signAccessToken, verifyAccessToken } = require('../modules/auth/utils/token');
 const { revokeAccessToken } = require('../modules/auth/utils/access-token-revocation');
 const authService = require('../modules/auth/auth.service');
 const firebaseData = require('../firebase.data');
@@ -37,7 +37,7 @@ const router = express.Router();
 
 function setRefreshCookie(res, refreshToken) {
   if (!refreshToken) return;
-  const production = process.env.NODE_ENV === 'production' || Boolean(String(process.env.RENDER_SERVICE_ID || '').trim());
+  const production = isProductionRuntime();
   res.cookie('globyedu_refresh_token', refreshToken, {
     httpOnly: true,
     secure: production,
@@ -121,6 +121,10 @@ function hashResetToken(token) {
 
 function generateResetToken() {
   return crypto.randomBytes(32).toString('hex');
+}
+
+function isIsolatedQaMode() {
+  return String(process.env.GLOBY_QA_MODE || '').trim().toLowerCase() === 'true';
 }
 
 function storePasswordResetToken(email) {
@@ -235,13 +239,23 @@ router.get('/schools', async (req, res) => {
 });
 
 if (useFallbackAuth) {
-  router.post('/logout', authMiddleware, (req, res) => {
-    const token = String(req.headers.authorization || '').slice('Bearer '.length);
-    revokeAccessToken(token, req.user?.exp);
+  router.post('/logout', (req, res) => {
+    const authorization = String(req.headers.authorization || '');
+    const token = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : '';
+    if (token) {
+      try {
+        const decoded = verifyAccessToken(token);
+        revokeAccessToken(token, decoded.exp);
+      } catch (error) {
+        if (error?.name !== 'JsonWebTokenError' && error?.name !== 'TokenExpiredError' && error?.name !== 'NotBeforeError') {
+          return res.status(503).json({ status: 'error', message: 'Unable to revoke the session. Please try again.' });
+        }
+      }
+    }
     res.clearCookie('globyedu_refresh_token', {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production' || Boolean(String(process.env.RENDER_SERVICE_ID || '').trim()),
-      sameSite: process.env.NODE_ENV === 'production' || Boolean(String(process.env.RENDER_SERVICE_ID || '').trim()) ? 'strict' : 'lax',
+      secure: isProductionRuntime(),
+      sameSite: isProductionRuntime() ? 'strict' : 'lax',
       path: '/api/v1/auth',
       ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}),
     });
@@ -395,8 +409,8 @@ if (useFallbackAuth) {
             code: 'ACCOUNT_SUSPENDED',
             title: 'Account Suspended',
             message: suspendedAccountMessage,
-            supportEmail: '[your support email]',
-            supportPhone: '[your phone/WhatsApp number]',
+            supportEmail: 'hello@globyedu.com',
+            supportPhone: '+233 53 749 7607',
           },
         };
       }
@@ -408,8 +422,8 @@ if (useFallbackAuth) {
             code: 'ACCOUNT_SUSPENDED',
             title: 'Account Suspended',
             message: suspendedAccountMessage,
-            supportEmail: '[your support email]',
-            supportPhone: '[your phone/WhatsApp number]',
+            supportEmail: 'hello@globyedu.com',
+            supportPhone: '+233 53 749 7607',
           },
         };
       }
@@ -452,10 +466,6 @@ if (useFallbackAuth) {
         }
       }
 
-      if (user && String(user.role || '').trim().toLowerCase() === 'teacher') {
-        recordLoginFailure(loginAttemptKey);
-        return { statusCode: 401, body: { status: 'error', message: genericAuthMessage } };
-      }
     }
 
     const passwordMatches = user && (await verifyPassword(user, password));
@@ -545,7 +555,7 @@ if (useFallbackAuth) {
       return res.status(429).json({ status: 'error', message: 'Too many failed sign-in attempts. Please try again later.' });
     }
 
-    if (String(loginType || '').trim().toLowerCase() === 'teacher') {
+    if (String(loginType || '').trim().toLowerCase() === 'teacher' && (firebaseMode || (realDatabaseMode && !isIsolatedQaMode()))) {
       recordLoginFailure(loginAttemptKey);
       await recordAuditEvent({
         req,

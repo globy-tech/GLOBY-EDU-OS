@@ -25,6 +25,7 @@ jest.mock('../../../firebase.core', () => ({
       teacherId: 'T001',
       role: 'teacher',
       status: 'active',
+      firebaseUid: 'google-uid-1',
       passwordNeedsReset: false,
     },
   ]),
@@ -42,6 +43,7 @@ jest.mock('../../../firebase.core', () => ({
     schoolId: 'globy-school',
     email: 'teacher@globy.test',
     teacherId: 'T001',
+    firebaseUid: 'google-uid-1',
     role: 'teacher',
     status: 'active',
   })),
@@ -64,8 +66,9 @@ describe('Firebase Google account linking', () => {
     expect(result.user.id).toBe('teacher-1');
     expect(firebaseCore.saveById).toHaveBeenCalledWith('users', 'teacher-1', expect.objectContaining({
       firebaseUid: 'google-uid-1',
-      authProvider: 'google.com',
-    }));
+      emailVerified: true,
+      invitationStatus: 'activated',
+    }), true);
   });
 
   test('rejects a Google token when the identifier belongs to another role', async () => {

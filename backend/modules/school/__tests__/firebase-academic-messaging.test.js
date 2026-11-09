@@ -109,6 +109,29 @@ function seedSchool(schoolId, classId, className, teacherId, studentId) {
   });
 }
 
+function addTeacherClass(schoolId, classId = 'class-b', className = 'Class B', teacherId = 'T003') {
+  records('classes').set(`${schoolId}:${classId}`, { schoolId, classId, name: className, teacherId });
+  records('teachers').set(`${schoolId}:${teacherId}`, {
+    schoolId,
+    teacherId,
+    username: teacherId,
+    fullName: `${teacherId} Teacher`,
+    assignedClasses: [classId, className],
+    status: 'active',
+  });
+  records('users').set(`${schoolId}:${teacherId}`, {
+    schoolId,
+    tenantId: schoolId,
+    username: teacherId,
+    teacherId,
+    fullName: `${teacherId} Teacher`,
+    role: 'teacher',
+    roles: ['teacher'],
+    status: 'active',
+    assignedClasses: [classId, className],
+  });
+}
+
 const teacherA = { userId: 'school-a:T001', tenantId: 'school-a', schoolId: 'school-a', username: 'T001', roles: ['teacher'] };
 const studentA = { userId: 'school-a:STU001', tenantId: 'school-a', schoolId: 'school-a', username: 'STU001', roles: ['student'] };
 const teacherB = { userId: 'school-b:T002', tenantId: 'school-b', schoolId: 'school-b', username: 'T002', roles: ['teacher'] };
@@ -144,6 +167,58 @@ describe('Firebase persistence for assignments, lessons, and workspace messages'
     expect(submissions.submissions).toEqual(submitted.submissions);
     await expect(schoolService.createAssignment('school-a', { classId: 'class-b' }, teacherA)).rejects.toThrow('not authorized');
     await expect(schoolService.listAssignments('school-b', {}, teacherA)).rejects.toThrow('School access denied');
+  });
+
+  test('teacher assignment reads stay owned and class-scoped, ignoring caller-supplied owner filters', async () => {
+    addTeacherClass('school-a');
+    const ownAssignment = await schoolService.createAssignment('school-a', {
+      id: 'other-assignment',
+      title: 'Owned assignment',
+      classId: 'class-a',
+      teacherId: 'T003',
+      createdBy: 'T003',
+      submissions: [{ studentId: 'STU001', text: 'forged submission' }],
+    }, teacherA);
+    const ownLesson = await schoolService.createLesson('school-a', {
+      id: 'other-lesson',
+      title: 'Owned lesson',
+      classId: 'class-a',
+      teacherId: 'T003',
+      createdBy: 'T003',
+    }, teacherA);
+    await firebaseCore.saveById('assignments', 'school-a:other-assignment', {
+      id: 'other-assignment',
+      schoolId: 'school-a',
+      classId: 'class-b',
+      teacherId: 'T003',
+      createdBy: 'T003',
+      submissions: [{ studentId: 'STU002', text: 'private submission' }],
+    }, false);
+    await firebaseCore.saveById('lessons', 'school-a:other-lesson', {
+      id: 'other-lesson',
+      schoolId: 'school-a',
+      classId: 'class-b',
+      teacherId: 'T003',
+      createdBy: 'T003',
+    }, false);
+
+    const assignments = await schoolService.listAssignments('school-a', { teacherId: 'T003' }, teacherA);
+    const lessons = await schoolService.listLessons('school-a', { teacherId: 'T003' }, teacherA);
+
+    expect(ownAssignment).toMatchObject({ teacherId: 'T001', createdBy: 'T001', submissions: [] });
+    expect(ownAssignment.id).not.toBe('other-assignment');
+    expect(ownLesson).toMatchObject({ teacherId: 'T001', createdBy: 'T001' });
+    expect(ownLesson.id).not.toBe('other-lesson');
+    expect(assignments.items.map((item) => item.id)).toEqual([ownAssignment.id]);
+    expect(lessons.items.map((item) => item.id)).toEqual([ownLesson.id]);
+    await expect(schoolService.updateAssignment('school-a', ownAssignment.id, {
+      classId: 'class-b',
+      className: 'Class B',
+    }, teacherA)).rejects.toThrow('not authorized');
+    await expect(schoolService.updateLesson('school-a', ownLesson.id, {
+      classId: 'class-b',
+      className: 'Class B',
+    }, teacherA)).rejects.toThrow('not authorized');
   });
 
   test('binds student assignment reads to the authenticated student and hides classmates submissions', async () => {
@@ -246,6 +321,34 @@ describe('Firebase persistence for assignments, lessons, and workspace messages'
     expect(reloadedLesson.content).toBe('Updated lesson content.');
     await expect(schoolService.createLesson('school-a', { classId: 'class-b' }, teacherA)).rejects.toThrow('not authorized');
     await expect(schoolService.listLessons('school-b', {}, teacherA)).rejects.toThrow('School access denied');
+  });
+
+  test('binds lesson reads to the authenticated student rather than a requested student ID', async () => {
+    addTeacherClass('school-a');
+    records('students').set('school-a:STU002', {
+      schoolId: 'school-a',
+      studentId: 'STU002',
+      username: 'STU002',
+      classId: 'class-b',
+      className: 'Class B',
+      status: 'active',
+    });
+    await schoolService.createLesson('school-a', { title: 'Class A lesson', classId: 'class-a' }, teacherA);
+    await firebaseCore.saveById('lessons', 'school-a:class-b-lesson', {
+      id: 'class-b-lesson',
+      schoolId: 'school-a',
+      title: 'Class B lesson',
+      classId: 'class-b',
+      className: 'Class B',
+    }, false);
+
+    const result = await schoolService.listLessonsForStudent(
+      'school-a',
+      { studentId: 'STU002' },
+      studentA,
+    );
+
+    expect(result.items.map((item) => item.title)).toEqual(['Class A lesson']);
   });
 
   test('does not report successful assignment creation when Firestore persistence fails', async () => {

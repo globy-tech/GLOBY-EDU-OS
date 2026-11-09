@@ -5,6 +5,8 @@
 const express = require('express');
 const authRoutes = require('./auth');
 const fileRoutes = require('./files');
+const accountProfileRoutes = require('./account-profile');
+const websiteCmsRoutes = require('./website-cms');
 const schoolRoutes = require('../modules/school/school.routes');
 const authMiddleware = require('../modules/auth/middleware/auth.middleware');
 const { roleGuard } = require('../modules/auth/middleware/role.middleware');
@@ -24,6 +26,8 @@ router.use('/auth', authRoutes);
 
 // Attach tenant-scoped Supabase storage routes to /api/v1/files.
 router.use('/files', fileRoutes);
+router.use('/account-profile', accountProfileRoutes);
+router.use('/website-cms', websiteCmsRoutes);
 
 // Attach the curriculum router to /api/v1/curriculum.
 const curriculumRoutes = require('./curriculum');
