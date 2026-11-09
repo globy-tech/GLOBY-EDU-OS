@@ -207,25 +207,37 @@ function buildAttendanceRoster(students = [], records = [], date = '', className
     });
 }
 
-function replaceAttendanceSession(records = [], roster = [], date = '', className = '', schoolId = '') {
+function replaceAttendanceSession(records = [], roster = [], date = '', className = '', schoolId = '', academicPeriod = {}) {
   const normalizedDate = String(date).slice(0, 10);
-  const keys = new Set(roster.map((entry) => `${normalizedDate}|${className}|${entry.studentId}`));
+  const sessionKey = (entry) => [
+    String(entry.date || '').slice(0, 10),
+    String(entry.className || '').trim().toLowerCase(),
+    String(entry.studentId || '').trim().toLowerCase(),
+  ].join('|');
+  const keys = new Set(roster.map((entry) => sessionKey({ date: normalizedDate, className, studentId: entry.studentId })));
   const retained = (Array.isArray(records) ? records : [])
-    .filter((record) => !keys.has(`${String(record.date || '').slice(0, 10)}|${record.className || ''}|${record.studentId || ''}`))
+    .filter((record) => !keys.has(sessionKey(record)))
     .map((record) => ({
       ...record,
       date: String(record.date || '').slice(0, 10),
       status: normalizeAttendanceStatus(record.status) || record.status,
     }));
-  return [...retained, ...roster.filter((entry) => normalizeAttendanceStatus(entry.status)).map((entry) => ({
-    schoolId,
-    date: normalizedDate,
-    className,
-    studentId: entry.studentId,
-    studentName: entry.student?.fullName || entry.student?.name || 'Student',
-    status: normalizeAttendanceStatus(entry.status),
-    recordedAt: new Date().toISOString(),
-  }))];
+  const submitted = new Map();
+  roster.filter((entry) => normalizeAttendanceStatus(entry.status)).forEach((entry) => {
+    const record = {
+      schoolId,
+      date: normalizedDate,
+      className,
+      studentId: entry.studentId,
+      studentName: entry.student?.fullName || entry.student?.name || 'Student',
+      status: normalizeAttendanceStatus(entry.status),
+      recordedAt: new Date().toISOString(),
+      ...(academicPeriod.academicYear ? { academicYear: academicPeriod.academicYear } : {}),
+      ...(academicPeriod.term ? { term: academicPeriod.term } : {}),
+    };
+    submitted.set(sessionKey(record), record);
+  });
+  return [...retained, ...submitted.values()];
 }
 
 export {

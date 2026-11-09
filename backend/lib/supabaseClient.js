@@ -1,5 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
-const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const fs = require('fs/promises');
 const path = require('path');
@@ -155,23 +155,35 @@ async function uploadSchoolFile(filePath, file, options = {}) {
   if (localQaPath) {
     await fs.mkdir(path.dirname(localQaPath), { recursive: true });
     await fs.writeFile(localQaPath, file, { flag: options.upsert === true ? 'w' : 'wx' });
+    if (options.returnMetadata === true) {
+      const metadata = await fs.stat(localQaPath);
+      return { filePath, storage: 'local-qa', size: metadata.size, mtimeMs: metadata.mtimeMs, ino: metadata.ino };
+    }
     return filePath;
   }
 
   if (isR2Configured()) {
     const client = getR2Client();
     const { bucket } = getR2Config();
-    await client.send(new PutObjectCommand({
+    const result = await client.send(new PutObjectCommand({
       Bucket: bucket,
       Key: filePath,
       Body: file,
       ContentType: options.contentType || 'application/octet-stream',
       ...(options.upsert === true ? {} : { IfNoneMatch: '*' }),
     }));
+    if (options.returnMetadata === true) {
+      return {
+        filePath,
+        storage: 'r2',
+        eTag: result.ETag,
+        versionId: result.VersionId,
+      };
+    }
     return filePath;
   }
 
-  const { error } = await getSupabaseClient()
+  const { data, error } = await getSupabaseClient()
     .storage
     .from(SUPABASE_BUCKET)
     .upload(filePath, file, {
@@ -180,7 +192,37 @@ async function uploadSchoolFile(filePath, file, options = {}) {
     });
 
   if (error) throw error;
+  if (options.returnMetadata === true) return { filePath, storage: 'supabase', objectId: data?.id };
   return filePath;
+}
+
+async function deleteSchoolFile(filePath, metadata = {}) {
+  const localQaPath = getLocalQaFilePath(filePath);
+  if (localQaPath) {
+    if (metadata.storage !== 'local-qa') throw new Error('Cannot safely remove the isolated QA upload without its creation metadata.');
+    const current = await fs.stat(localQaPath);
+    if (current.size !== metadata.size || current.mtimeMs !== metadata.mtimeMs || current.ino !== metadata.ino) {
+      throw new Error('The isolated QA upload changed after it was created and was not removed.');
+    }
+    await fs.unlink(localQaPath);
+    return true;
+  }
+
+  if (metadata.storage === 'r2') {
+    if (!metadata.eTag && !metadata.versionId) {
+      throw new Error('Cannot safely remove the R2 upload without its object ETag or version ID.');
+    }
+    const { bucket } = getR2Config();
+    await getR2Client().send(new DeleteObjectCommand({
+      Bucket: bucket,
+      Key: filePath,
+      ...(metadata.eTag ? { IfMatch: metadata.eTag } : {}),
+      ...(metadata.versionId ? { VersionId: metadata.versionId } : {}),
+    }));
+    return true;
+  }
+
+  throw new Error('The active storage provider does not support a safe conditional upload cleanup.');
 }
 
 async function createSchoolFileSignedUrl(filePath, expiresIn = 3600) {
@@ -241,6 +283,7 @@ module.exports = {
   getSchoolFilePublicUrl,
   getR2Config,
   uploadSchoolFile,
+  deleteSchoolFile,
   createSchoolFileSignedUrl,
   downloadSchoolFile,
 };

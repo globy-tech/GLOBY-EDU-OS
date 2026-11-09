@@ -13,6 +13,7 @@ describe('Cloudflare R2 write behavior', () => {
   let original;
 
   beforeEach(() => {
+    process.env.GLOBY_QA_MODE = 'false';
     original = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
     process.env.CLOUDFLARE_R2_ACCOUNT_ID = 'account-test';
     process.env.CLOUDFLARE_R2_ACCESS_KEY_ID = 'access-test';
@@ -48,5 +49,36 @@ describe('Cloudflare R2 write behavior', () => {
       Key: 'school-a/school-assets/logo.png',
     });
     expect(send.mock.calls[1][0].input.IfNoneMatch).toBeUndefined();
+  });
+
+  it('returns an ETag for a create-only upload and conditionally deletes only that object version', async () => {
+    const client = storage.getR2Client();
+    const send = jest.spyOn(client, 'send')
+      .mockResolvedValueOnce({ ETag: '"new-object-etag"', VersionId: 'new-version' })
+      .mockResolvedValueOnce({});
+
+    const uploaded = await storage.uploadSchoolFile('school-a/student-profile/photo.png', Buffer.from('image'), {
+      upsert: false,
+      returnMetadata: true,
+    });
+    await storage.deleteSchoolFile('school-a/student-profile/photo.png', uploaded);
+
+    expect(uploaded).toEqual({
+      filePath: 'school-a/student-profile/photo.png',
+      storage: 'r2',
+      eTag: '"new-object-etag"',
+      versionId: 'new-version',
+    });
+    expect(send.mock.calls[1][0].input).toMatchObject({
+      Bucket: 'school-files',
+      Key: 'school-a/student-profile/photo.png',
+      IfMatch: '"new-object-etag"',
+      VersionId: 'new-version',
+    });
+  });
+
+  it('refuses to delete an R2 object without conditional ownership metadata', async () => {
+    await expect(storage.deleteSchoolFile('school-a/student-profile/photo.png', { storage: 'r2' }))
+      .rejects.toThrow('Cannot safely remove the R2 upload without its object ETag or version ID.');
   });
 });

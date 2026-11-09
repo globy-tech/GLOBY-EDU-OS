@@ -6,6 +6,7 @@ import { MetricCard } from '../components/metric-card.js';
 import { SetupProgressIndicator } from '../components/setup-progress.js';
 import { AttendanceTrendChart, FeeCollectionChart, StudentGrowthChart, MonthlyRevenueChart, TeacherAttendanceChart } from '../components/charts.js';
 import { formatCurrencyValue, getSchoolCurrency } from '../utils/currency-utils.js';
+import { getAttendanceClassOptions, getAttendancePeriodOptions, getAttendanceStatusLabel, getAttendanceStudentOptions, summarizeAttendanceRecords } from '../utils/attendance-summary.mjs';
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -14,40 +15,6 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
-}
-
-function getAttendanceStatusLabel(status) {
-  const normalized = String(status || '').trim().toLowerCase();
-  if (normalized === 'present' || normalized === 'late') return 'Present';
-  if (normalized === 'absent' || normalized === 'excused') return 'Absent';
-  return '—';
-}
-
-function summarizeAttendanceRecords(records = [], date = new Date().toISOString().slice(0, 10)) {
-  const list = (Array.isArray(records) ? records : [])
-    .filter((entry) => String(entry.date || '').slice(0, 10) === date)
-    .map((entry) => ({ ...entry, status: getAttendanceStatusLabel(entry.status).toLowerCase() }))
-    .filter((entry) => entry.status === 'present' || entry.status === 'absent');
-  const counts = { present: 0, absent: 0 };
-
-  list.forEach((entry) => {
-    const normalized = String(entry.status || '').trim().toLowerCase();
-    if (normalized === 'present') counts.present += 1;
-    else if (normalized === 'absent') counts.absent += 1;
-  });
-
-  const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
-  return {
-    date,
-    records: list,
-    total,
-    counts,
-    presentRatio: total ? Math.round((counts.present / total) * 100) : 0,
-    statusSummary: [
-      { label: 'Present', count: counts.present, tone: 'emerald' },
-      { label: 'Absent', count: counts.absent, tone: 'rose' },
-    ],
-  };
 }
 
 function normalizeExamItems(records = []) {
@@ -236,6 +203,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
 
   const students = Array.isArray(sectionData.students) ? sectionData.students : [];
   const teachers = Array.isArray(sectionData.teachers) ? sectionData.teachers : [];
+  const classes = Array.isArray(sectionData.classes) ? sectionData.classes : Array.isArray(sectionData.school?.classes) ? sectionData.school.classes : [];
   const attendanceRecords = Array.isArray(sectionData.attendanceRecords) ? sectionData.attendanceRecords : [];
   const payments = Array.isArray(sectionData.payments) ? sectionData.payments : [];
   const financeCategories = Array.isArray(sectionData.financeCategories) ? sectionData.financeCategories : [];
@@ -256,7 +224,23 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
   const teacherActivityLoadError = sectionData.teacherActivityLoadError || '';
   const school = sectionData.school || summary || {};
   const attendanceDate = sectionData.attendanceViewDate || new Date().toISOString().slice(0, 10);
-  const attendanceSummary = summarizeAttendanceRecords(attendanceRecords, attendanceDate);
+  const attendanceClasses = getAttendanceClassOptions(classes);
+  const attendanceViewClass = sectionData.attendanceViewClass || 'all';
+  const attendanceStudents = getAttendanceStudentOptions(attendanceRecords);
+  const attendanceViewStudent = sectionData.attendanceViewStudent || 'all';
+  const attendanceTerms = getAttendancePeriodOptions(attendanceRecords, 'term');
+  const attendanceAcademicYears = getAttendancePeriodOptions(attendanceRecords, 'academicYear');
+  const attendanceViewTerm = sectionData.attendanceViewTerm || 'all';
+  const attendanceViewAcademicYear = sectionData.attendanceViewAcademicYear || 'all';
+  const attendanceSummary = summarizeAttendanceRecords(
+    attendanceRecords,
+    attendanceDate,
+    classes,
+    attendanceViewClass,
+    attendanceViewStudent,
+    attendanceViewTerm,
+    attendanceViewAcademicYear,
+  );
   const normalizedExamRecords = normalizeExamItems(examRecords.length ? examRecords : examSchedules);
   const normalizedExamResults = normalizeExamResults(examResults.length ? examResults : gradeEntries);
   const reportSheetResults = normalizedExamResults.filter((entry) => Array.isArray(entry.reportColumns) && Array.isArray(entry.reportCells));
@@ -834,7 +818,32 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
           <h2 class="mt-2 text-2xl font-semibold text-slate-900">Teacher-submitted attendance</h2>
           <p class="mt-3 text-sm text-slate-600">Review dated attendance records submitted by teachers. Only Present and Absent are recorded; School Authority can view and export records but cannot take attendance.</p>
           <div class="mt-4 flex flex-wrap items-end gap-3">
-            <label class="text-sm font-semibold text-slate-700">Attendance date<input id="school-attendance-view-date" type="date" value="${escapeHtml(attendanceSummary.date)}" class="mt-2 block rounded-2xl border border-slate-200 bg-white px-4 py-3 font-normal" /></label>
+            <label class="text-sm font-semibold text-slate-700">Attendance date<input id="school-attendance-view-date" type="date" value="${attendanceDate === 'all' ? '' : escapeHtml(attendanceDate)}" class="mt-2 block rounded-2xl border border-slate-200 bg-white px-4 py-3 font-normal" /></label>
+            <button type="button" id="school-attendance-view-all-dates" class="rounded-full border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700">All dates</button>
+            <label class="text-sm font-semibold text-slate-700">Class
+              <select id="school-attendance-view-class" class="mt-2 block min-w-48 rounded-2xl border border-slate-200 bg-white px-4 py-3 font-normal">
+                <option value="all" ${attendanceViewClass === 'all' ? 'selected' : ''}>All classes</option>
+                ${attendanceClasses.map((classOption) => `<option value="${escapeHtml(classOption.key)}" ${attendanceViewClass === classOption.key ? 'selected' : ''}>${escapeHtml(classOption.label)}</option>`).join('')}
+              </select>
+            </label>
+            <label class="text-sm font-semibold text-slate-700">Student
+              <select id="school-attendance-view-student" class="mt-2 block min-w-48 rounded-2xl border border-slate-200 bg-white px-4 py-3 font-normal">
+                <option value="all" ${attendanceViewStudent === 'all' ? 'selected' : ''}>All students</option>
+                ${attendanceStudents.map((studentOption) => `<option value="${escapeHtml(studentOption.key)}" ${attendanceViewStudent === studentOption.key ? 'selected' : ''}>${escapeHtml(studentOption.label)}</option>`).join('')}
+              </select>
+            </label>
+            ${attendanceTerms.length ? `<label class="text-sm font-semibold text-slate-700">Term
+              <select id="school-attendance-view-term" class="mt-2 block min-w-40 rounded-2xl border border-slate-200 bg-white px-4 py-3 font-normal">
+                <option value="all" ${attendanceViewTerm === 'all' ? 'selected' : ''}>All terms</option>
+                ${attendanceTerms.map((term) => `<option value="${escapeHtml(term.key)}" ${attendanceViewTerm === term.key ? 'selected' : ''}>${escapeHtml(term.label)}</option>`).join('')}
+              </select>
+            </label>` : ''}
+            ${attendanceAcademicYears.length ? `<label class="text-sm font-semibold text-slate-700">Academic year
+              <select id="school-attendance-view-year" class="mt-2 block min-w-40 rounded-2xl border border-slate-200 bg-white px-4 py-3 font-normal">
+                <option value="all" ${attendanceViewAcademicYear === 'all' ? 'selected' : ''}>All years</option>
+                ${attendanceAcademicYears.map((year) => `<option value="${escapeHtml(year.key)}" ${attendanceViewAcademicYear === year.key ? 'selected' : ''}>${escapeHtml(year.label)}</option>`).join('')}
+              </select>
+            </label>` : ''}
             <button type="button" data-school-export="attendance" class="rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700">Export CSV</button>
           </div>
         </div>
@@ -852,13 +861,15 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
             <div class="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p class="text-sm font-semibold text-slate-900">Attendance coverage for ${escapeHtml(attendanceSummary.date)}</p>
-                <p class="mt-1 text-sm text-slate-600">${attendanceSummary.total ? `${attendanceSummary.total} student attendance record${attendanceSummary.total === 1 ? '' : 's'} submitted for ${attendanceSummary.date}.` : `No teacher attendance has been submitted for ${attendanceSummary.date} yet.`}</p>
+                <p class="mt-1 text-sm text-slate-600">${attendanceSummary.coverage.classCount
+    ? `${attendanceSummary.coverage.submitted} of ${attendanceSummary.coverage.classCount} class${attendanceSummary.coverage.classCount === 1 ? '' : 'es'} submitted attendance${attendanceSummary.coverage.pending ? `; no matching submissions for ${attendanceSummary.coverage.pendingClassNames.join(', ')}` : ''}.`
+    : attendanceSummary.total ? `${attendanceSummary.total} student attendance record${attendanceSummary.total === 1 ? '' : 's'} submitted for ${attendanceSummary.date}.` : `No teacher attendance has been submitted for ${attendanceSummary.date} yet.`}${attendanceSummary.coverage.unknown ? ` ${attendanceSummary.coverage.unknown} record${attendanceSummary.coverage.unknown === 1 ? ' has' : 's have'} no class identity and could not be assigned.` : ''}</p>
               </div>
-              <span class="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-emerald-700">${attendanceSummary.total ? `${attendanceSummary.counts.present} present` : 'Pending'}</span>
+              <span class="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-emerald-700">${attendanceSummary.coverage.pending ? `${attendanceSummary.coverage.pending} pending` : attendanceSummary.total ? `${attendanceSummary.counts.present} present` : 'Pending'}</span>
             </div>
           </div>
           <div class="mt-6 space-y-3">
-            ${attendanceSummary.records.length ? attendanceSummary.records.slice(0, 8).map((entry) => `
+            ${attendanceSummary.records.length ? attendanceSummary.records.map((entry) => `
               <div class="rounded-2xl border border-slate-200 bg-white p-4">
                 <div class="flex flex-wrap items-center justify-between gap-3">
                   <div>
@@ -1394,6 +1405,10 @@ export function SchoolAuthorityDashboard(section = 'overview', schoolData = {}) 
     classes,
     announcements,
     attendanceRecords,
+    attendanceViewClass: schoolData.attendanceViewClass || 'all',
+    attendanceViewStudent: schoolData.attendanceViewStudent || 'all',
+    attendanceViewTerm: schoolData.attendanceViewTerm || 'all',
+    attendanceViewAcademicYear: schoolData.attendanceViewAcademicYear || 'all',
     payments: Array.isArray(school.payments) ? school.payments : Array.isArray(schoolData.payments) ? schoolData.payments : [],
     messages,
     reports,

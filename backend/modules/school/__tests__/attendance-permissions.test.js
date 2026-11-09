@@ -1,6 +1,8 @@
 jest.mock('../../../firebase.data', () => ({ isFirebaseDataConfigured: () => false }));
 jest.mock('../../../config/prisma.client', () => ({ __stub: true }));
 
+const useIsolatedSchoolStore = require('./isolated-school-store');
+const cleanupIsolatedSchoolStore = useIsolatedSchoolStore();
 const schoolService = require('../school.service');
 const schoolRouter = require('../school.controller');
 const tenantMiddleware = require('../middleware/tenant.middleware');
@@ -73,6 +75,10 @@ beforeEach(() => {
 afterEach(() => {
   delete global.__workspaceSnapshot;
   jest.restoreAllMocks();
+});
+
+afterAll(() => {
+  cleanupIsolatedSchoolStore();
 });
 
 describe('attendance role permissions', () => {

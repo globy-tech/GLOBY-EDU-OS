@@ -8,6 +8,10 @@ jest.mock('../../modules/auth/middleware/auth.middleware', () => (req, res, next
   next();
 });
 
+jest.mock('../../modules/school/fallback.school', () => ({
+  loadSchoolData: jest.fn(() => []),
+}));
+
 jest.mock('../../firebase.data', () => ({
   isFirebaseDataConfigured: jest.fn(() => true),
   getStorageBucket: jest.fn(),
@@ -61,6 +65,7 @@ jest.mock('../../modules/school/school.service', () => ({
 
 jest.mock('../../lib/supabaseClient', () => ({
   uploadSchoolFile: jest.fn(async () => {}),
+  deleteSchoolFile: jest.fn(async () => true),
   createSchoolFileSignedUrl: jest.fn(async () => 'https://signed.example.test/file'),
   isR2Configured: jest.fn(() => true),
   getR2ConfigurationStatus: jest.fn(() => ({ configured: true, missingVariables: [], invalidVariables: [] })),
@@ -74,6 +79,8 @@ const fileRoutes = require('../files');
 const firebaseSave = jest.fn(async () => {});
 const firebaseFile = {
   save: firebaseSave,
+  getMetadata: jest.fn(async () => [{ generation: 'firebase-generation-test' }]),
+  delete: jest.fn(async () => {}),
   getSignedUrl: jest.fn(async () => ['https://firebase-signed.example.test/file']),
 };
 
@@ -89,7 +96,14 @@ describe('production file storage routing', () => {
     firebaseData.getStorageBucket.mockReturnValue({
       file: jest.fn(() => firebaseFile),
     });
+    storage.uploadSchoolFile.mockReset().mockResolvedValue(undefined);
+    storage.deleteSchoolFile.mockReset().mockResolvedValue(true);
+    storage.createSchoolFileSignedUrl.mockReset().mockResolvedValue('https://signed.example.test/file');
+    schoolService.updateSchool.mockImplementation(async (id, updates) => Object.assign(global.__uploadSchool, updates));
     firebaseSave.mockClear();
+    firebaseFile.getMetadata.mockClear();
+    firebaseFile.delete.mockClear();
+    storage.deleteSchoolFile.mockClear();
     firebaseFile.getSignedUrl.mockClear();
     storage.isR2Configured.mockReturnValue(true);
     storage.getSchoolFilePublicUrl.mockReturnValue(null);
@@ -177,7 +191,7 @@ describe('production file storage routing', () => {
   }
 
   test('uploads to R2 without requiring a persistent public URL', async () => {
-    const response = await runRequest('POST', '/files/upload?filename=school-logo/photo.png', Buffer.from('image'));
+    const response = await runRequest('POST', '/files/upload?filename=school-logo/photo.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
     expect(response.status).toBe(201);
     expect(storage.uploadSchoolFile).toHaveBeenCalledWith('school-a/school-logo/photo.png', expect.any(Buffer), expect.objectContaining({
       contentType: 'image/png',
@@ -189,7 +203,7 @@ describe('production file storage routing', () => {
   test('uploads an authorized tenant file to R2 when production configuration is valid', async () => {
     storage.getSchoolFilePublicUrl.mockReturnValue('https://files.example.test/school-a/school-logo/photo.png');
 
-    const response = await runRequest('POST', '/files/upload?filename=school-logo/photo.png', Buffer.from('image'));
+    const response = await runRequest('POST', '/files/upload?filename=school-logo/photo.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
 
     expect(response.status).toBe(201);
     expect(storage.uploadSchoolFile).toHaveBeenCalledWith('school-a/school-logo/photo.png', expect.any(Buffer), expect.objectContaining({
@@ -199,11 +213,25 @@ describe('production file storage routing', () => {
     expect(firebaseData.getStorageBucket).not.toHaveBeenCalled();
   });
 
+  test('rejects invalid school logo image bytes before storage', async () => {
+    const response = await runRequest(
+      'POST',
+      '/files/upload?filename=school-logo/photo.png',
+      Buffer.from('not an image'),
+    );
+    const payload = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(payload.message).toMatch(/valid JPEG, PNG, GIF, or WebP image/);
+    expect(storage.uploadSchoolFile).not.toHaveBeenCalled();
+  });
+
   test('uses a create-only generation precondition for Firebase Storage uploads', async () => {
     process.env.NODE_ENV = 'test';
-    const response = await runRequest('POST', '/files/upload?filename=school-logo/photo.png', Buffer.from('image'));
+    const response = await runRequest('POST', '/files/upload?filename=school-logo/photo.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const payload = await response.json();
 
-    expect(response.status).toBe(201);
+    expect({ status: response.status, payload }).toMatchObject({ status: 201, payload: { status: 'ok' } });
     expect(firebaseSave).toHaveBeenCalledWith(expect.any(Buffer), expect.objectContaining({
       preconditionOpts: { ifGenerationMatch: 0 },
     }));
@@ -426,7 +454,7 @@ describe('production file storage routing', () => {
     const response = await runRequest(
       'POST',
       '/files/upload?filename=school-cover/cover.png&ownerType=school&ownerId=school-a&ownerField=coverImagePath',
-      Buffer.from('image')
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
     );
 
     expect(response.status).toBe(201);
@@ -455,7 +483,7 @@ describe('production file storage routing', () => {
     global.__uploadSchool.schoolId = 'school-b';
     storage.getSchoolFilePublicUrl.mockReturnValue('https://files.example.test/school-b/school-logo/photo.png');
 
-    const response = await runRequest('POST', '/files/upload?schoolId=school-a&filename=school-logo/photo.png', Buffer.from('image'));
+    const response = await runRequest('POST', '/files/upload?schoolId=school-a&filename=school-logo/photo.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
 
     expect(response.status).toBe(201);
     expect(storage.uploadSchoolFile).toHaveBeenCalledWith('school-b/school-logo/photo.png', expect.any(Buffer), expect.any(Object));
@@ -465,11 +493,95 @@ describe('production file storage routing', () => {
     storage.getSchoolFilePublicUrl.mockReturnValue('https://files.example.test/school-a/school-logo/photo.png');
     storage.uploadSchoolFile.mockRejectedValue(new Error('R2 write failed'));
 
-    const response = await runRequest('POST', '/files/upload?filename=school-logo/photo.png', Buffer.from('image'));
+    const response = await runRequest('POST', '/files/upload?filename=school-logo/photo.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
     const payload = await response.json();
 
     expect(response.status).toBe(500);
     expect(payload.status).toBe('error');
+  });
+
+  test('does not report success when the uploaded file reference cannot be persisted', async () => {
+    storage.uploadSchoolFile.mockResolvedValue({ storage: 'r2', eTag: '"test-etag"' });
+    global.__uploadSchool.logoPath = 'school-logo/previous.png';
+    schoolService.updateSchool.mockRejectedValue(new Error('School update failed'));
+
+    const response = await runRequest(
+      'POST',
+      '/files/upload?filename=school-logo/photo.png',
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+    const payload = await response.json();
+
+    expect(storage.uploadSchoolFile).toHaveBeenCalled();
+    expect(schoolService.updateSchool).toHaveBeenCalled();
+    expect(response.status).toBe(500);
+    expect(payload.status).toBe('error');
+    expect(global.__uploadSchool.logoPath).toBe('school-logo/previous.png');
+    expect(storage.deleteSchoolFile).toHaveBeenCalledWith(
+      'school-a/school-logo/photo.png',
+      { storage: 'r2', eTag: '"test-etag"' },
+    );
+    expect(global.__uploadSchool.logoPath).not.toBe('school-logo/photo.png');
+  });
+
+  test('conditionally removes only the newly created Firebase generation when reference saving fails', async () => {
+    process.env.NODE_ENV = 'test';
+    global.__uploadSchool.logoPath = 'school-logo/previous.png';
+    schoolService.updateSchool.mockRejectedValue(new Error('School update failed'));
+
+    const response = await runRequest(
+      'POST',
+      '/files/upload?filename=school-logo/photo.png',
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+    const payload = await response.json();
+
+    expect(response.status).toBe(500);
+    expect(payload.status).toBe('error');
+    expect(firebaseFile.delete).toHaveBeenCalledWith({
+      ignoreNotFound: true,
+      ifGenerationMatch: 'firebase-generation-test',
+    });
+    expect(global.__uploadSchool.logoPath).toBe('school-logo/previous.png');
+  });
+
+  test('does not remove an uploaded object if another record references it after persistence fails', async () => {
+    storage.uploadSchoolFile.mockResolvedValue({ storage: 'r2', eTag: '"test-etag"' });
+    global.__uploadSchool.logoPath = 'school-logo/previous.png';
+    schoolService.updateSchool.mockImplementation(async (id, updates) => {
+      global.__uploadSchool.students[0].profilePhotoPath = updates.logoPath;
+      throw new Error('Persistence response was lost');
+    });
+
+    const response = await runRequest(
+      'POST',
+      '/files/upload?filename=school-logo/photo.png',
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+    const payload = await response.json();
+
+    expect(response.status).toBe(500);
+    expect(payload.status).toBe('error');
+    expect(global.__uploadSchool.students[0].profilePhotoPath).toBe('school-logo/photo.png');
+    expect(storage.deleteSchoolFile).not.toHaveBeenCalled();
+  });
+
+  test('returns a conflict when create-only storage rejects an existing object key', async () => {
+    const collision = Object.assign(new Error('Object already exists'), {
+      name: 'PreconditionFailed',
+      $metadata: { httpStatusCode: 412 },
+    });
+    storage.uploadSchoolFile.mockRejectedValue(collision);
+
+    const response = await runRequest(
+      'POST',
+      '/files/upload?filename=school-logo/photo.png',
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+    const payload = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(payload.message).toMatch(/already exists.*Choose a new filename/i);
   });
 
   test('reports missing and invalid R2 variable names without exposing configuration values', async () => {
@@ -480,7 +592,7 @@ describe('production file storage routing', () => {
       invalidVariables: ['CLOUDFLARE_R2_ENDPOINT'],
     });
 
-    const response = await runRequest('POST', '/files/upload?filename=school-logo/photo.png', Buffer.from('image'));
+    const response = await runRequest('POST', '/files/upload?filename=school-logo/photo.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
     const payload = await response.json();
 
     expect(response.status).toBe(503);
@@ -575,7 +687,7 @@ describe('production file storage routing', () => {
     process.env.RENDER_SERVICE_ID = 'render-qa-test';
     storage.isR2Configured.mockReturnValue(false);
 
-    const upload = await runRequest('POST', '/files/upload?filename=school-logo/photo.png', Buffer.from('image'));
+    const upload = await runRequest('POST', '/files/upload?filename=school-logo/photo.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
     const retrieval = await runRequest('GET', '/files/student-profile/photo.png');
 
     expect(upload.status).toBe(503);

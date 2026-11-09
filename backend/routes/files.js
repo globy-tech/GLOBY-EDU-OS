@@ -6,6 +6,7 @@ const firebaseData = require('../firebase.data');
 const { isProductionRuntime } = require('../config/app-url.config');
 const {
   uploadSchoolFile,
+  deleteSchoolFile,
   createSchoolFileSignedUrl,
   isR2Configured,
   getR2ConfigurationStatus,
@@ -41,7 +42,7 @@ function getUserRoles(req) {
 
 function validateProfileImage(req, filename, ownerType) {
   const prefix = filename.split('/')[0];
-  if (!['student-profile', 'teacher-profile', 'profilePhoto'].includes(prefix)) return null;
+  if (!['student-profile', 'teacher-profile', 'profilePhoto', 'school-logo', 'school-cover'].includes(prefix)) return null;
 
   const roles = getUserRoles(req);
   const isStudentPhoto = ownerType === 'student' || prefix === 'student-profile';
@@ -282,6 +283,8 @@ async function getAuthorizedSchool(req) {
 }
 
 router.post('/upload', authMiddleware, parseUploadBody, tenantMiddleware, async (req, res) => {
+  let uploadedFileMetadata;
+  let firebaseFile;
   try {
     const filename = normalizeRelativePath(req.query.filename);
     const scopedPath = getScopedFilePath(req, filename);
@@ -310,32 +313,78 @@ router.post('/upload', authMiddleware, parseUploadBody, tenantMiddleware, async 
       if (!isR2Configured()) {
         return res.status(503).json({ status: 'error', message: getR2ConfigurationMessage() });
       }
-      await uploadSchoolFile(scopedPath, req.body, {
+      uploadedFileMetadata = await uploadSchoolFile(scopedPath, req.body, {
         contentType: req.get('content-type') || 'application/octet-stream',
         upsert: false,
+        returnMetadata: true,
       });
     } else if (firebaseData.isFirebaseDataConfigured()) {
-      const file = firebaseData.getStorageBucket().file(`tenants/${scopedPath}`);
-      await file.save(req.body, {
+      firebaseFile = firebaseData.getStorageBucket().file(`tenants/${scopedPath}`);
+      await firebaseFile.save(req.body, {
         contentType: req.get('content-type') || 'application/octet-stream',
         resumable: false,
         validation: 'md5',
         preconditionOpts: { ifGenerationMatch: 0 },
       });
+      try {
+        const [metadata] = await firebaseFile.getMetadata();
+        uploadedFileMetadata = { storage: 'firebase', generation: metadata.generation };
+      } catch (metadataError) {
+        console.error('Unable to capture Firebase generation metadata for safe upload cleanup.', metadataError);
+      }
     } else {
-      await uploadSchoolFile(scopedPath, req.body, {
+      uploadedFileMetadata = await uploadSchoolFile(scopedPath, req.body, {
         contentType: req.get('content-type') || 'application/octet-stream',
         upsert: false,
+        returnMetadata: true,
       });
     }
 
-    await persistFileReference(school, owner, filename, req.user);
+    try {
+      await persistFileReference(school, owner, filename, req.user);
+    } catch (referenceError) {
+      let cleanupError;
+      try {
+        const latestSchool = await schoolService.getSchoolBySchoolId(school.schoolId || school.id);
+        if (!latestSchool) throw new Error('Unable to verify whether the uploaded file has an active reference.');
+        if (!getExistingPathReferences(latestSchool, filename).length) {
+          if (firebaseFile) {
+            if (!uploadedFileMetadata?.generation) {
+              throw new Error('Cannot safely remove the Firebase upload without its object generation.');
+            }
+            await firebaseFile.delete({
+              ignoreNotFound: true,
+              ifGenerationMatch: uploadedFileMetadata.generation,
+            });
+          } else {
+            await deleteSchoolFile(scopedPath, uploadedFileMetadata || {});
+          }
+        }
+      } catch (error) {
+        cleanupError = error;
+        console.error('Unable to safely clean up an upload after its file reference could not be saved.', error);
+      }
+      return res.status(500).json({
+        status: 'error',
+        message: cleanupError
+          ? 'The file reference could not be saved, and storage cleanup could not be confirmed. Contact support before retrying.'
+          : 'The file reference could not be saved. The upload was removed if it had no saved references.',
+      });
+    }
     return res.status(201).json({
       status: 'ok',
       path: filename,
       tenantId: req.user.tenantId || req.user.schoolId,
     });
   } catch (error) {
+    if (error?.$metadata?.httpStatusCode === 412
+      || error?.statusCode === 412
+      || ['PreconditionFailed', 'ConditionalCheckFailedException', 'ObjectAlreadyExists'].includes(error?.name)) {
+      return res.status(409).json({
+        status: 'error',
+        message: 'A file already exists at this storage path. Choose a new filename and try again.',
+      });
+    }
     return res.status(500).json({ status: 'error', message: 'Unable to process the file upload.' });
   }
 });

@@ -43,6 +43,7 @@ model Tenant {
   payments         Json     @default("[]")
   receipts         Json     @default("[]")
   refunds          Json     @default("[]")
+  attendanceRecords Json    @default("[]")
   status           String   @default("trial") // active | suspended | trial
 
   departments      Department[]

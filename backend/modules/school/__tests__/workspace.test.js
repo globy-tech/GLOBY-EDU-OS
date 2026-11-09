@@ -259,17 +259,24 @@ describe('workspace messaging and support', () => {
 
     const user = { userId: `${schoolId}:T001`, roles: ['teacher'] };
     const first = schoolService.updateTeacherWorkspace(school, user, {
-      attendanceRecords: [{ date: '2026-09-05', className: 'JHS 3', studentId: 'STU001', studentName: 'Assigned Student', status: 'present' }],
+      attendanceRecords: [{
+        date: '2026-09-05', className: 'JHS 3', studentId: 'STU001', studentName: 'Assigned Student', status: 'present',
+        submittedBy: 'untrusted-client', submittedAt: '2000-01-01T00:00:00.000Z',
+      }],
       examResults: [{ studentId: 'STU001', student: 'Assigned Student', className: 'JHS 3', subject: 'Math', exam: 'Quiz 1', mark: 8, maxMarks: 10 }],
       teacherProfile: { position: 'Teacher' },
     });
     schoolService.updateTeacherWorkspace(first, user, {
-      attendanceRecords: [{ date: '2026-09-05', className: 'JHS 3', studentId: 'STU001', studentName: 'Assigned Student', status: 'late' }],
+      attendanceRecords: [{
+        date: '2026-09-05', className: 'JHS 3', studentId: 'STU001', studentName: 'Assigned Student', status: 'late',
+        correctedBy: 'untrusted-client', correctedAt: '2000-01-01T00:00:00.000Z',
+      }],
       examResults: [{ studentId: 'STU001', student: 'Assigned Student', className: 'JHS 3', subject: 'Math', exam: 'Quiz 1', mark: 9, maxMarks: 10 }],
     });
     schoolService.updateTeacherWorkspace(first, user, {
       attendanceRecords: [
         { date: '2026-09-06', className: 'JHS 3', studentId: 'STU001', studentName: 'Assigned Student', status: 'absent' },
+        { date: '2026-09-06', className: 'jhs 3', studentId: 'stu001', studentName: 'Assigned Student', status: 'present' },
         { date: '2026-09-07', className: 'JHS 3', studentId: 'STU001', studentName: 'Assigned Student', status: 'unknown' },
         { date: 'not-a-date', className: 'JHS 3', studentId: 'STU001', studentName: 'Assigned Student', status: 'present' },
       ],
@@ -279,8 +286,18 @@ describe('workspace messaging and support', () => {
     });
 
     expect(first.attendanceRecords).toHaveLength(3);
-    expect(first.attendanceRecords.find((entry) => entry.studentId === 'STU001' && entry.date === '2026-09-05').status).toBe('late');
-    expect(first.attendanceRecords.find((entry) => entry.studentId === 'STU001' && entry.date === '2026-09-06').status).toBe('absent');
+    const correctedAttendance = first.attendanceRecords.find((entry) => entry.studentId === 'STU001' && entry.date === '2026-09-05');
+    expect(correctedAttendance.status).toBe('late');
+    expect(correctedAttendance.submittedBy).toBe(user.userId);
+    expect(correctedAttendance.submittedAt).not.toBe('2000-01-01T00:00:00.000Z');
+    expect(correctedAttendance.correctedBy).toBe(user.userId);
+    expect(correctedAttendance.correctedAt).not.toBe('2000-01-01T00:00:00.000Z');
+    expect(correctedAttendance.history).toEqual([
+      expect.objectContaining({ action: 'submitted', actorId: user.userId, status: 'present' }),
+      expect.objectContaining({ action: 'corrected', actorId: user.userId, previousStatus: 'present', status: 'late' }),
+    ]);
+    expect(first.attendanceRecords.filter((entry) => entry.studentId.toLowerCase() === 'stu001' && entry.date === '2026-09-06')).toHaveLength(1);
+    expect(first.attendanceRecords.find((entry) => entry.studentId.toLowerCase() === 'stu001' && entry.date === '2026-09-06').status).toBe('present');
     expect(first.attendanceRecords.find((entry) => entry.studentId === 'STU002').status).toBe('absent');
     expect(first.examResults).toHaveLength(2);
     expect(first.examResults.find((entry) => entry.studentId === 'STU001').mark).toBe(9);

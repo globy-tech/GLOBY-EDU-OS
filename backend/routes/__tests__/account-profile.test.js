@@ -40,6 +40,7 @@ jest.mock('../../modules/school/fallback.school', () => ({
 }));
 jest.mock('../../lib/supabaseClient', () => ({
   uploadSchoolFile: jest.fn(),
+  deleteSchoolFile: jest.fn(),
   createSchoolFileSignedUrl: jest.fn(),
   isR2Configured: jest.fn(() => true),
   getR2ConfigurationStatus: () => ({ missingVariables: [], invalidVariables: [] }),
@@ -86,6 +87,9 @@ beforeEach(() => {
   loadSchoolData.mockClear();
   saveSchoolData.mockClear();
   storage.uploadSchoolFile.mockClear();
+  storage.deleteSchoolFile.mockClear();
+  storage.uploadSchoolFile.mockResolvedValue({ storage: 'r2', eTag: '"profile-photo-etag"' });
+  storage.deleteSchoolFile.mockResolvedValue(true);
   storage.isR2Configured.mockReturnValue(true);
   storage.createSchoolFileSignedUrl.mockImplementation(async (path) => `https://storage.example/${path}`);
 });
@@ -116,6 +120,28 @@ describe('authenticated account profile photos', () => {
     const retrieved = await fetch(baseUrl);
     expect(retrieved.status).toBe(200);
     expect(await retrieved.json()).toMatchObject({ status: 'ok', path: uploadResult.path, url: `https://storage.example/${uploadResult.path}` });
+  });
+
+  test('removes a newly uploaded photo if its download link cannot be prepared before saving the profile reference', async () => {
+    storage.createSchoolFileSignedUrl.mockRejectedValue(new Error('Signing failed'));
+
+    const response = await fetch(baseUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'image/png' },
+      body: PNG,
+    });
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({
+      status: 'error',
+      message: 'Unable to create a download link for the profile photo.',
+    });
+    expect(schools[0].users[0].profilePhotoPath).toBeUndefined();
+    expect(storage.deleteSchoolFile).toHaveBeenCalledWith(
+      expect.stringMatching(/^account-profile\/school_authority\/[a-f0-9]{64}\//),
+      { storage: 'r2', eTag: '"profile-photo-etag"' },
+    );
+    expect(saveSchoolData).not.toHaveBeenCalled();
   });
 
   test('allows a tenantless platform admin and rejects a tenant-bound admin', async () => {

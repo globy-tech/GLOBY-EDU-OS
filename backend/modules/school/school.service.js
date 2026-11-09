@@ -2462,10 +2462,60 @@ function updateTeacherWorkspace(school, user = {}, updates = {}) {
         && allowedClassNames.has(className)
         && Boolean(student && getStudentClassAliases(student).has(className));
     });
-    const managedKeys = new Set(validSubmitted.map((entry) => `${entry.date || ''}|${entry.className || ''}|${entry.studentId || ''}`));
+    const actorId = String(user?.id || user?.uid || user?.userId || user?.teacherId || user?.email || 'unknown').trim();
+    const submittedAt = new Date().toISOString();
+    const getAttendanceRecordKey = (entry) => [
+      String(entry.date || '').slice(0, 10),
+      String(entry.className || entry.classId || '').trim().toLowerCase(),
+      String(entry.studentId || '').trim().toLowerCase(),
+    ].join('|');
+    const currentByKey = new Map(normalizeAttendanceRecords(currentAttendance).map((entry) => [getAttendanceRecordKey(entry), entry]));
+    const submittedByKey = new Map(validSubmitted.map((entry) => [getAttendanceRecordKey(entry), entry]));
+    const attributedSubmitted = [...submittedByKey.entries()].map(([key, entry]) => {
+      const previous = currentByKey.get(key);
+      const changedFields = previous
+        ? Object.keys(entry).filter((field) => !['history', 'submittedBy', 'submittedAt', 'updatedBy', 'updatedAt', 'correctedBy', 'correctedAt'].includes(field)
+          && previous[field] !== entry[field])
+        : [];
+      if (previous && changedFields.length === 0) {
+        return {
+          ...previous,
+          ...entry,
+          submittedBy: previous.submittedBy,
+          submittedAt: previous.submittedAt,
+          updatedBy: previous.updatedBy,
+          updatedAt: previous.updatedAt,
+          correctedBy: previous.correctedBy,
+          correctedAt: previous.correctedAt,
+          history: previous.history,
+        };
+      }
+
+      const revision = previous
+        ? {
+          action: 'corrected',
+          actorId,
+          at: submittedAt,
+          previousStatus: previous.status,
+          status: entry.status,
+          changedFields,
+        }
+        : { action: 'submitted', actorId, at: submittedAt, status: entry.status };
+      const history = [...(Array.isArray(previous?.history) ? previous.history : []), revision];
+      return {
+        ...entry,
+        submittedBy: previous ? (previous.submittedBy || 'legacy-unattributed') : actorId,
+        submittedAt: previous ? (previous.submittedAt || null) : submittedAt,
+        updatedBy: actorId,
+        updatedAt: submittedAt,
+        ...(previous ? { correctedBy: actorId, correctedAt: submittedAt } : {}),
+        history,
+      };
+    });
+    const managedKeys = new Set(attributedSubmitted.map(getAttendanceRecordKey));
     school.attendanceRecords = normalizeAttendanceRecords(currentAttendance)
-      .filter((entry) => !managedKeys.has(`${entry.date || ''}|${entry.className || ''}|${entry.studentId || ''}`))
-      .concat(validSubmitted);
+      .filter((entry) => !managedKeys.has(getAttendanceRecordKey(entry)))
+      .concat(attributedSubmitted);
   }
   if (updates.examResults !== undefined) {
     const submitted = Array.isArray(updates.examResults) ? updates.examResults : [];

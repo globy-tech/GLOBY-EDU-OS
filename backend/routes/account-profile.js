@@ -6,6 +6,7 @@ const { loadSchoolData, saveSchoolData } = require('../modules/school/fallback.s
 const { isProductionRuntime } = require('../config/app-url.config');
 const {
   uploadSchoolFile,
+  deleteSchoolFile,
   createSchoolFileSignedUrl,
   isR2Configured,
   getR2ConfigurationStatus,
@@ -121,6 +122,14 @@ async function resolveProfile(req) {
   return { ...stored, profileRole };
 }
 
+async function removeUnreferencedProfileUpload(req, photoPath, metadata) {
+  const latest = await loadAuthenticatedAccount(req);
+  if (!latest) throw new Error('Unable to verify the profile photo reference after a failed save.');
+  if (String(latest.account.profilePhotoPath || '') === photoPath) return false;
+  await deleteSchoolFile(photoPath, metadata || {});
+  return true;
+}
+
 function sendParserError(error, res, next) {
   if (!error) return next();
   if (error.type === 'entity.too.large') {
@@ -168,9 +177,41 @@ router.post('/photo', authMiddleware, (req, res, next) => {
     const extension = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' }[contentType];
     const accountIdHash = crypto.createHash('sha256').update(String(req.user.userId)).digest('hex');
     const photoPath = `account-profile/${profile.profileRole}/${accountIdHash}/${crypto.randomUUID()}.${extension}`;
-    await uploadSchoolFile(photoPath, req.body, { contentType, upsert: false });
-    await profile.save(photoPath);
-    const url = await createSchoolFileSignedUrl(photoPath, 3600);
+    const uploadMetadata = await uploadSchoolFile(photoPath, req.body, {
+      contentType,
+      upsert: false,
+      returnMetadata: true,
+    });
+    let url;
+    try {
+      url = await createSchoolFileSignedUrl(photoPath, 3600);
+    } catch (error) {
+      try {
+        await removeUnreferencedProfileUpload(req, photoPath, uploadMetadata);
+      } catch (cleanupError) {
+        console.error('Unable to safely clean up an account photo after its download link could not be created.', cleanupError);
+        return res.status(500).json({
+          status: 'error',
+          message: 'A download link could not be created and storage cleanup could not be confirmed. Contact support before retrying.',
+        });
+      }
+      return res.status(500).json({ status: 'error', message: 'Unable to create a download link for the profile photo.' });
+    }
+
+    try {
+      await profile.save(photoPath);
+    } catch (error) {
+      try {
+        await removeUnreferencedProfileUpload(req, photoPath, uploadMetadata);
+      } catch (cleanupError) {
+        console.error('Unable to safely clean up an account photo after its profile reference could not be saved.', cleanupError);
+        return res.status(500).json({
+          status: 'error',
+          message: 'The profile photo could not be saved, and storage cleanup could not be confirmed. Contact support before retrying.',
+        });
+      }
+      return res.status(500).json({ status: 'error', message: 'Unable to save your profile photo. Please try again.' });
+    }
     return res.status(201).json({ status: 'ok', path: photoPath, url, expiresIn: 3600 });
   } catch (error) {
     return res.status(500).json({ status: 'error', message: 'Unable to save your profile photo. Please try again.' });

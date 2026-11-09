@@ -147,6 +147,55 @@ beforeEach(() => {
 afterEach(() => jest.restoreAllMocks());
 
 describe('Firebase persistence for assignments, lessons, and workspace messages', () => {
+  test('persists teacher attendance across Firebase reload without undefined fields', async () => {
+    const school = await firebaseCore.getSchoolAggregate('school-a');
+    const attendanceRecord = {
+      studentId: 'STU001',
+      className: 'Class A',
+      date: '2026-10-20',
+      status: 'present',
+      note: undefined,
+    };
+
+    schoolService.updateTeacherWorkspace(school, teacherA, {
+      attendanceRecords: [attendanceRecord],
+    });
+    await schoolService.updateSchool(school.id, {
+      attendanceRecords: school.attendanceRecords,
+    });
+
+    const reloadedSchool = await firebaseCore.getSchoolAggregate('school-a');
+    const otherSchool = await firebaseCore.getSchoolAggregate('school-b');
+
+    expect(reloadedSchool.attendanceRecords).toHaveLength(1);
+    expect(reloadedSchool.attendanceRecords[0]).toMatchObject({
+      studentId: 'STU001',
+      className: 'Class A',
+      date: '2026-10-20',
+      status: 'present',
+    });
+    expect(Object.keys(reloadedSchool.attendanceRecords[0]).sort()).toEqual([
+      'className',
+      'date',
+      'history',
+      'status',
+      'studentId',
+      'submittedAt',
+      'submittedBy',
+      'updatedAt',
+      'updatedBy',
+    ]);
+    expect(reloadedSchool.attendanceRecords[0].history).toHaveLength(1);
+    expect(reloadedSchool.attendanceRecords[0].history[0]).toMatchObject({
+      action: 'submitted',
+      status: 'present',
+    });
+    expect(records('tenants').get('school-a')).not.toHaveProperty('attendanceRecords.0.note');
+    expect(otherSchool.attendanceRecords).toBeUndefined();
+    expect(fallbackSchool.loadSchoolData).not.toHaveBeenCalled();
+    expect(fallbackSchool.saveSchoolData).not.toHaveBeenCalled();
+  });
+
   test('persists assignments for reload, scopes student reads, and rejects unauthorized access', async () => {
     const assignment = await schoolService.createAssignment('school-a', {
       title: 'Class A assignment',

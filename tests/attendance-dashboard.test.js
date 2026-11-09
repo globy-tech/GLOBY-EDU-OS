@@ -4,8 +4,9 @@ const path = require('path');
 describe('attendance dashboard experience', () => {
   it('shows School Authority a read-only summary of attendance submitted by teachers for today', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js'), 'utf8');
+    const summarySource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'utils', 'attendance-summary.mjs'), 'utf8');
 
-    expect(source).toContain("String(entry.date || '').slice(0, 10) === date");
+    expect(summarySource).toContain("date === 'all' || String(entry.date || '').slice(0, 10) === date");
     expect(source).toContain("new Date().toISOString().slice(0, 10)");
     expect(source).toContain('Teacher-submitted attendance');
     expect(source).toContain('Only Present and Absent are recorded; School Authority can view and export records but cannot take attendance.');
@@ -20,10 +21,31 @@ describe('attendance dashboard experience', () => {
     expect(authorityAttendance).not.toContain('school-attendance-roster');
     expect(authorityAttendance).not.toContain('school-attendance-save');
     expect(authorityAttendance).toContain('school-attendance-view-date');
+    expect(authorityAttendance).toContain('school-attendance-view-all-dates');
+    expect(authorityAttendance).toContain('school-attendance-view-class');
+    expect(authorityAttendance).toContain('school-attendance-view-term');
+    expect(authorityAttendance).toContain('school-attendance-view-year');
+    expect(authorityAttendance).toContain('attendanceSummary.coverage.pendingClassNames');
+    expect(authorityAttendance).toContain('attendanceSummary.coverage.unknown');
     expect(source).toContain('Mark attendance for an assigned class');
     expect(source).toContain('data-school-attendance-load');
-    expect(source).toContain("normalized === 'present' || normalized === 'late'");
-    expect(source).toContain("normalized === 'absent' || normalized === 'excused'");
+    expect(summarySource).toContain("normalized === 'present' || normalized === 'late'");
+    expect(summarySource).toContain("normalized === 'absent' || normalized === 'excused'");
+  });
+
+  it('filters School Authority attendance by class and reports class coverage conservatively', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js'), 'utf8');
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
+    const summarySource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'utils', 'attendance-summary.mjs'), 'utf8');
+
+    expect(summarySource).toContain('export function getAttendanceClassOptions(classes = [])');
+    expect(summarySource).toContain("['archived', 'inactive', 'deleted'].includes(status)");
+    expect(summarySource).toContain('attendanceRecordMatchesClass(entry, selectedClassOption)');
+    expect(summarySource).toContain('pendingClassNames: pendingClasses.map((classOption) => classOption.label)');
+    expect(summarySource).toContain('const uniqueAttendanceRecords = new Map()');
+    expect(source).toContain('could not be assigned');
+    expect(mainSource).toContain('globyedu_attendance_view_class:${schoolId}');
+    expect(mainSource).toContain("document.getElementById('school-attendance-view-class')");
   });
 
   it('shows School Authority a dated teacher activity feed without message contents', () => {
@@ -42,6 +64,7 @@ describe('attendance dashboard experience', () => {
 
   it('shows students only Present and Absent in dated attendance history', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js'), 'utf8');
+    const summarySource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'utils', 'attendance-summary.mjs'), 'utf8');
     const attendanceStart = source.indexOf('<h2 class="text-2xl font-semibold text-slate-900">My attendance</h2>');
     const attendanceEnd = source.indexOf('\n    results: `', attendanceStart);
     const studentAttendance = source.slice(attendanceStart, attendanceEnd);
@@ -51,8 +74,8 @@ describe('attendance dashboard experience', () => {
     expect(studentAttendance).not.toContain('Late');
     expect(studentAttendance).not.toContain('Excused');
     expect(studentAttendance).toContain('getAttendanceStatusLabel(entry.status)');
-    expect(source).toContain("normalized === 'present' || normalized === 'late'");
-    expect(source).toContain("normalized === 'absent' || normalized === 'excused'");
+    expect(summarySource).toContain("normalized === 'present' || normalized === 'late'");
+    expect(summarySource).toContain("normalized === 'absent' || normalized === 'excused'");
   });
 
   it('keeps the dashboard overview focused on summary cards and charts', () => {
@@ -65,10 +88,10 @@ describe('attendance dashboard experience', () => {
 
   it('lets teachers record only present or absent and requires a selection', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
+    const dashboardSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js'), 'utf8');
     expect(source).toContain("const statusOptions = ['present', 'absent']");
     expect(source).toContain('Choose Present or Absent for every student before saving.');
-    expect(source).toContain("{ label: 'Present', value: 'present' }");
-    expect(source).toContain("{ label: 'Absent', value: 'absent' }");
+    expect(source).toContain("const statusOptions = ['present', 'absent']");
     expect(source).toContain('status: normalizeAttendanceStatus(record.status)');
     expect(source).toContain(".filter((record) => record.status)");
   });

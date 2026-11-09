@@ -32,7 +32,7 @@ describe('marketing frontend syntax', () => {
     expect(source).toContain('profile-principal-signature-file');
   });
 
-  it('wires mobile image pickers for both camera and gallery sources', () => {
+  it('wires mobile image pickers and live camera capture', () => {
     const mainPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js');
     const registrationPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'register-wizard.js');
     const dashboardPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js');
@@ -43,8 +43,14 @@ describe('marketing frontend syntax', () => {
     expect(mainSource).toContain('accept="${field.accept || \'image/*\'}"');
     expect(registrationSource).toContain('id="school-logo-input" type="file" accept="image/*" class="hidden"');
     expect(dashboardSource).toContain('type="file" accept="image/jpeg,image/png,image/gif,image/webp" data-student-profile-photo-input');
-    expect(mainSource).toContain("studentProfilePhotoInput.setAttribute('capture', 'user')");
-    expect(mainSource).toContain("profilePhotoInput.setAttribute('capture', 'user')");
+    expect(mainSource).toContain('captureImageFromCamera');
+    expect(mainSource).toContain('if (file) await uploadProfilePhoto(file);');
+    expect(mainSource).toContain('if (file) await uploadStudentPhoto(file);');
+    expect(mainSource).toContain('if (file) await uploadTeacherPhoto(file);');
+    expect(mainSource).toContain("uploadTenantAsset(file, 'student-profile', true");
+    expect(mainSource).toContain("uploadTenantAsset(file, 'teacher-profile', true");
+    expect(dashboardSource).toContain('data-teacher-photo-source="camera"');
+    expect(dashboardSource).toContain('data-student-profile-photo-camera');
     expect(dashboardSource).toContain('Upload Photo');
     expect(dashboardSource).toContain('Open Camera');
     expect(mainSource).toContain('async function refreshStoredProfilePhotos(records, token)');

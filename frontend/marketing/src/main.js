@@ -26,6 +26,7 @@ import { isFirebaseConfigured, firebaseSignInWithEmail, firebaseSignInWithGoogle
 import { buildChangedFieldsPayload, buildSchoolCollectionPayload, buildSchoolEntityPayload, normalizeAttendanceStatus, buildAttendanceRoster, replaceAttendanceSession } from './utils/school-dashboard-actions.js?v=20261022-attendance-history';
 import { showGlobalPwaNotice } from './utils/pwa-notifications.js';
 import { MAX_FILE_UPLOAD_BYTES, validateImageUpload, validateProfileImageUpload } from './utils/file-upload-validation.js';
+import { captureImageFromCamera } from './utils/camera-capture.js';
 import { fetchPublicPricing, fetchAdminPricing, fetchMaintenanceMode, initializeSubscriptionCheckout, verifySubscriptionPayment } from './api/pricing.js';
 import { fetchPublicWebsiteCMS } from './api/website-cms.js';
 import { setPwaUpdateAvailable, getPwaUpdateAvailable, clearPwaUpdateAvailable } from './utils/pwa-utils.js';
@@ -1413,12 +1414,7 @@ function attachAccountProfilePhotoHandlers(role) {
   if (!input) return;
 
   input.closest('label')?.addEventListener('click', () => input.removeAttribute('capture'));
-  cameraButton?.addEventListener('click', () => {
-    input.setAttribute('capture', 'user');
-    input.click();
-  });
-  input.addEventListener('change', async () => {
-    const file = input.files?.[0];
+  const uploadProfilePhoto = async (file) => {
     if (!file) return;
     const validationError = validateProfileImageUpload(file);
     if (validationError) {
@@ -1451,7 +1447,19 @@ function attachAccountProfilePhotoHandlers(role) {
       input.value = '';
       input.removeAttribute('capture');
     }
+  };
+  cameraButton?.addEventListener('click', async () => {
+    cameraButton.disabled = true;
+    try {
+      const file = await captureImageFromCamera();
+      if (file) await uploadProfilePhoto(file);
+    } catch (error) {
+      if (status) status.textContent = error.message || 'Unable to open the camera.';
+    } finally {
+      cameraButton.disabled = false;
+    }
   });
+  input.addEventListener('change', () => uploadProfilePhoto(input.files?.[0]));
 }
 
 function getWorkspaceTitle(section, role) {
@@ -1932,6 +1940,10 @@ async function renderRolePage(role = 'super_admin', section = 'overview', naviga
     teachers: [],
     classes: [],
     attendanceViewDate: sessionStorage.getItem(`globyedu_attendance_view_date:${schoolId}`) || new Date().toISOString().slice(0, 10),
+    attendanceViewClass: sessionStorage.getItem(`globyedu_attendance_view_class:${schoolId}`) || 'all',
+    attendanceViewStudent: sessionStorage.getItem(`globyedu_attendance_view_student:${schoolId}`) || 'all',
+    attendanceViewTerm: sessionStorage.getItem(`globyedu_attendance_view_term:${schoolId}`) || 'all',
+    attendanceViewAcademicYear: sessionStorage.getItem(`globyedu_attendance_view_year:${schoolId}`) || 'all',
   };
   const token = getAccessToken();
   if (token && schoolId) {
@@ -2088,6 +2100,10 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
     messages: [],
     reports: [],
     attendanceViewDate: sessionStorage.getItem(`globyedu_attendance_view_date:${schoolId}`) || new Date().toISOString().slice(0, 10),
+    attendanceViewClass: sessionStorage.getItem(`globyedu_attendance_view_class:${schoolId}`) || 'all',
+    attendanceViewStudent: sessionStorage.getItem(`globyedu_attendance_view_student:${schoolId}`) || 'all',
+    attendanceViewTerm: sessionStorage.getItem(`globyedu_attendance_view_term:${schoolId}`) || 'all',
+    attendanceViewAcademicYear: sessionStorage.getItem(`globyedu_attendance_view_year:${schoolId}`) || 'all',
     examRecords: [],
     examResults: [],
     gradeEntries: [],
@@ -2158,6 +2174,10 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
         messages,
         reports,
         attendanceViewDate: sessionStorage.getItem(`globyedu_attendance_view_date:${schoolId}`) || new Date().toISOString().slice(0, 10),
+        attendanceViewClass: sessionStorage.getItem(`globyedu_attendance_view_class:${schoolId}`) || 'all',
+        attendanceViewStudent: sessionStorage.getItem(`globyedu_attendance_view_student:${schoolId}`) || 'all',
+        attendanceViewTerm: sessionStorage.getItem(`globyedu_attendance_view_term:${schoolId}`) || 'all',
+        attendanceViewAcademicYear: sessionStorage.getItem(`globyedu_attendance_view_year:${schoolId}`) || 'all',
         examRecords: Array.isArray(school.examRecords) ? school.examRecords : [],
         examResults: Array.isArray(school.examResults) ? school.examResults : [],
         gradeEntries: Array.isArray(school.gradeEntries) ? school.gradeEntries : [],
@@ -2391,9 +2411,9 @@ async function refreshStoredSchoolAssets(school, token) {
   }));
 }
 
-async function handleImageUpload(fileInput, hiddenInput, previewElement, fallbackText, owner) {
+async function handleImageUpload(fileInput, hiddenInput, previewElement, fallbackText, owner, selectedFile) {
   if (!fileInput || !hiddenInput || !previewElement) return;
-  const file = fileInput.files && fileInput.files[0];
+  const file = selectedFile || (fileInput.files && fileInput.files[0]);
   if (!file) return;
   const validationError = validateProfileImageUpload(file);
   if (validationError) {
@@ -2538,27 +2558,6 @@ async function handleQuickAction(action) {
           : 'Invitation request accepted by the email provider, but delivery status is not confirmed. Check the invitation status before asking the teacher to activate.'
         : 'Teacher record created, but invitations are unavailable in this storage mode; no invitation email was sent. Switch to Firebase-backed storage before onboarding this teacher.');
     document.getElementById('school-entity-refresh')?.click();
-    return;
-  }
-
-  if (action === 'take-attendance') {
-    const formData = await showAdminForm('Take attendance', [
-      { name: 'date', label: 'Date', type: 'date', required: true },
-      { name: 'status', label: 'Status', placeholder: 'Present/Absent', required: true },
-      { name: 'note', label: 'Note', placeholder: 'Optional class note' },
-    ]);
-    if (!formData) return;
-    const result = await appendSchoolCollectionData(token, schoolId, 'attendanceRecords', {
-      date: formData.date || '',
-      status: formData.status || '',
-      note: formData.note || '',
-    }, 'Attendance captured', 'Attendance was recorded from the dashboard.');
-    if (!result.ok || result.data?.status !== 'ok') {
-      alert(result.data?.message || 'Unable to save attendance entry.');
-      return;
-    }
-    alert('Attendance entry saved.');
-    renderSchoolDashboardPage('overview');
     return;
   }
 
@@ -2990,12 +2989,7 @@ function attachWorkspaceModuleHandlers() {
       studentProfilePhotoInput.removeAttribute('capture');
       studentProfilePhotoInput.click();
     });
-    studentProfileCameraButton?.addEventListener('click', () => {
-      studentProfilePhotoInput.setAttribute('capture', 'user');
-      studentProfilePhotoInput.click();
-    });
-    studentProfilePhotoInput.addEventListener('change', async () => {
-      const file = studentProfilePhotoInput.files?.[0];
+    const uploadStudentPhoto = async (file) => {
       if (!file) return;
       const validationError = validateProfileImageUpload(file);
       if (validationError) {
@@ -3032,7 +3026,20 @@ function attachWorkspaceModuleHandlers() {
         if (status) status.textContent = error.message || 'Unable to upload the student profile photo.';
         alert(error.message || 'Unable to upload the student profile photo.');
       }
+    };
+    studentProfileCameraButton?.addEventListener('click', async () => {
+      studentProfileCameraButton.disabled = true;
+      try {
+        const file = await captureImageFromCamera();
+        if (file) await uploadStudentPhoto(file);
+      } catch (error) {
+        const status = document.querySelector('[data-student-profile-photo-status]');
+        if (status) status.textContent = error.message || 'Unable to open the camera.';
+      } finally {
+        studentProfileCameraButton.disabled = false;
+      }
     });
+    studentProfilePhotoInput.addEventListener('change', () => uploadStudentPhoto(studentProfilePhotoInput.files?.[0]));
   }
 
   const profileTwoFactorButton = document.querySelector('[data-workspace-profile-2fa]');
@@ -3569,31 +3576,6 @@ function attachSchoolHandlers() {
         return;
       }
 
-      if (action === 'record-attendance') {
-        const formData = await showAdminForm('Record attendance', [
-          { name: 'date', label: 'Date', type: 'date', required: true },
-          { name: 'studentName', label: 'Student / staff name', required: true },
-          { name: 'studentId', label: 'Student or staff reference (optional)' },
-          { name: 'className', label: 'Class / stream' },
-          { name: 'teacher', label: 'Teacher / recorder' },
-          { name: 'subject', label: 'Subject / activity' },
-          { name: 'status', label: 'Status', type: 'select', options: [
-            { label: 'Present', value: 'present' },
-            { label: 'Absent', value: 'absent' },
-          ], required: true },
-          { name: 'note', label: 'Note', type: 'textarea' },
-        ]);
-        if (!formData) return;
-        const result = await appendSchoolCollectionData(token, schoolId, 'attendanceRecords', buildSchoolCollectionPayload('attendanceRecords', formData), 'Attendance captured', 'Attendance was recorded from the school dashboard.');
-        if (!result.ok || result.data?.status !== 'ok') {
-          alert(result.data?.message || 'Unable to record attendance.');
-          return;
-        }
-        alert('Attendance recorded successfully.');
-        renderSchoolDashboardPage('attendance');
-        return;
-      }
-
       if (action === 'record-payment') {
         const currentResult = await fetchSchoolDetails(token, schoolId);
         const currentSchool = currentResult.ok && currentResult.data?.status === 'ok' ? currentResult.data.school || {} : {};
@@ -3921,8 +3903,49 @@ function attachSchoolHandlers() {
     if (viewDateInput) {
       viewDateInput.addEventListener('change', () => {
         const schoolId = localStorage.getItem('globyedu_schoolId') || '';
-        if (!viewDateInput.value) return;
-        sessionStorage.setItem(`globyedu_attendance_view_date:${schoolId}`, viewDateInput.value);
+        sessionStorage.setItem(`globyedu_attendance_view_date:${schoolId}`, viewDateInput.value || 'all');
+        renderSchoolDashboardPage('attendance');
+      });
+    }
+
+    document.getElementById('school-attendance-view-all-dates')?.addEventListener('click', () => {
+      const schoolId = localStorage.getItem('globyedu_schoolId') || '';
+      sessionStorage.setItem(`globyedu_attendance_view_date:${schoolId}`, 'all');
+      renderSchoolDashboardPage('attendance');
+    });
+
+    const viewClassInput = document.getElementById('school-attendance-view-class');
+    if (viewClassInput) {
+      viewClassInput.addEventListener('change', () => {
+        const schoolId = localStorage.getItem('globyedu_schoolId') || '';
+        sessionStorage.setItem(`globyedu_attendance_view_class:${schoolId}`, viewClassInput.value || 'all');
+        renderSchoolDashboardPage('attendance');
+      });
+    }
+
+    const viewStudentInput = document.getElementById('school-attendance-view-student');
+    if (viewStudentInput) {
+      viewStudentInput.addEventListener('change', () => {
+        const schoolId = localStorage.getItem('globyedu_schoolId') || '';
+        sessionStorage.setItem(`globyedu_attendance_view_student:${schoolId}`, viewStudentInput.value || 'all');
+        renderSchoolDashboardPage('attendance');
+      });
+    }
+
+    const viewTermInput = document.getElementById('school-attendance-view-term');
+    if (viewTermInput) {
+      viewTermInput.addEventListener('change', () => {
+        const schoolId = localStorage.getItem('globyedu_schoolId') || '';
+        sessionStorage.setItem(`globyedu_attendance_view_term:${schoolId}`, viewTermInput.value || 'all');
+        renderSchoolDashboardPage('attendance');
+      });
+    }
+
+    const viewYearInput = document.getElementById('school-attendance-view-year');
+    if (viewYearInput) {
+      viewYearInput.addEventListener('change', () => {
+        const schoolId = localStorage.getItem('globyedu_schoolId') || '';
+        sessionStorage.setItem(`globyedu_attendance_view_year:${schoolId}`, viewYearInput.value || 'all');
         renderSchoolDashboardPage('attendance');
       });
     }
@@ -3974,7 +3997,10 @@ function attachSchoolHandlers() {
           const student = students.find((entry) => String(entry.studentId || entry.id || entry.email || '') === control.dataset.studentId) || {};
           return { student, studentId: control.dataset.studentId, status: control.value };
         });
-        const nextRecords = replaceAttendanceSession(records, selectedRoster, date, className, schoolId);
+        const nextRecords = replaceAttendanceSession(records, selectedRoster, date, className, schoolId, {
+          academicYear: school.academicYear || school.currentAcademicYear || '',
+          term: school.currentTerm || school.term || '',
+        });
         const saveResult = await updateSchoolDetails(token, schoolId, { attendanceRecords: nextRecords });
         if (!saveResult.ok || saveResult.data?.status !== 'ok') {
           feedback.textContent = saveResult.data?.message || 'Unable to save attendance.';
@@ -4904,6 +4930,7 @@ function attachSchoolHandlers() {
               <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                   <p class="text-sm font-semibold text-slate-900">Logo preview</p>
+                  <button id="profile-logo-camera" type="button" class="mt-3 rounded-full border border-sky-200 px-4 py-2 font-semibold text-sky-700">Use camera</button>
                   <div id="profile-logo-preview" class="mt-3"></div>
                 </div>
                 <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
@@ -4974,6 +5001,22 @@ function attachSchoolHandlers() {
         await handleImageUpload(logoFileInput, logoHiddenInput, logoPreview, 'No logo selected', {
           type: 'school', id: school.schoolId, field: 'logoPath',
         });
+      });
+      const logoCameraButton = document.getElementById('profile-logo-camera');
+      logoCameraButton?.addEventListener('click', async () => {
+        logoCameraButton.disabled = true;
+        try {
+          const file = await captureImageFromCamera();
+          if (file) {
+            await handleImageUpload(logoFileInput, logoHiddenInput, logoPreview, 'No logo selected', {
+              type: 'school', id: school.schoolId, field: 'logoPath',
+            }, file);
+          }
+        } catch (error) {
+          alert(error.message || 'Unable to open the camera.');
+        } finally {
+          logoCameraButton.disabled = false;
+        }
       });
       coverFileInput?.addEventListener('change', async () => {
         await handleImageUpload(coverFileInput, coverHiddenInput, coverPreview, 'No cover selected', {
@@ -5813,18 +5856,10 @@ function initializeTeacherWorkspaceHandlers(teacherData = {}) {
   const profilePhotoPreview = document.getElementById('teacher-profile-photo-preview');
   const profilePhotoStatus = document.getElementById('teacher-profile-photo-status');
   const profileSaveButton = document.querySelector('[data-teacher-workspace-action="save-profile"]');
-  document.querySelectorAll('[data-teacher-photo-source]').forEach((button) => {
-    button.addEventListener('click', () => {
-      if (!profilePhotoInput) return;
-      if (button.dataset.teacherPhotoSource === 'camera') profilePhotoInput.setAttribute('capture', 'user');
-      else profilePhotoInput.removeAttribute('capture');
-      profilePhotoInput.click();
-    });
-  });
   if (profilePhotoInput && profilePhotoInput.dataset.teacherPhotoBound === 'true') return;
   if (profilePhotoInput) profilePhotoInput.dataset.teacherPhotoBound = 'true';
-  profilePhotoInput?.addEventListener('change', async () => {
-    const file = profilePhotoInput.files?.[0];
+  const uploadTeacherPhoto = async (file) => {
+    if (!file) return;
     const validationError = validateSchoolImage(file);
     if (validationError) {
       profilePhotoInput.value = '';
@@ -5846,7 +5881,27 @@ function initializeTeacherWorkspaceHandlers(teacherData = {}) {
       if (profilePhotoStatus) profilePhotoStatus.textContent = error.message || 'Unable to upload the selected profile photo.';
       alert(error.message || 'Unable to upload the selected profile photo.');
     }
+  };
+  document.querySelectorAll('[data-teacher-photo-source]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (!profilePhotoInput) return;
+      if (button.dataset.teacherPhotoSource === 'camera') {
+        button.disabled = true;
+        try {
+          const file = await captureImageFromCamera();
+          if (file) await uploadTeacherPhoto(file);
+        } catch (error) {
+          if (profilePhotoStatus) profilePhotoStatus.textContent = error.message || 'Unable to open the camera.';
+        } finally {
+          button.disabled = false;
+        }
+        return;
+      }
+      profilePhotoInput.removeAttribute('capture');
+      profilePhotoInput.click();
+    });
   });
+  profilePhotoInput?.addEventListener('change', () => uploadTeacherPhoto(profilePhotoInput.files?.[0]));
 
   document.querySelectorAll('[data-teacher-student-delete-request]').forEach((button) => {
     button.addEventListener('click', async () => {
