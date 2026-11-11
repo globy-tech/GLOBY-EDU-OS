@@ -121,6 +121,7 @@ export async function captureImageFromCamera({
         if (!context) throw new Error('Photo canvas is unavailable.');
         context.drawImage(video, 0, 0, canvas.width, canvas.height);
         canvas.toBlob((blob) => {
+          if (settled) return;
           if (!blob) {
             dialog.querySelector('[data-camera-message]').textContent = 'The photo could not be captured. Please try again.';
             return;

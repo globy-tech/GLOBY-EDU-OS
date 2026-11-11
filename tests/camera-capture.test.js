@@ -9,8 +9,10 @@ const source = readFileSync(process.argv[1], 'utf8');
 const moduleUrl = ` + '`data:text/javascript;base64,${Buffer.from(source).toString(\'base64\')}`' + `;
 const { captureImageFromCamera } = await import(moduleUrl);
 
-function createCameraDocument() {
+function createCameraDocument({ deferToBlob = false } = {}) {
   const elements = new Map();
+  const windowListeners = new Map();
+  let pendingBlobCallback;
   const makeElement = (selector) => ({
     selector,
     listeners: new Map(),
@@ -26,7 +28,10 @@ function createCameraDocument() {
       return elements.get(childSelector);
     },
     getContext: () => ({ drawImage() {} }),
-    toBlob(callback, type) { callback(new Blob(['captured'], { type })); },
+    toBlob(callback, type) {
+      if (deferToBlob) pendingBlobCallback = () => callback(new Blob(['captured'], { type }));
+      else callback(new Blob(['captured'], { type }));
+    },
     play: () => Promise.resolve(),
   });
   const dialog = makeElement('dialog');
@@ -36,6 +41,12 @@ function createCameraDocument() {
     createElement: (name) => (name === 'div' ? dialog : makeElement(name)),
     addEventListener: (name, callback) => listeners.set(name, callback),
     removeEventListener: (name) => listeners.delete(name),
+    windowRef: {
+      addEventListener: (name, callback) => windowListeners.set(name, callback),
+      removeEventListener: (name) => windowListeners.delete(name),
+      fire: (name) => windowListeners.get(name)?.(),
+    },
+    completePendingBlob: () => pendingBlobCallback?.(),
     dialog,
     getElement: (selector) => dialog.querySelector(selector),
   };
@@ -75,6 +86,47 @@ class TestFile {
   assert.ok(Number(file.name.slice('profile-'.length, -'.jpg'.length)) > 0);
   assert.equal(track.stopCount, 1);
   assert.equal(documentRef.getElement('video').srcObject, null);
+}
+
+{
+  const documentRef = createCameraDocument({ deferToBlob: true });
+  const { stream, track } = createStream();
+  let createdPreview = false;
+  const pending = captureImageFromCamera({
+    documentRef,
+    mediaDevices: { getUserMedia: async () => stream },
+    URLRef: {
+      createObjectURL() { createdPreview = true; return 'blob:late-preview'; },
+      revokeObjectURL() {},
+    },
+    FileRef: TestFile,
+    windowRef: documentRef.windowRef,
+  });
+  await Promise.resolve();
+  documentRef.getElement('video').videoWidth = 640;
+  documentRef.getElement('video').videoHeight = 480;
+  documentRef.getElement('[data-camera-capture]').fire('click');
+  documentRef.windowRef.fire('pagehide');
+  assert.equal(await pending, null);
+  assert.equal(track.stopCount, 1);
+  documentRef.completePendingBlob();
+  assert.equal(createdPreview, false, 'a late capture callback must not create a preview after cleanup');
+}
+
+{
+  const documentRef = createCameraDocument();
+  const { stream, track } = createStream();
+  const pending = captureImageFromCamera({
+    documentRef,
+    mediaDevices: { getUserMedia: async () => stream },
+    URLRef: { createObjectURL() {}, revokeObjectURL() {} },
+    FileRef: TestFile,
+    windowRef: documentRef.windowRef,
+  });
+  await Promise.resolve();
+  documentRef.windowRef.fire('hashchange');
+  assert.equal(await pending, null);
+  assert.equal(track.stopCount, 1, 'leaving the dashboard must stop the camera tracks');
 }
 
 {

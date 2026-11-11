@@ -172,6 +172,38 @@ describe('attendance role permissions', () => {
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ status: 'ok' }));
   });
 
+  test('attendance corrections retain their audit history across duplicate submissions', () => {
+    const school = createSchool();
+    const teacher = {
+      userId: `${SCHOOL_ID}:T-A`,
+      username: 'T-A',
+      tenantId: SCHOOL_ID,
+      roles: ['teacher'],
+    };
+    const correction = {
+      studentId: 'STU-A',
+      className: 'Class A',
+      date: '2026-10-19',
+      status: 'present',
+    };
+
+    schoolService.updateTeacherWorkspace(school, teacher, { attendanceRecords: [correction] });
+    const corrected = school.attendanceRecords.find((entry) => entry.date === correction.date);
+    expect(corrected.history).toEqual([
+      expect.objectContaining({
+        action: 'corrected',
+        actorId: teacher.userId,
+        previousStatus: 'absent',
+        status: 'present',
+      }),
+    ]);
+    const correctionHistory = structuredClone(corrected.history);
+
+    schoolService.updateTeacherWorkspace(school, teacher, { attendanceRecords: [correction] });
+    const resubmitted = school.attendanceRecords.find((entry) => entry.date === correction.date);
+    expect(resubmitted.history).toEqual(correctionHistory);
+  });
+
   test('ignores invalid student/class attendance rows without changing existing records', () => {
     const school = createSchool();
     const teacher = { userId: `${SCHOOL_ID}:T-A`, username: 'T-A', tenantId: SCHOOL_ID, roles: ['teacher'] };
