@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 describe('attendance dashboard experience', () => {
   it('shows School Authority a read-only summary of attendance submitted by teachers for today', () => {
@@ -113,5 +114,47 @@ describe('attendance dashboard experience', () => {
     expect(source).toContain('retained');
     expect(source).toContain('String(record.date || \'\').slice(0, 10)');
     expect(source).toContain("status: normalizeAttendanceStatus(entry.status)");
+  });
+
+  it('does not count weekends or declared closures as pending class attendance', () => {
+    const helperPath = path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'utils', 'attendance-summary.mjs');
+    const script = String.raw`
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const { summarizeAttendanceRecords } = await import(pathToFileURL(process.argv[1]));
+const classes = [{ classId: 'class-a', name: 'Class A' }];
+const weekend = summarizeAttendanceRecords([], '2026-11-14', classes);
+assert.equal(weekend.coverage.required, false);
+assert.equal(weekend.coverage.pending, 0);
+const closure = summarizeAttendanceRecords([], '2026-11-12', classes, 'all', 'all', 'all', 'all', [
+  { kind: 'school_calendar', schoolClosure: true, status: 'active', startDate: '2026-11-12', endDate: '2026-11-16' },
+]);
+assert.equal(closure.coverage.notRequiredReason, 'school_closure');
+assert.equal(closure.coverage.pending, 0);
+const publicHoliday = summarizeAttendanceRecords([], '2026-11-12', classes, 'all', 'all', 'all', 'all', [
+  { kind: 'school_calendar', schoolClosure: false, status: 'active', startDate: '2026-11-12', endDate: '2026-11-12' },
+]);
+assert.equal(publicHoliday.coverage.required, true);
+assert.equal(publicHoliday.coverage.pending, 1);
+`;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script, helperPath], {
+      cwd: path.resolve(__dirname, '..'),
+      encoding: 'utf8',
+    });
+    if (result.status !== 0) {
+      throw new Error(`Instructional-day attendance coverage check failed: ${result.stderr || result.stdout || result.error}`);
+    }
+  });
+
+  it('exposes School Authority calendar management and teacher task state', () => {
+    const pageSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js'), 'utf8');
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
+    const apiSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'api', 'school.js'), 'utf8');
+    expect(mainSource).toContain("id: 'calendar', label: 'School Calendar'");
+    expect(pageSource).toContain('data-school-calendar-form');
+    expect(pageSource).toContain('Public holidays do not close attendance unless marked as a school closure.');
+    expect(pageSource).toContain('attendanceTasks.dayType');
+    expect(mainSource).toContain('fetchTeacherAttendanceTasks(token, schoolId, date)');
+    expect(apiSource).toContain('/attendance-tasks');
   });
 });

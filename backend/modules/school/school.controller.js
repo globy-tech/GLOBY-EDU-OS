@@ -177,6 +177,59 @@ router.post('/:schoolId/progression/confirm', authMiddleware, tenantMiddleware, 
   }
 });
 
+router.get('/:schoolId/calendar', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'teacher', 'super_admin']), async (req, res) => {
+  try {
+    const calendar = await schoolService.listSchoolCalendarEvents(req.params.schoolId, req.user || {});
+    return res.json({ status: 'ok', ...calendar });
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.post('/:schoolId/calendar', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const event = await schoolService.createSchoolCalendarEvent(req.params.schoolId, req.body || {}, req.user || {});
+    await auditSchoolAction(req, {
+      action: 'school.calendar.event_created',
+      resourceType: 'school-calendar-event',
+      resourceId: event.id,
+      metadata: { type: event.type, startDate: event.startDate, endDate: event.endDate, schoolClosure: event.schoolClosure },
+    });
+    return res.status(201).json({ status: 'ok', event });
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.put('/:schoolId/calendar/:eventId', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const event = await schoolService.updateSchoolCalendarEvent(
+      req.params.schoolId,
+      req.params.eventId,
+      req.body || {},
+      req.user || {},
+    );
+    await auditSchoolAction(req, {
+      action: 'school.calendar.event_updated',
+      resourceType: 'school-calendar-event',
+      resourceId: event.id,
+      metadata: { type: event.type, startDate: event.startDate, endDate: event.endDate, schoolClosure: event.schoolClosure, status: event.status },
+    });
+    return res.json({ status: 'ok', event });
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.get('/:schoolId/attendance-tasks', authMiddleware, tenantMiddleware, roleGuard(['teacher']), async (req, res) => {
+  try {
+    const tasks = await schoolService.getTeacherAttendanceTasks(req.params.schoolId, req.user || {}, req.query.date);
+    return res.json({ status: 'ok', ...tasks });
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({ status: 'error', message: err.message });
+  }
+});
+
 // POST /api/v1/schools - Super Admin only
 router.post('/', authMiddleware, roleGuard(['super_admin']), async (req, res) => {
   try {
@@ -626,6 +679,9 @@ router.put('/:schoolId', authMiddleware, tenantMiddleware, roleGuard(['school_he
     const roles = Array.isArray(req.user?.roles) ? req.user.roles : [];
     if (['payments', 'receipts', 'invoices', 'refunds'].some((field) => Object.prototype.hasOwnProperty.call(payload, field))) {
       return res.status(403).json({ status: 'error', message: 'Payments, receipts, invoices, and refund requests must use their dedicated finance endpoints.' });
+    }
+    if (Array.isArray(payload.events) && payload.events.some((event) => event?.kind === 'school_calendar')) {
+      return res.status(403).json({ status: 'error', message: 'School calendar entries must use the validated calendar endpoints.' });
     }
     const subscriptionFields = new Set(['subscriptionPlan', 'subscriptionStatus', 'expiresAt', 'trialEndsAt', 'trialStatus', 'billingPeriod', 'studentLimit']);
     if (!(req.user?.platformAdmin === true && roles.includes('super_admin')) &&

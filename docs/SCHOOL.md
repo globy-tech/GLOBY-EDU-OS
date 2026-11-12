@@ -36,7 +36,11 @@ The school/tenant record is the authority boundary for school users and school-o
 
 Teachers submit records through the existing teacher workspace update route. The service validates each student, class, date, and attendance status against the teacher's assigned roster, deduplicates by date/class/student, and retains correction history. School Authority can review dashboard attendance summaries and records but cannot submit attendance through the generic school update endpoint.
 
-The current attendance record schema and dashboard do not yet define persisted school holidays or automatically generated teacher attendance tasks. Weekend/holiday task suppression and coverage-by-instructional-day therefore remain incomplete; do not treat an absence of records as proof of a missed instructional day.
+School calendar entries are stored in the existing tenant `events` field with `kind: "school_calendar"`; no second calendar store or schema migration is required. School Authority and School Head can create, edit, or cancel entries through `POST /api/v1/schools/:schoolId/calendar` and `PUT /api/v1/schools/:schoolId/calendar/:eventId`. Calendar reads are available to authorized teachers and school administrators through `GET /api/v1/schools/:schoolId/calendar`. All routes enforce the school tenant boundary, and calendar mutations are audit-logged. Cancelled entries remain in history.
+
+Calendar dates use strict `YYYY-MM-DD` school-local dates. School holidays, vacations, and special closures default to closing attendance; public holidays and custom entries do not close attendance unless explicitly marked. The School Authority attendance coverage excludes weekends and active declared closures.
+
+`GET /api/v1/schools/:schoolId/attendance-tasks` returns deterministic, per-class teacher attendance tasks for the requested school-local date (or the current local date). The endpoint is teacher-only and returns only classes assigned to that teacher. It suppresses tasks on weekends, active closures, and outside configured current academic-year bounds. Task state is derived from the active class roster and persisted, valid attendance records: a task is complete only when all active roster members have a valid submission; an empty roster is `not_required`. Tasks are reconstructed on reads rather than stored separately, so a failed attendance write leaves the task pending and a retry or refresh reflects the persisted records.
 
 ## Admissions and progression
 

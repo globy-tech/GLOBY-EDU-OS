@@ -147,6 +147,28 @@ export async function fetchSchoolDetails(token, schoolId) {
   return getJson(`/api/v1/schools/${encodeURIComponent(schoolId)}`, token);
 }
 
+export async function fetchSchoolCalendar(token, schoolId) {
+  return getJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/calendar`, token);
+}
+
+export async function createSchoolCalendarEvent(token, schoolId, payload) {
+  return postJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/calendar`, payload, token, { queueOffline: false });
+}
+
+export async function updateSchoolCalendarEvent(token, schoolId, eventId, payload) {
+  return putJson(
+    `/api/v1/schools/${encodeURIComponent(schoolId)}/calendar/${encodeURIComponent(eventId)}`,
+    payload,
+    token,
+    { queueOffline: false },
+  );
+}
+
+export async function fetchTeacherAttendanceTasks(token, schoolId, date = '') {
+  const query = date ? `?date=${encodeURIComponent(date)}` : '';
+  return getJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/attendance-tasks${query}`, token);
+}
+
 export async function fetchAdmissions(token, schoolId, status = '') {
   const params = new URLSearchParams();
   if (status) params.set('status', status);

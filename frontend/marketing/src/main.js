@@ -20,7 +20,7 @@ import { matchesAdminSchoolFilter } from './utils/school-management-filters.mjs'
 import { getAdminState } from './pages/admin-state.js';
 import { PlatformAdminPage } from './pages/platform-admin.js';
 import { SchoolDashboardPage, SchoolAuthorityDashboard, TeacherDashboard, StudentDashboard } from './pages/school-dashboard.js';
-import { fetchSchoolSummary, fetchSchoolDetails, updateSchoolDetails, createFeePayment, createSchoolInvoice, createSchoolRefundRequest, startSchoolInvoiceCheckout, verifySchoolInvoicePayment, searchSchoolData, fetchSchoolEntities, createSchoolEntity, resendTeacherInvitation, updateSchoolEntity, deleteSchoolEntity, requestStudentDeletion, resolveStudentDeletionRequest, fetchAdmissions, createAdmission, updateAdmission, decideAdmission, fetchProgressionPreview, confirmStudentProgression, fetchAdminDashboardSummary, fetchPlatformAuditLogs, fetchSchoolActivity, fetchAdminSchoolList, fetchArchivedAdminSchools, createAdminSchool, updateAdminSchool, deleteAdminSchool, activateAdminSchool, fetchWorkspaceMessages, fetchMessageRecipients, createWorkspaceMessage, updateWorkspaceMessage, deleteWorkspaceMessage, fetchSupportTickets, createSupportTicket, updateSupportTicket, deleteSupportTicket, fetchAssignments, fetchLessons, createAssignment, createLesson, submitAssignment } from './api/school.js';
+import { fetchSchoolSummary, fetchSchoolDetails, updateSchoolDetails, createFeePayment, createSchoolInvoice, createSchoolRefundRequest, startSchoolInvoiceCheckout, verifySchoolInvoicePayment, searchSchoolData, fetchSchoolEntities, createSchoolEntity, resendTeacherInvitation, updateSchoolEntity, deleteSchoolEntity, requestStudentDeletion, resolveStudentDeletionRequest, fetchAdmissions, createAdmission, updateAdmission, decideAdmission, fetchProgressionPreview, confirmStudentProgression, fetchSchoolCalendar, createSchoolCalendarEvent, updateSchoolCalendarEvent, fetchTeacherAttendanceTasks, fetchAdminDashboardSummary, fetchPlatformAuditLogs, fetchSchoolActivity, fetchAdminSchoolList, fetchArchivedAdminSchools, createAdminSchool, updateAdminSchool, deleteAdminSchool, activateAdminSchool, fetchWorkspaceMessages, fetchMessageRecipients, createWorkspaceMessage, updateWorkspaceMessage, deleteWorkspaceMessage, fetchSupportTickets, createSupportTicket, updateSupportTicket, deleteSupportTicket, fetchAssignments, fetchLessons, createAssignment, createLesson, submitAssignment } from './api/school.js';
 import { studentLogin, teacherLogin, schoolAuthorityLogin, schoolLogin as apiLogin, firebaseLogin as apiFirebaseLogin, linkFirebaseIdentity, platformAdminLogin, logout as apiLogout, refreshAuthSession, forgotPassword as apiForgot, register as apiRegister, confirmFirebasePasswordReset, changePassword as apiChangePassword } from './api/auth.js';
 import { isFirebaseConfigured, firebaseSignInWithEmail, firebaseSignInWithGoogle, firebaseLinkGoogle, firebaseApplyActionCode, firebaseSignOutUser } from './firebase/firebase-client.js';
 import { buildChangedFieldsPayload, buildSchoolCollectionPayload, buildSchoolEntityPayload, normalizeAttendanceStatus, buildAttendanceRoster, replaceAttendanceSession } from './utils/school-dashboard-actions.js?v=20261022-attendance-history';
@@ -1479,6 +1479,7 @@ function getAppNavItems(role) {
       { id: 'teachers', label: 'Teachers', path: '#/school/teachers', icon: '🧑‍🏫' },
       { id: 'classes', label: 'Class Management', path: '#/school/classes', icon: '🏫' },
       { id: 'attendance', label: 'Attendance', path: '#/school/attendance', icon: '✓' },
+      { id: 'calendar', label: 'School Calendar', path: '#/school/calendar', icon: '▦' },
       { id: 'activity', label: 'Teacher Activity', path: '#/school/activity', icon: '◷' },
       { id: 'finance', label: 'Finance & Billing', path: '#/school/finance', icon: '💳' },
       { id: 'exams', label: 'Examination & Grading', path: '#/school/exams', icon: '📝' },
@@ -1970,6 +1971,10 @@ async function renderRolePage(role = 'super_admin', section = 'overview', naviga
         teachers: Array.isArray(school.teachers) ? school.teachers : [],
         classes: Array.isArray(school.classes) ? school.classes : [],
         attendanceRecords: Array.isArray(school.attendanceRecords) ? school.attendanceRecords : [],
+        attendanceTasks: school.attendanceTasks || null,
+        schoolCalendarEvents: Array.isArray(school.schoolCalendarEvents) ? school.schoolCalendarEvents : [],
+        schoolLocalDate: school.schoolLocalDate || '',
+        timezone: school.timezone || 'UTC',
         examRecords: Array.isArray(school.examRecords) ? school.examRecords : [],
         examResults: Array.isArray(school.examResults) ? school.examResults : [],
       };
@@ -2029,6 +2034,10 @@ async function renderRolePage(role = 'super_admin', section = 'overview', naviga
       profilePhoto: studentRecord.profilePhoto || localStorage.getItem('globyedu_profilePhoto') || '',
       classes: schoolData.classes || [],
       attendanceRecords: schoolData.attendanceRecords || [],
+      attendanceTasks: schoolData.attendanceTasks || null,
+      schoolCalendarEvents: schoolData.schoolCalendarEvents || [],
+      schoolLocalDate: schoolData.schoolLocalDate || '',
+      schoolTimeZone: schoolData.timezone || '',
       examResults: schoolData.examResults || [],
       announcements: schoolData.announcements || [],
       messages: schoolData.messages || [],
@@ -2058,6 +2067,7 @@ function normalizeSchoolSection(section = 'overview') {
   if (['admissions', 'admission', 'enrollment-applications'].includes(key)) return 'admissions';
   if (['teachers', 'teacher'].includes(key)) return 'teachers';
   if (['attendance', 'attendances'].includes(key)) return 'attendance';
+  if (['calendar', 'school-calendar', 'holidays'].includes(key)) return 'calendar';
   if (['finance', 'fees', 'payments'].includes(key)) return 'finance';
   if (['exams', 'exam', 'grading', 'gradebook', 'report-card', 'report-cards', 'transcript', 'transcripts'].includes(key)) return 'exams';
   if (['notifications', 'alerts', 'alert'].includes(key)) return 'notifications';
@@ -2094,6 +2104,9 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
     teachers: [],
     classes: [],
     attendanceRecords: [],
+    calendarEvents: [],
+    schoolLocalDate: '',
+    schoolTimeZone: '',
     announcements: [],
     payments: [],
     financeCategories: [],
@@ -2119,15 +2132,19 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
 
   const token = getAccessToken();
   if (schoolId && token) {
-    const [schoolResult, activityResult] = await Promise.all([
+    const [schoolResult, activityResult, calendarResult] = await Promise.all([
       fetchSchoolDetails(token, schoolId),
       normalizedSection === 'activity' ? fetchSchoolActivity(token, schoolId) : Promise.resolve(null),
+      ['calendar', 'attendance'].includes(normalizedSection) ? fetchSchoolCalendar(token, schoolId) : Promise.resolve(null),
     ]);
     if (activityResult) {
       sectionData.teacherActivity = Array.isArray(activityResult.data?.activity) ? activityResult.data.activity : [];
       sectionData.teacherActivityLoadError = !activityResult.ok || activityResult.data?.status !== 'ok'
         ? activityResult.data?.message || `Unable to load teacher activity (HTTP ${activityResult.status || 'network error'}).`
         : '';
+    }
+    if (calendarResult && (!calendarResult.ok || calendarResult.data?.status !== 'ok')) {
+      schoolDataLoadError = calendarResult.data?.message || `Unable to load school calendar (HTTP ${calendarResult.status || 'network error'}).`;
     }
 
     if (schoolResult.ok && schoolResult.data?.status === 'ok') {
@@ -2187,7 +2204,7 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
         refunds,
         messages,
         reports,
-        attendanceViewDate: sessionStorage.getItem(`globyedu_attendance_view_date:${schoolId}`) || new Date().toISOString().slice(0, 10),
+        attendanceViewDate: sessionStorage.getItem(`globyedu_attendance_view_date:${schoolId}`) || calendarResult?.data?.localDate || new Date().toISOString().slice(0, 10),
         attendanceViewClass: sessionStorage.getItem(`globyedu_attendance_view_class:${schoolId}`) || 'all',
         attendanceViewStudent: sessionStorage.getItem(`globyedu_attendance_view_student:${schoolId}`) || 'all',
         attendanceViewTerm: sessionStorage.getItem(`globyedu_attendance_view_term:${schoolId}`) || 'all',
@@ -2198,6 +2215,11 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
         reportCards: Array.isArray(school.reportCards) ? school.reportCards : [],
         academicRecords,
         admissions,
+        calendarEvents: Array.isArray(calendarResult?.data?.events)
+          ? calendarResult.data.events
+          : (Array.isArray(school.events) ? school.events.filter((entry) => entry?.kind === 'school_calendar') : []),
+        schoolLocalDate: calendarResult?.data?.localDate || '',
+        schoolTimeZone: calendarResult?.data?.timeZone || school.timezone || 'UTC',
         schoolDataLoadError,
         academicYears: Array.isArray(school.academicYears) ? school.academicYears : [],
         teacherActivity: Array.isArray(activityResult?.data?.activity) ? activityResult.data.activity : [],
@@ -3149,6 +3171,93 @@ function attachWorkspaceModuleHandlers() {
 
 function attachSchoolHandlers() {
   attachWorkspaceModuleHandlers();
+
+  const calendarForm = document.querySelector('[data-school-calendar-form]');
+  if (calendarForm) {
+    const feedback = document.querySelector('[data-school-calendar-feedback]');
+    const resetCalendarForm = () => {
+      calendarForm.reset();
+      calendarForm.elements.namedItem('eventId').value = '';
+      calendarForm.elements.namedItem('status').value = 'active';
+    };
+    calendarForm.elements.namedItem('type').addEventListener('change', (event) => {
+      const closureByDefault = !['public_holiday', 'custom'].includes(event.target.value);
+      calendarForm.elements.namedItem('schoolClosure').checked = closureByDefault;
+    });
+    calendarForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const schoolId = localStorage.getItem('globyedu_schoolId');
+      const token = getAccessToken();
+      if (!schoolId || !token) return;
+      const payload = {
+        title: calendarForm.elements.namedItem('title').value,
+        type: calendarForm.elements.namedItem('type').value,
+        startDate: calendarForm.elements.namedItem('startDate').value,
+        endDate: calendarForm.elements.namedItem('endDate').value,
+        description: calendarForm.elements.namedItem('description').value,
+        schoolClosure: calendarForm.elements.namedItem('schoolClosure').checked,
+        status: calendarForm.elements.namedItem('status').value,
+      };
+      const eventId = calendarForm.elements.namedItem('eventId').value;
+      const result = eventId
+        ? await updateSchoolCalendarEvent(token, schoolId, eventId, payload)
+        : await createSchoolCalendarEvent(token, schoolId, payload);
+      if (!result.ok || result.data?.status !== 'ok') {
+        if (feedback) feedback.textContent = result.data?.message || 'Unable to save the school calendar entry.';
+        return;
+      }
+      if (feedback) feedback.textContent = eventId ? 'Calendar entry updated.' : 'Calendar entry created.';
+      renderSchoolDashboardPage('calendar');
+    });
+
+    document.querySelector('[data-school-calendar-reset]')?.addEventListener('click', resetCalendarForm);
+    document.querySelectorAll('[data-school-calendar-edit]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const schoolId = localStorage.getItem('globyedu_schoolId');
+        const token = getAccessToken();
+        if (!schoolId || !token) return;
+        const result = await fetchSchoolCalendar(token, schoolId);
+        const entry = result.ok && result.data?.status === 'ok'
+          ? (Array.isArray(result.data.events) ? result.data.events : []).find((item) => item.id === button.dataset.schoolCalendarEdit)
+          : null;
+        if (!entry) {
+          if (feedback) feedback.textContent = result.data?.message || 'Unable to load this calendar entry.';
+          return;
+        }
+        calendarForm.elements.namedItem('eventId').value = entry.id;
+        calendarForm.elements.namedItem('title').value = entry.title || '';
+        calendarForm.elements.namedItem('type').value = entry.type || 'custom';
+        calendarForm.elements.namedItem('startDate').value = entry.startDate || '';
+        calendarForm.elements.namedItem('endDate').value = entry.endDate || '';
+        calendarForm.elements.namedItem('description').value = entry.description || '';
+        calendarForm.elements.namedItem('schoolClosure').checked = entry.schoolClosure === true;
+        calendarForm.elements.namedItem('status').value = entry.status || 'active';
+        if (feedback) feedback.textContent = `Editing ${entry.title}.`;
+        calendarForm.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+    });
+    document.querySelectorAll('[data-school-calendar-cancel]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const schoolId = localStorage.getItem('globyedu_schoolId');
+        const token = getAccessToken();
+        if (!schoolId || !token || !confirm('Cancel this calendar entry? Its history will be retained.')) return;
+        const calendar = await fetchSchoolCalendar(token, schoolId);
+        const entry = calendar.ok && calendar.data?.status === 'ok'
+          ? (Array.isArray(calendar.data.events) ? calendar.data.events : []).find((item) => item.id === button.dataset.schoolCalendarCancel)
+          : null;
+        if (!entry) {
+          if (feedback) feedback.textContent = calendar.data?.message || 'Unable to load this calendar entry.';
+          return;
+        }
+        const result = await updateSchoolCalendarEvent(token, schoolId, entry.id, { ...entry, status: 'cancelled' });
+        if (!result.ok || result.data?.status !== 'ok') {
+          if (feedback) feedback.textContent = result.data?.message || 'Unable to cancel the calendar entry.';
+          return;
+        }
+        renderSchoolDashboardPage('calendar');
+      });
+    });
+  }
 
   document.querySelectorAll('[data-print-report-card]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -4421,6 +4530,30 @@ function attachSchoolHandlers() {
       const schoolId = localStorage.getItem('globyedu_schoolId');
       const token = getAccessToken();
       if (!schoolId || !token) return;
+      if (getUserRole() === 'teacher') {
+        const taskResult = await fetchTeacherAttendanceTasks(token, schoolId, date);
+        if (!taskResult.ok || taskResult.data?.status !== 'ok') {
+          feedback.textContent = taskResult.data?.message || 'Unable to verify this attendance task.';
+          roster.innerHTML = '';
+          return;
+        }
+        const taskDay = taskResult.data;
+        if (taskDay.dayType !== 'instructional_weekday') {
+          const closures = (taskDay.schoolClosures || []).map((entry) => entry.title).filter(Boolean).join(', ');
+          feedback.textContent = taskDay.dayType === 'school_closure'
+            ? `School is closed on ${date}${closures ? `: ${closures}` : ''}. Ordinary attendance is not required.`
+            : taskDay.dayType === 'outside_academic_year'
+              ? `The selected date is outside the configured academic year. Ordinary attendance is not required.`
+              : `It is the weekend in the school timezone (${taskDay.timeZone || 'UTC'}). Ordinary attendance is not required.`;
+          roster.innerHTML = '';
+          return;
+        }
+        if (!taskDay.tasks?.some((task) => String(task.className).toLowerCase() === String(className).toLowerCase())) {
+          feedback.textContent = 'No attendance task exists for this class. Confirm it is assigned to your account.';
+          roster.innerHTML = '';
+          return;
+        }
+      }
       const result = await fetchSchoolDetails(token, schoolId);
       const school = result.ok && result.data?.status === 'ok' ? result.data.school || {} : {};
       const students = Array.isArray(school.students) ? school.students : [];
@@ -4460,7 +4593,13 @@ function attachSchoolHandlers() {
           feedback.textContent = saveResult.data?.message || 'Unable to save attendance.';
           return;
         }
-        feedback.textContent = `Attendance saved for ${selected.length} student${selected.length === 1 ? '' : 's'}.`;
+        const savedTaskResult = await fetchTeacherAttendanceTasks(token, schoolId, date);
+        const savedTask = savedTaskResult.ok && savedTaskResult.data?.status === 'ok'
+          ? (savedTaskResult.data.tasks || []).find((task) => String(task.className).toLowerCase() === String(className).toLowerCase())
+          : null;
+        feedback.textContent = savedTask?.status === 'completed'
+          ? `Attendance saved and the ${className} task is complete for ${date}.`
+          : `Attendance saved for ${selected.length} student${selected.length === 1 ? '' : 's'}${savedTaskResult.ok ? '; the class task remains open until the full roster is recorded.' : '.'}`;
       });
     });
   }
@@ -6085,6 +6224,18 @@ function showTeacherReportCardForm({ students = [], classes = [], token, schoolI
 }
 
 function initializeTeacherWorkspaceHandlers(teacherData = {}) {
+  document.querySelectorAll('[data-attendance-task-class]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const dateInput = document.getElementById('school-attendance-date');
+      const classInput = document.getElementById('school-attendance-class');
+      const loadButton = document.querySelector('[data-school-attendance-load]');
+      if (!dateInput || !classInput || !loadButton) return;
+      dateInput.value = button.dataset.attendanceTaskDate || '';
+      classInput.value = button.dataset.attendanceTaskClass || '';
+      loadButton.click();
+    });
+  });
+
   document.querySelectorAll('[data-teacher-workspace-action]').forEach((button) => {
     if (button.dataset.teacherWorkspaceBound === 'true') return;
     button.dataset.teacherWorkspaceBound = 'true';

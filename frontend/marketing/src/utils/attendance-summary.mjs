@@ -60,6 +60,22 @@ export function getAttendancePeriodOptions(records = [], field) {
   return [...options.values()];
 }
 
+function attendanceNotRequired(date, events = []) {
+  if (date === 'all') return '';
+  const parsedDate = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T00:00:00.000Z`) : null;
+  if (!parsedDate || Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== date) return '';
+  const day = parsedDate.getUTCDay();
+  if (day === 0 || day === 6) return 'weekend';
+  const closure = (Array.isArray(events) ? events : []).find((entry) => (
+    entry?.kind === 'school_calendar'
+      && entry.schoolClosure === true
+      && entry.status !== 'cancelled'
+      && String(entry.startDate || '') <= date
+      && String(entry.endDate || '') >= date
+  ));
+  return closure ? 'school_closure' : '';
+}
+
 function attendanceRecordMatchesClass(record, classOption) {
   const recordId = String(record.classId || record.class_id || '').trim();
   if (recordId) return Boolean(classOption.id && recordId === classOption.id);
@@ -75,6 +91,7 @@ export function summarizeAttendanceRecords(
   selectedStudent = 'all',
   selectedTerm = 'all',
   selectedAcademicYear = 'all',
+  calendarEvents = [],
 ) {
   const dateRecords = (Array.isArray(records) ? records : [])
     .filter((entry) => date === 'all' || String(entry.date || '').slice(0, 10) === date);
@@ -119,7 +136,8 @@ export function summarizeAttendanceRecords(
   });
 
   const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
-  const coverageClasses = selectedClassOption ? [selectedClassOption] : classOptions;
+  const notRequiredReason = attendanceNotRequired(date, calendarEvents);
+  const coverageClasses = notRequiredReason ? [] : selectedClassOption ? [selectedClassOption] : classOptions;
   const submittedClasses = coverageClasses.filter((classOption) => validDateRecords.some((entry) => attendanceRecordMatchesClass(entry, classOption)));
   const pendingClasses = coverageClasses.filter((classOption) => !submittedClasses.includes(classOption));
   return {
@@ -134,6 +152,8 @@ export function summarizeAttendanceRecords(
       pendingClassNames: pendingClasses.map((classOption) => classOption.label),
       unknown: validDateRecords.filter((entry) => !classOptions.some((classOption) => attendanceRecordMatchesClass(entry, classOption))).length,
       classCount: coverageClasses.length,
+      required: !notRequiredReason,
+      notRequiredReason,
       selectedClass: selectedClassOption?.label || '',
       selectedTerm: selectedTerm === 'all' ? '' : selectedTerm,
       selectedAcademicYear: selectedAcademicYear === 'all' ? '' : selectedAcademicYear,

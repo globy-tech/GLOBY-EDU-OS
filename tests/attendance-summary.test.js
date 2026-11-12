@@ -17,6 +17,7 @@ const records = [
   { date: '2026-11-09', classId: 'class-b', className: 'Class B', studentId: 'student-2', status: 'present' },
   { date: '2026-11-09', status: 'present' },
   { date: '2026-11-08', classId: 'class-a', className: 'Class A', studentId: 'student-3', status: 'present' },
+  { date: '2026-11-10', classId: 'class-a', className: 'Class A', studentId: 'student-4', status: 'present' },
 ];
 
 const today = summarizeAttendanceRecords(records, '2026-11-09', classes);
@@ -28,6 +29,8 @@ assert.deepEqual(today.coverage, {
   pendingClassNames: [],
   unknown: 1,
   classCount: 2,
+  required: true,
+  notRequiredReason: '',
   selectedClass: '',
   selectedTerm: '',
   selectedAcademicYear: '',
@@ -54,9 +57,9 @@ assert.deepEqual(allDates.counts, { present: 1, absent: 1 });
 assert.deepEqual(getAttendancePeriodOptions(periodRecords, 'term').map((option) => option.label), ['Term 1', 'Term 2']);
 assert.deepEqual(getAttendancePeriodOptions(periodRecords, 'academicYear').map((option) => option.label), ['2026/2027', '2025/2026']);
 
-const previousDay = summarizeAttendanceRecords(records, '2026-11-08', classes);
-assert.deepEqual(previousDay.coverage.pendingClassNames, ['Class B']);
-assert.equal(previousDay.coverage.pending, 1);
+const instructionalDay = summarizeAttendanceRecords(records, '2026-11-10', classes);
+assert.deepEqual(instructionalDay.coverage.pendingClassNames, ['Class B']);
+assert.equal(instructionalDay.coverage.pending, 1);
 
 const duplicateGradeClasses = [
   { classId: 'class-c', name: 'Class C', grade: 'Grade 8', status: 'active' },

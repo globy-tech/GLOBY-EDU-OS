@@ -17,6 +17,12 @@ const { listPricingPlans } = require('../pricing/pricing.service');
 const { DEFAULT_TRIAL_LABEL, createTrialEndDate } = require('./trial-period');
 const { generateSchoolSubdomain } = require('./tenant-hostname');
 const {
+  buildTeacherAttendanceTasks,
+  getSchoolLocalDate,
+  normalizeSchoolCalendarEvent,
+  parseCalendarDate,
+} = require('./school-calendar');
+const {
   loadSchoolData,
   saveSchoolData,
   createSchoolId,
@@ -1839,6 +1845,158 @@ function assertFinanceActor(schoolId, actor = {}) {
   }
 }
 
+function assertSchoolCalendarActor(schoolId, actor = {}) {
+  const roles = (Array.isArray(actor.roles) ? actor.roles : []).map((role) => String(role).toLowerCase());
+  if (!roles.some((role) => ['school_authority', 'school_head', 'super_admin'].includes(role))) {
+    const error = new Error('You do not have permission to manage the school calendar.');
+    error.statusCode = 403;
+    throw error;
+  }
+  if (roles.includes('super_admin') && actor.platformAdmin !== true) {
+    const error = new Error('Platform administrator authorization is required.');
+    error.statusCode = 403;
+    throw error;
+  }
+  if (!roles.includes('super_admin') && String(actor.tenantId || actor.schoolId || '') !== String(schoolId)) {
+    const error = new Error('You do not have access to this school.');
+    error.statusCode = 403;
+    throw error;
+  }
+}
+
+function schoolCalendarError(message, statusCode = 400) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+async function mutateSchoolCalendar(schoolId, mutate) {
+  if (firebaseCore.isFirebaseCoreMode()) {
+    const { result } = await firebaseCore.updateTenantInTransaction(schoolId, (tenant) => {
+      const mutation = mutate(tenant);
+      return { updates: { events: mutation.events }, result: mutation.result };
+    });
+    return result;
+  }
+
+  if (prisma && !prisma.__stub) {
+    return prisma.$transaction(async (transaction) => {
+      const tenant = await transaction.tenant.findUnique({ where: { schoolId } });
+      if (!tenant) throw schoolCalendarError('School not found.', 404);
+      const mutation = mutate(tenant);
+      await transaction.tenant.update({ where: { id: tenant.id }, data: { events: mutation.events } });
+      return mutation.result;
+    }, { isolationLevel: 'Serializable' });
+  }
+
+  const previous = financeMutationLocks.get(schoolId) || Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => { release = resolve; });
+  const queued = previous.then(() => current);
+  financeMutationLocks.set(schoolId, queued);
+  await previous;
+  try {
+    const school = loadSchoolData().find((entry) => entry.schoolId === schoolId || entry.id === schoolId);
+    if (!school) throw schoolCalendarError('School not found.', 404);
+    const mutation = mutate(school);
+    await updateSchool(school.id || school.schoolId, { events: mutation.events });
+    return mutation.result;
+  } finally {
+    release();
+    if (financeMutationLocks.get(schoolId) === queued) financeMutationLocks.delete(schoolId);
+  }
+}
+
+async function listSchoolCalendarEvents(schoolId, actor = {}) {
+  const roles = (Array.isArray(actor.roles) ? actor.roles : []).map((role) => String(role).toLowerCase());
+  if (!roles.some((role) => ['school_authority', 'school_head', 'teacher', 'super_admin'].includes(role))) {
+    throw schoolCalendarError('You do not have permission to view the school calendar.', 403);
+  }
+  if (roles.includes('super_admin')) {
+    if (actor.platformAdmin !== true) throw schoolCalendarError('Platform administrator authorization is required.', 403);
+  } else if (String(actor.tenantId || actor.schoolId || '') !== String(schoolId)) {
+    throw schoolCalendarError('You do not have access to this school.', 403);
+  }
+  const school = await getSchoolBySchoolId(schoolId);
+  if (!school) throw schoolCalendarError('School not found.', 404);
+  return {
+    timeZone: school.timezone || 'UTC',
+    localDate: getSchoolLocalDate(new Date(), school.timezone || 'UTC'),
+    events: (Array.isArray(school.events) ? school.events : [])
+      .filter((event) => event?.kind === 'school_calendar')
+      .sort((left, right) => left.startDate.localeCompare(right.startDate)),
+  };
+}
+
+async function createSchoolCalendarEvent(schoolId, payload = {}, actor = {}) {
+  assertSchoolCalendarActor(schoolId, actor);
+  const event = normalizeSchoolCalendarEvent(payload, null, actor);
+  return mutateSchoolCalendar(schoolId, (school) => {
+    const events = Array.isArray(school.events) ? school.events : [];
+    const duplicate = events.some((entry) => (
+      entry?.kind === 'school_calendar'
+        && entry.status !== 'cancelled'
+        && entry.type === event.type
+        && String(entry.title || '').toLowerCase() === event.title.toLowerCase()
+        && entry.startDate === event.startDate
+        && entry.endDate === event.endDate
+        && entry.schoolClosure === event.schoolClosure
+    ));
+    if (duplicate) throw schoolCalendarError('An equivalent active calendar event already exists.', 409);
+    return { events: [...events, event], result: event };
+  });
+}
+
+async function updateSchoolCalendarEvent(schoolId, eventId, payload = {}, actor = {}) {
+  assertSchoolCalendarActor(schoolId, actor);
+  return mutateSchoolCalendar(schoolId, (school) => {
+    const events = Array.isArray(school.events) ? school.events : [];
+    const index = events.findIndex((entry) => entry?.kind === 'school_calendar' && entry.id === eventId);
+    if (index === -1) throw schoolCalendarError('School calendar event not found.', 404);
+    const event = normalizeSchoolCalendarEvent(payload, events[index], actor);
+    const duplicate = events.some((entry, entryIndex) => (
+      entryIndex !== index
+        && entry?.kind === 'school_calendar'
+        && entry.status !== 'cancelled'
+        && event.status !== 'cancelled'
+        && entry.type === event.type
+        && String(entry.title || '').toLowerCase() === event.title.toLowerCase()
+        && entry.startDate === event.startDate
+        && entry.endDate === event.endDate
+        && entry.schoolClosure === event.schoolClosure
+    ));
+    if (duplicate) throw schoolCalendarError('An equivalent active calendar event already exists.', 409);
+    events[index] = event;
+    return { events, result: event };
+  });
+}
+
+async function getTeacherAttendanceTasks(schoolId, actor = {}, date) {
+  const roles = (Array.isArray(actor.roles) ? actor.roles : []).map((role) => String(role).toLowerCase());
+  if (!roles.includes('teacher')) throw schoolCalendarError('Only teachers can access their attendance tasks.', 403);
+  if (String(actor.tenantId || actor.schoolId || '') !== String(schoolId)) {
+    throw schoolCalendarError('You do not have access to this school.', 403);
+  }
+  if (date) {
+    try {
+      parseCalendarDate(date);
+    } catch (error) {
+      throw schoolCalendarError(error.message);
+    }
+  }
+  const school = await getSchoolBySchoolId(schoolId);
+  if (!school) throw schoolCalendarError('School not found.', 404);
+  const teacherView = getTeacherSchoolView(school, actor);
+  if (!teacherView?.teacherProfile) throw schoolCalendarError('Teacher profile not found.', 403);
+  return buildTeacherAttendanceTasks({
+    school,
+    classes: teacherView.classes,
+    students: teacherView.students,
+    attendanceRecords: teacherView.attendanceRecords,
+    date,
+  });
+}
+
 async function mutateSchoolFinance(schoolId, mutate) {
   if (firebaseCore.isFirebaseCoreMode()) {
     const { result } = await firebaseCore.updateTenantInTransaction(schoolId, (tenant) => {
@@ -2461,17 +2619,29 @@ function getTeacherSchoolView(school, user = {}) {
       && classMatchesStudent
       && subjectNames.has(resultSubject);
   });
+  const attendanceRecords = normalizeAttendanceRecords((Array.isArray(school.attendanceRecords) ? school.attendanceRecords : []).filter((entry) => {
+    const classId = String(entry.classId || '').trim().toLowerCase();
+    const className = String(entry.className || '').trim().toLowerCase();
+    return classIds.has(classId) || classNames.has(className);
+  }));
+  const schoolLocalDate = getSchoolLocalDate(new Date(), school.timezone || 'UTC');
   return {
     ...sanitizeSchoolAssetUrls(school),
     users: [],
     teachers: teacher ? [sanitizeTeacherRecord(teacher)] : [],
     classes,
     students: students.map(sanitizeTeacherRecord),
-    attendanceRecords: normalizeAttendanceRecords((Array.isArray(school.attendanceRecords) ? school.attendanceRecords : []).filter((entry) => {
-      const classId = String(entry.classId || '').trim().toLowerCase();
-      const className = String(entry.className || '').trim().toLowerCase();
-      return classIds.has(classId) || classNames.has(className);
-    })),
+    attendanceRecords,
+    schoolLocalDate,
+    schoolCalendarEvents: (Array.isArray(school.events) ? school.events : [])
+      .filter((entry) => entry?.kind === 'school_calendar'),
+    attendanceTasks: buildTeacherAttendanceTasks({
+      school,
+      classes,
+      students,
+      attendanceRecords,
+      date: schoolLocalDate,
+    }),
     examRecords: exams,
     examResults: results,
     reportCards: getReportCardsForStudents(school, students),
@@ -5829,6 +5999,10 @@ module.exports = {
   isSchoolAccessAllowed,
   getStudentSchoolView,
   getTeacherSchoolView,
+  listSchoolCalendarEvents,
+  createSchoolCalendarEvent,
+  updateSchoolCalendarEvent,
+  getTeacherAttendanceTasks,
   createFeePayment,
   createSchoolInvoice,
   listSchoolInvoices,

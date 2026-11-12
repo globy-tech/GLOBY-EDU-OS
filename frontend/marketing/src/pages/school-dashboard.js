@@ -207,6 +207,9 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
   const teachers = Array.isArray(sectionData.teachers) ? sectionData.teachers : [];
   const classes = Array.isArray(sectionData.classes) ? sectionData.classes : Array.isArray(sectionData.school?.classes) ? sectionData.school.classes : [];
   const attendanceRecords = Array.isArray(sectionData.attendanceRecords) ? sectionData.attendanceRecords : [];
+  const calendarEvents = Array.isArray(sectionData.calendarEvents) ? sectionData.calendarEvents : [];
+  const calendarDate = sectionData.schoolLocalDate || '';
+  const calendarTimeZone = sectionData.schoolTimeZone || sectionData.school?.timezone || 'UTC';
   const payments = Array.isArray(sectionData.payments) ? sectionData.payments : [];
   const financeCategories = Array.isArray(sectionData.financeCategories) ? sectionData.financeCategories : [];
   const invoices = Array.isArray(sectionData.invoices) ? sectionData.invoices : [];
@@ -242,6 +245,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
     attendanceViewStudent,
     attendanceViewTerm,
     attendanceViewAcademicYear,
+    calendarEvents,
   );
   const normalizedExamRecords = normalizeExamItems(examRecords.length ? examRecords : examSchedules);
   const normalizedExamResults = normalizeExamResults(examResults.length ? examResults : gradeEntries);
@@ -942,11 +946,13 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
             <div class="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p class="text-sm font-semibold text-slate-900">Attendance coverage for ${escapeHtml(attendanceSummary.date)}</p>
-                <p class="mt-1 text-sm text-slate-600">${attendanceSummary.coverage.classCount
+                <p class="mt-1 text-sm text-slate-600">${!attendanceSummary.coverage.required
+    ? `No ordinary attendance is required on a ${attendanceSummary.coverage.notRequiredReason === 'weekend' ? 'weekend' : 'declared school closure'}. Recorded entries, if any, remain available below.`
+    : attendanceSummary.coverage.classCount
     ? `${attendanceSummary.coverage.submitted} of ${attendanceSummary.coverage.classCount} class${attendanceSummary.coverage.classCount === 1 ? '' : 'es'} submitted attendance${attendanceSummary.coverage.pending ? `; no matching submissions for ${attendanceSummary.coverage.pendingClassNames.join(', ')}` : ''}.`
     : attendanceSummary.total ? `${attendanceSummary.total} student attendance record${attendanceSummary.total === 1 ? '' : 's'} submitted for ${attendanceSummary.date}.` : `No teacher attendance has been submitted for ${attendanceSummary.date} yet.`}${attendanceSummary.coverage.unknown ? ` ${attendanceSummary.coverage.unknown} record${attendanceSummary.coverage.unknown === 1 ? ' has' : 's have'} no class identity and could not be assigned.` : ''}</p>
               </div>
-              <span class="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-emerald-700">${attendanceSummary.coverage.pending ? `${attendanceSummary.coverage.pending} pending` : attendanceSummary.total ? `${attendanceSummary.counts.present} present` : 'Pending'}</span>
+              <span class="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-emerald-700">${!attendanceSummary.coverage.required ? 'Not required' : attendanceSummary.coverage.pending ? `${attendanceSummary.coverage.pending} pending` : attendanceSummary.total ? `${attendanceSummary.counts.present} present` : 'Pending'}</span>
             </div>
           </div>
           <div class="mt-6 space-y-3">
@@ -965,6 +971,36 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
               </div>
             `).join('') : `<div class="rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-600">No teacher attendance has been submitted for ${attendanceSummary.date} yet.</div>`}
           </div>
+        </div>
+      </div>
+    `,
+    calendar: `
+      <div class="space-y-6">
+        <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
+          <p class="text-sm uppercase tracking-[0.3em] text-slate-500">School Calendar</p>
+          <h2 class="mt-2 text-2xl font-semibold text-slate-900">Holidays, vacations, and school closures</h2>
+          <p class="mt-2 text-sm text-slate-600">Dates use the school timezone (${escapeHtml(calendarTimeZone)}). Public holidays do not close attendance unless marked as a school closure.</p>
+          <form data-school-calendar-form class="mt-5 grid gap-4 md:grid-cols-2">
+            <input type="hidden" name="eventId" />
+            <label class="text-sm font-semibold text-slate-700">Name<input name="title" required maxlength="120" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" placeholder="e.g. Mid-term break" /></label>
+            <label class="text-sm font-semibold text-slate-700">Type<select name="type" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal"><option value="public_holiday">Public holiday</option><option value="school_holiday">School holiday</option><option value="vacation">Vacation</option><option value="special_closure">Special closure</option><option value="custom">Other</option></select></label>
+            <label class="text-sm font-semibold text-slate-700">Start date<input name="startDate" type="date" required value="${escapeHtml(calendarDate)}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label>
+            <label class="text-sm font-semibold text-slate-700">End date<input name="endDate" type="date" required value="${escapeHtml(calendarDate)}" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" /></label>
+            <label class="text-sm font-semibold text-slate-700 md:col-span-2">Description<textarea name="description" rows="2" maxlength="500" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal" placeholder="Optional details"></textarea></label>
+            <label class="flex items-center gap-3 text-sm text-slate-700 md:col-span-2"><input name="schoolClosure" type="checkbox" class="h-4 w-4" />Do not require ordinary attendance tasks during these dates</label>
+            <label class="text-sm font-semibold text-slate-700">Calendar status<select name="status" class="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 font-normal"><option value="active">Active</option><option value="cancelled">Cancelled</option></select></label>
+            <div class="flex items-end gap-3"><button type="submit" class="rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Save calendar entry</button><button type="button" data-school-calendar-reset class="rounded-full border border-slate-200 px-5 py-3 text-sm font-semibold text-slate-700">Clear</button></div>
+          </form>
+          <p data-school-calendar-feedback class="mt-3 text-sm text-slate-600" role="status" aria-live="polite"></p>
+        </div>
+        <div class="rounded-4xl border border-slate-200 bg-slate-50 p-6">
+          <h3 class="font-semibold text-slate-900">Calendar entries</h3>
+          <div class="mt-4 space-y-3">${calendarEvents.length ? calendarEvents.map((entry) => `
+            <article class="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-4">
+              <div><p class="font-semibold text-slate-900">${escapeHtml(entry.title || entry.name || 'Calendar event')}</p><p class="mt-1 text-sm text-slate-600">${escapeHtml(entry.startDate)}${entry.endDate && entry.endDate !== entry.startDate ? ` to ${escapeHtml(entry.endDate)}` : ''} · ${escapeHtml(String(entry.type || 'custom').replace(/_/g, ' '))} · ${entry.schoolClosure ? 'School closed' : 'Attendance remains scheduled'} · ${escapeHtml(entry.status || 'active')}</p>${entry.description ? `<p class="mt-1 text-sm text-slate-500">${escapeHtml(entry.description)}</p>` : ''}</div>
+              <div class="flex gap-2"><button type="button" data-school-calendar-edit="${escapeHtml(entry.id)}" class="rounded-full border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700">Edit</button>${entry.status !== 'cancelled' ? `<button type="button" data-school-calendar-cancel="${escapeHtml(entry.id)}" class="rounded-full border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">Cancel</button>` : ''}</div>
+            </article>
+          `).join('') : '<p class="text-sm text-slate-600">No school calendar entries yet.</p>'}</div>
         </div>
       </div>
     `,
@@ -1545,6 +1581,13 @@ export function TeacherDashboard(section = 'overview', teacherData = {}) {
   const assignments = Array.isArray(teacherData.assignments) ? teacherData.assignments : [];
   const lessons = Array.isArray(teacherData.lessons) ? teacherData.lessons : [];
   const profile = teacherData.teacherProfile || {};
+  const attendanceTasks = teacherData.attendanceTasks || { date: teacherData.schoolLocalDate || '', tasks: [], dayType: 'instructional_weekday' };
+  const calendarEvents = Array.isArray(teacherData.schoolCalendarEvents) ? teacherData.schoolCalendarEvents : [];
+  const upcomingClosures = calendarEvents.filter((entry) => (
+    entry.schoolClosure === true
+      && entry.status !== 'cancelled'
+      && entry.endDate >= (attendanceTasks.date || teacherData.schoolLocalDate || '')
+  )).slice(0, 5);
   const attendanceClassOptions = [...new Set([
     ...classes.flatMap((entry) => [entry.name, entry.className, entry.grade]),
     ...students.map((entry) => entry.className || entry.gradeLevel || entry.grade),
@@ -1564,8 +1607,11 @@ export function TeacherDashboard(section = 'overview', teacherData = {}) {
       <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
         <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Attendance</p>
         <h2 class="mt-2 text-2xl font-semibold text-slate-900">Mark attendance for an assigned class</h2>
+        ${attendanceTasks.dayType === 'school_closure' ? `<div class="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"><strong>School is closed on ${escapeHtml(attendanceTasks.date)}.</strong> ${attendanceTasks.schoolClosures.map((entry) => escapeHtml(entry.title)).join(', ')}. Ordinary attendance is not required.</div>` : attendanceTasks.dayType === 'weekend' ? `<div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">It is the weekend in the school timezone (${escapeHtml(teacherData.schoolTimeZone || 'UTC')}); ordinary attendance is not required.</div>` : attendanceTasks.dayType === 'outside_academic_year' ? '<div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">Today is outside the configured academic year; no ordinary attendance task is due.</div>' : ''}
+        ${upcomingClosures.length ? `<p class="mt-3 text-xs text-slate-500">Upcoming school closures: ${upcomingClosures.map((entry) => `${escapeHtml(entry.title)} (${escapeHtml(entry.startDate)}${entry.endDate !== entry.startDate ? ` to ${escapeHtml(entry.endDate)}` : ''})`).join(' · ')}</p>` : ''}
+        ${attendanceTasks.tasks?.length ? `<div class="mt-4 grid gap-3 sm:grid-cols-2">${attendanceTasks.tasks.map((task) => `<article class="rounded-2xl border border-slate-200 ${task.status === 'completed' ? 'bg-emerald-50' : 'bg-sky-50'} p-4"><p class="font-semibold text-slate-900">${escapeHtml(task.className)}</p><p class="mt-1 text-sm text-slate-600">${escapeHtml(task.submittedStudentCount)} of ${escapeHtml(task.expectedStudentCount)} students recorded · ${escapeHtml(task.status === 'not_required' ? 'no active students; attendance not required' : task.status)}</p>${task.status === 'pending' ? `<button type="button" data-attendance-task-class="${escapeHtml(task.className)}" data-attendance-task-date="${escapeHtml(task.date)}" class="mt-3 rounded-full bg-sky-600 px-4 py-2 text-xs font-semibold text-white">Record this class</button>` : ''}</article>`).join('')}</div>` : ''}
         <div class="mt-5 grid gap-4 md:grid-cols-[1fr_1fr_auto] md:items-end">
-          <label class="text-sm font-semibold text-slate-700">Date<input id="school-attendance-date" type="date" value="${new Date().toISOString().slice(0, 10)}" class="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 font-normal" /></label>
+          <label class="text-sm font-semibold text-slate-700">Date<input id="school-attendance-date" type="date" value="${escapeHtml(attendanceTasks.date || teacherData.schoolLocalDate || new Date().toISOString().slice(0, 10))}" class="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 font-normal" /></label>
           <label class="text-sm font-semibold text-slate-700">Assigned class<select id="school-attendance-class" class="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 font-normal"><option value="">Select a class</option>${attendanceClassOptions}</select></label>
           <button type="button" data-school-attendance-load class="rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Load roster</button>
         </div>
