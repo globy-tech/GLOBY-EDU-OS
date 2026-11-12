@@ -343,7 +343,7 @@ describe('student account deletion workflow', () => {
       'approved',
       'wrong-id',
       authority,
-    )).rejects.toThrow('Type the student ID to confirm permanent deletion.');
+    )).rejects.toThrow('Type the student ID to confirm archival.');
 
     const result = await schoolService.resolveStudentDeletionRequest(
       SCHOOL_ID,
@@ -356,7 +356,7 @@ describe('student account deletion workflow', () => {
     expect(global.__workspaceSnapshot[0].students[0].metadata.deletionRequest.status).toBe('rejected');
   });
 
-  test('approval permanently removes the student record and associated local account', async () => {
+  test('approval archives the student and retains the student/account history', async () => {
     const school = global.__workspaceSnapshot[0];
     school.users.push({ username: 'STU-A', studentId: 'STU-A', role: 'student', status: 'active' });
     await schoolService.requestStudentDeletion(SCHOOL_ID, 'STU-A', '', teacher);
@@ -370,8 +370,29 @@ describe('student account deletion workflow', () => {
     );
 
     expect(result.status).toBe('approved');
-    expect(school.students).toHaveLength(0);
-    expect(school.users).toHaveLength(0);
+    expect(result.archived).toBe(true);
+    expect(school.students).toHaveLength(1);
+    expect(school.students[0]).toMatchObject({
+      studentId: 'STU-A',
+      status: 'archived',
+      classId: null,
+      className: null,
+    });
+    expect(school.students[0].metadata).toMatchObject({
+      deletionRequest: { status: 'approved' },
+      classHistory: [expect.objectContaining({ classId: 'class-a', className: 'Class A' })],
+    });
+    expect(school.users).toHaveLength(1);
+    expect(school.users[0]).toMatchObject({ status: 'archived', classId: null, className: null });
+
+    await expect(schoolService.resolveStudentDeletionRequest(
+      SCHOOL_ID,
+      'STU-A',
+      'approved',
+      'STU-A',
+      authority,
+    )).resolves.toMatchObject({ status: 'approved', archived: true });
+    expect(school.students[0].metadata.classHistory).toHaveLength(1);
   });
 
   test('authority archive and restore status is synchronized to the student login record', async () => {

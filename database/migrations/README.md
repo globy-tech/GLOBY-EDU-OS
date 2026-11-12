@@ -1,14 +1,14 @@
 # Migrations
 
-Purpose: Version-controlled Prisma migration files. Keep each migration idempotent and reversible where possible.
+Version-controlled Prisma migrations are under `database/prisma/migrations/`. Keep migrations reviewable and safe to validate without connecting to production.
 
-Status: Initial schema, pricing, school archival, and school finance migrations are versioned. Do not run a production migration until the target Supabase database is intentionally provisioned and the migration has been reviewed.
+The class year and multiple-teacher assignment migration is `20261111120000_class_year_and_teacher_assignments`. It adds optional `academicYearId` and `section` columns and a `teacherIds` array. Existing `teacherId` values are copied into an empty `teacherIds` array. This migration has not been applied.
 
-Safe preparation commands:
+Safe schema checks:
 
 ```text
 npx prisma validate --schema database/prisma/schema.prisma
-npx prisma migrate dev --schema database/prisma/schema.prisma --name initial_schema
+npx prisma migrate status --schema database/prisma/schema.prisma
 ```
 
-Never run `prisma migrate reset` against production.
+Run `prisma migrate dev` only with an intentionally provisioned isolated development database. Never run a production migration from this workspace without explicit release-owner review and a tested backup/rollback plan. Never run `prisma migrate reset` against production.

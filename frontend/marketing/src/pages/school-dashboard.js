@@ -202,6 +202,8 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
   const semesterCount = summary.semesterCount ?? '—';
 
   const students = Array.isArray(sectionData.students) ? sectionData.students : [];
+  const admissions = Array.isArray(sectionData.admissions) ? sectionData.admissions : [];
+  const academicYears = Array.isArray(sectionData.academicYears) ? sectionData.academicYears : [];
   const teachers = Array.isArray(sectionData.teachers) ? sectionData.teachers : [];
   const classes = Array.isArray(sectionData.classes) ? sectionData.classes : Array.isArray(sectionData.school?.classes) ? sectionData.school.classes : [];
   const attendanceRecords = Array.isArray(sectionData.attendanceRecords) ? sectionData.attendanceRecords : [];
@@ -566,6 +568,8 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
             <button type="button" data-school-section-action="create-academic-record" data-school-section-entity="subjects" class="rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700">Create subject</button>
             <button type="button" data-school-section-action="create-academic-record" data-school-section-entity="streams" class="rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700">Create stream</button>
             <button type="button" data-school-section-action="create-academic-record" data-school-section-entity="academic-years" class="rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700">Create academic year</button>
+            <button type="button" data-school-section-action="configure-progression" class="rounded-full border border-sky-200 bg-sky-50 px-5 py-3 text-sm font-semibold text-sky-800">Configure progression</button>
+            <button type="button" data-school-section-action="student-progression" class="rounded-full border border-emerald-200 bg-emerald-50 px-5 py-3 text-sm font-semibold text-emerald-800">Preview student progression</button>
             <button type="button" data-school-section-action="create-academic-record" data-school-section-entity="terms" class="rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700">Create term</button>
             <button type="button" data-school-section-action="create-academic-record" data-school-section-entity="semesters" class="rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-white">Create semester</button>
             <button type="button" data-school-export="academic" class="rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700">Export JSON</button>
@@ -644,6 +648,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
                     <th class="px-4 py-3 text-left font-semibold">Name</th>
                     <th class="px-4 py-3 text-left font-semibold">Student ID</th>
                     <th class="px-4 py-3 text-left font-semibold">Class</th>
+                    <th class="px-4 py-3 text-left font-semibold">Previous class / year</th>
                     <th class="px-4 py-3 text-left font-semibold">Grade</th>
                     <th class="px-4 py-3 text-left font-semibold">Guardian</th>
                     <th class="px-4 py-3 text-left font-semibold">Status</th>
@@ -656,11 +661,14 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
                     const searchText = [student.fullName, student.email, student.studentId, student.admissionNumber, studentClassName, student.gradeLevel, student.grade, student.guardian, student.parentEmail].filter(Boolean).join(' ').toLowerCase();
                     const studentIdentifier = student.id || student.email || student.studentId || '';
                     const hasPendingDeletionRequest = student.metadata?.deletionRequest?.status === 'pending';
+                    const classHistory = Array.isArray(student.metadata?.classHistory) ? student.metadata.classHistory : [];
+                    const previousPlacement = classHistory[classHistory.length - 1];
                     return `
                       <tr data-school-student-row data-school-student-id="${escapeHtml(student.id || student.email || student.studentId || '')}" data-search-text="${escapeHtml(searchText)}" class="${student.status === 'archived' ? 'opacity-60' : ''}">
                         <td class="px-4 py-4 font-semibold text-slate-900"><div class="flex items-center gap-3"><span class="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-emerald-100 text-xs font-semibold text-emerald-700">${student.profilePhoto ? `<img src="${escapeHtml(student.profilePhoto)}" alt="" class="h-full w-full object-cover" />` : escapeHtml((student.fullName || student.name || 'S').trim().charAt(0).toUpperCase())}</span><span>${escapeHtml(student.fullName || student.name || student.email || 'Student')}</span></div></td>
                         <td class="px-4 py-4">${escapeHtml(student.studentId || student.admissionNumber || '—')}</td>
                         <td class="px-4 py-4">${escapeHtml(studentClassName || '—')}</td>
+                        <td class="px-4 py-4">${escapeHtml(previousPlacement?.className || '—')}<span class="block text-xs text-slate-500">${escapeHtml(previousPlacement?.academicYearId || '')}</span></td>
                         <td class="px-4 py-4">${escapeHtml(student.gradeLevel || student.grade || '—')}</td>
                         <td class="px-4 py-4">${escapeHtml(student.guardian || student.parentEmail || '—')}</td>
                         <td class="px-4 py-4"><span class="inline-flex rounded-full ${student.status === 'archived' ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'} px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em]">${escapeHtml(student.status || 'active')}</span></td>
@@ -674,6 +682,56 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
                 </tbody>
               </table>
             ` : `<div class="rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-600">No students have been created yet.</div>`}
+          </div>
+        </div>
+      </div>
+    `,
+    admissions: `
+      <div class="space-y-6">
+        ${sectionData.schoolDataLoadError ? `<div class="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800" role="alert">${escapeHtml(sectionData.schoolDataLoadError)}</div>` : ''}
+        <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <p class="text-sm uppercase tracking-[0.3em] text-slate-500">Admissions</p>
+              <h2 class="mt-2 text-2xl font-semibold text-slate-900">Applications and student enrollment</h2>
+              <p class="mt-2 text-sm text-slate-600">Pending applicants are not included in student totals or class rosters. Approving an application creates or links one student and enrolls that student in a selected class and academic year.</p>
+            </div>
+            <button type="button" data-school-admission-action="create" class="rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">New admission</button>
+          </div>
+          <div class="mt-4 grid gap-4 sm:grid-cols-3">
+            ${[
+              ['Pending', admissions.filter((entry) => entry.status === 'pending').length],
+              ['Approved / enrolled', admissions.filter((entry) => entry.status === 'approved').length],
+              ['Rejected', admissions.filter((entry) => entry.status === 'rejected').length],
+            ].map(([label, count]) => `<div class="rounded-2xl bg-slate-50 p-4"><p class="text-sm font-semibold text-slate-600">${label}</p><p class="mt-2 text-2xl font-semibold text-slate-900">${count}</p></div>`).join('')}
+          </div>
+        </div>
+        <div class="rounded-4xl border border-slate-200 bg-slate-50 p-6 shadow-sm">
+          <div class="max-w-full overflow-x-auto" role="region" aria-label="Admission applications" tabindex="0">
+            ${admissions.length ? `
+              <table class="min-w-full divide-y divide-slate-200 text-sm">
+                <thead class="bg-slate-100 text-slate-700"><tr>
+                  <th class="px-4 py-3 text-left">Applicant</th><th class="px-4 py-3 text-left">Application</th>
+                  <th class="px-4 py-3 text-left">Guardian</th><th class="px-4 py-3 text-left">Class / year</th>
+                  <th class="px-4 py-3 text-left">Status</th><th class="px-4 py-3 text-left">Actions</th>
+                </tr></thead>
+                <tbody class="divide-y divide-slate-200 bg-white">
+                  ${admissions.map((entry) => {
+                    const applicationId = entry.applicationId || entry.id;
+                    const className = classes.find((item) => String(item.classId || item.id) === String(entry.classId || entry.preferredClassId))?.name || entry.classId || entry.preferredClassId || 'Not selected';
+                    const yearName = academicYears.find((item) => String(item.id) === String(entry.academicYearId || entry.preferredAcademicYearId))?.label || entry.academicYearId || entry.preferredAcademicYearId || 'Not selected';
+                    return `<tr>
+                      <td class="px-4 py-4"><div class="flex items-center gap-3"><span class="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full bg-sky-100 text-xs font-semibold text-sky-700">${entry.profilePhoto ? `<img src="${escapeHtml(entry.profilePhoto)}" alt="" class="h-full w-full object-cover" />` : escapeHtml((entry.fullName || 'A').charAt(0).toUpperCase())}</span><span><span class="block font-semibold text-slate-900">${escapeHtml(entry.fullName)}</span><span class="block text-xs text-slate-500">${escapeHtml(entry.email)}</span></span></div></td>
+                      <td class="px-4 py-4">${escapeHtml(entry.applicationNumber || applicationId)}</td>
+                      <td class="px-4 py-4">${escapeHtml(entry.guardian || '—')}<span class="block text-xs text-slate-500">${escapeHtml(entry.parentPhone || '')}</span></td>
+                      <td class="px-4 py-4">${escapeHtml(className)}<span class="block text-xs text-slate-500">${escapeHtml(yearName)}</span></td>
+                      <td class="px-4 py-4"><span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase">${escapeHtml(entry.status)}</span></td>
+                      <td class="px-4 py-4">${entry.status === 'pending' ? `<button type="button" data-school-admission-action="edit" data-admission-id="${escapeHtml(applicationId)}" class="mr-1 rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-semibold text-sky-700">Review</button><button type="button" data-school-admission-action="approve" data-admission-id="${escapeHtml(applicationId)}" class="mr-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">Approve & enroll</button><button type="button" data-school-admission-action="reject" data-admission-id="${escapeHtml(applicationId)}" class="rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700">Reject</button>` : `<span class="text-xs text-slate-500">${escapeHtml(entry.studentId ? `Student ${entry.studentId}` : '')}</span>`}</td>
+                    </tr>`;
+                  }).join('')}
+                </tbody>
+              </table>
+            ` : '<div class="rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-600">No admission applications have been created.</div>'}
           </div>
         </div>
       </div>
@@ -776,7 +834,10 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
               <h2 class="mt-2 text-2xl font-semibold text-slate-900">Classes, streams, teachers, and enrolled students</h2>
               <p class="mt-2 text-sm text-slate-600">Create and manage the class records used by student enrollment and attendance.</p>
             </div>
-            <button type="button" data-school-section-action="create-academic-record" data-school-section-entity="classes" class="rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Create class</button>
+            <div class="flex flex-wrap gap-2">
+              <button type="button" data-school-section-action="configure-class-equivalences" class="rounded-full border border-sky-200 bg-white px-5 py-3 text-sm font-semibold text-sky-700">Configure class aliases</button>
+              <button type="button" data-school-section-action="create-academic-record" data-school-section-entity="classes" class="rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Create class</button>
+            </div>
           </div>
         </div>
         <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -788,18 +849,38 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
             return activeClassRecords.map((classRecord) => {
               const classId = classRecord.classId || classRecord.id || classRecord.name;
               const className = classRecord.name || classRecord.className || classId;
-              const assignedTeacher = classTeachers.find((teacher) => String(teacher.teacherId || teacher.username || teacher.email) === String(classRecord.teacherId || classRecord.teacher || ''));
+              const assignedTeacherIds = new Set([
+                ...(Array.isArray(classRecord.teacherIds) ? classRecord.teacherIds : []),
+                classRecord.teacherId,
+                classRecord.teacher,
+              ].filter(Boolean).map((value) => String(value).trim().toLowerCase()));
+              const assignedTeachers = classTeachers.filter((teacher) => (
+                [teacher.teacherId, teacher.username, teacher.email]
+                  .some((value) => assignedTeacherIds.has(String(value || '').trim().toLowerCase()))
+              ));
               const enrolledStudents = classStudents.filter((student) => {
                 const sameClassId = student.classId && String(student.classId) === String(classId);
-                const sameLegacyName = String(student.className || student.gradeLevel || student.grade || '').trim() === String(className).trim();
+                const studentClassName = String(student.className || '').trim().toLowerCase();
+                const sameLegacyName = [classRecord.name, classRecord.className]
+                  .filter(Boolean)
+                  .some((value) => studentClassName === String(value).trim().toLowerCase());
                 return sameClassId || sameLegacyName;
               });
+              const classAliases = new Set([classId, className, classRecord.className]
+                .filter(Boolean).map((value) => String(value).trim().toLowerCase()));
+              const classAttendance = attendanceRecords.filter((record) => (
+                classAliases.has(String(record.classId || '').trim().toLowerCase())
+                || classAliases.has(String(record.className || '').trim().toLowerCase())
+              ));
+              const presentCount = classAttendance.filter((record) => String(record.status || '').toLowerCase() === 'present').length;
+              const absentCount = classAttendance.filter((record) => String(record.status || '').toLowerCase() === 'absent').length;
               return `<article class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div class="flex items-start justify-between gap-3">
                   <div><h3 class="font-semibold text-slate-900">${escapeHtml(className)}</h3><p class="mt-1 text-sm text-slate-600">${escapeHtml(classRecord.grade || 'Class')} ${classRecord.section ? `• ${escapeHtml(classRecord.section)}` : ''}</p></div>
                   <span class="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">${enrolledStudents.length} student${enrolledStudents.length === 1 ? '' : 's'}</span>
                 </div>
-                <p class="mt-4 text-sm text-slate-600">Teacher: <span class="font-semibold text-slate-900">${escapeHtml(assignedTeacher?.fullName || assignedTeacher?.name || classRecord.teacher || 'Unassigned')}</span></p>
+                <p class="mt-4 text-sm text-slate-600">Teacher${assignedTeachers.length === 1 ? '' : 's'}: <span class="font-semibold text-slate-900">${escapeHtml(assignedTeachers.map((teacher) => teacher.fullName || teacher.name || teacher.teacherId || teacher.username).join(', ') || 'Unassigned')}</span></p>
+                <p class="mt-1 text-xs text-slate-500">Attendance records: ${classAttendance.length} · Present: ${presentCount} · Absent: ${absentCount}</p>
                 <div class="mt-4 flex flex-wrap gap-2">
                   <button type="button" data-school-section-action="edit-class" data-class-id="${escapeHtml(classId)}" class="rounded-full border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-semibold text-sky-700">Edit</button>
                   <button type="button" data-school-section-action="assign-class-teacher" data-class-id="${escapeHtml(classId)}" class="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700">Assign teacher</button>
@@ -962,8 +1043,20 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
                     <div class="text-right">
                       <p class="text-sm font-semibold text-slate-900">${escapeHtml(amountStr)}</p>
                       <p class="mt-1 text-xs uppercase tracking-[0.24em] text-slate-600">${escapeHtml(invoice.status || 'Pending')}</p>
+                      ${invoice.paymentReference ? `<p class="mt-1 text-xs text-slate-500">Ref: ${escapeHtml(invoice.paymentReference)}</p>` : ''}
                     </div>
                   </div>
+                  ${String(invoice.status || '').toLowerCase() === 'pending' && invoice.id ? `
+                    <div class="mt-3 flex justify-end">
+                      <div class="flex flex-wrap justify-end gap-2">
+                        ${invoice.checkoutStatus === 'initialized' && invoice.checkoutReference
+                          ? `<button type="button" data-school-finance-action="verify-invoice-payment" data-invoice-id="${escapeHtml(invoice.id)}" data-payment-reference="${escapeHtml(invoice.checkoutReference)}" class="rounded-full border border-sky-200 bg-white px-3 py-2 text-sm font-semibold text-sky-700">Verify payment</button>`
+                          : invoice.checkoutStatus === 'initialization_failed'
+                            ? '<span class="rounded-full bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">Checkout requires review</span>'
+                            : `<button type="button" data-school-finance-action="start-invoice-checkout" data-invoice-id="${escapeHtml(invoice.id)}" class="rounded-full bg-sky-600 px-3 py-2 text-sm font-semibold text-white">Pay online</button>`}
+                      </div>
+                    </div>
+                  ` : ''}
                 </div>
               `}).join('') || '<div class="rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-600">No invoices have been generated yet.</div>'}
             </div>
@@ -1464,7 +1557,7 @@ export function TeacherDashboard(section = 'overview', teacherData = {}) {
     : '<p class="text-sm text-slate-600">No assigned students found.</p>';
   const sectionMarkup = {
     classes: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">My Classes</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Classes assigned to ${escapeHtml(teacherName)}</h2><div class="mt-5 grid gap-4 sm:grid-cols-2">${classesMarkup}</div></div>`,
-    students: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Students</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Students in your assigned classes</h2><button type="button" data-teacher-workspace-action="create-student" class="mt-5 rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Add student</button><div class="mt-5 grid gap-3 sm:grid-cols-2">${students.length ? students.map((student) => `<article class="rounded-2xl border border-slate-200 bg-white p-3"><div class="flex items-center gap-3"><div class="flex h-10 w-10 items-center justify-center overflow-hidden rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700">${student.profilePhoto ? `<img src="${escapeHtml(student.profilePhoto)}" alt="${escapeHtml(student.fullName || 'Student')}" class="h-full w-full object-cover" />` : escapeHtml((student.fullName || 'S').slice(0, 1))}</div><div><p class="font-semibold text-slate-900">${escapeHtml(student.fullName || 'Student')}</p><p class="text-xs text-slate-500">${escapeHtml(student.studentId || '')}</p></div></div><button type="button" data-teacher-student-edit="${escapeHtml(student.studentId || student.id || student.email || '')}" class="mt-3 rounded-full border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700">Edit</button>${student.metadata?.deletionRequest?.status === 'pending' ? '<span class="ml-2 mt-3 inline-block rounded-full bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">Deletion request pending</span>' : `<button type="button" data-teacher-student-delete-request="${escapeHtml(student.studentId || student.id || student.email || '')}" class="ml-2 mt-3 rounded-full border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">Request deletion</button>`}</article>`).join('') : '<p class="text-sm text-slate-600">No assigned students found.</p>'}</div></div>`,
+    students: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Students</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Students in your assigned classes</h2><button type="button" data-teacher-workspace-action="create-student" class="mt-5 rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Add student</button><div class="mt-5 grid gap-3 sm:grid-cols-2">${students.length ? students.map((student) => { const history = Array.isArray(student.metadata?.classHistory) ? student.metadata.classHistory : []; const previous = history[history.length - 1]; return `<article class="rounded-2xl border border-slate-200 bg-white p-3"><div class="flex items-center gap-3"><div class="flex h-10 w-10 items-center justify-center overflow-hidden rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700">${student.profilePhoto ? `<img src="${escapeHtml(student.profilePhoto)}" alt="${escapeHtml(student.fullName || 'Student')}" class="h-full w-full object-cover" />` : escapeHtml((student.fullName || 'S').slice(0, 1))}</div><div><p class="font-semibold text-slate-900">${escapeHtml(student.fullName || 'Student')}</p><p class="text-xs text-slate-500">${escapeHtml(student.studentId || '')}</p><p class="text-xs text-slate-500">Current class: ${escapeHtml(student.className || student.gradeLevel || student.grade || '—')}</p>${previous ? `<p class="text-xs text-slate-500">Previous: ${escapeHtml(previous.className || previous.classId || 'Class')} · ${escapeHtml(previous.academicYearId || '')}</p>` : ''}</div></div><button type="button" data-teacher-student-edit="${escapeHtml(student.studentId || student.id || student.email || '')}" class="mt-3 rounded-full border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700">Edit</button>${student.metadata?.deletionRequest?.status === 'pending' ? '<span class="ml-2 mt-3 inline-block rounded-full bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">Deletion request pending</span>' : `<button type="button" data-teacher-student-delete-request="${escapeHtml(student.studentId || student.id || student.email || '')}" class="ml-2 mt-3 rounded-full border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">Request deletion</button>`}</article>`; }).join('') : '<p class="text-sm text-slate-600">No assigned students found.</p>'}</div></div>`,
     assignments: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Assignments</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Assignments for your authorized classes</h2><button type="button" data-teacher-workspace-action="create-assignment" class="mt-5 rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Create assignment</button><div class="mt-5 space-y-3">${assignments.length ? assignments.map((entry) => `<article class="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p class="font-semibold text-slate-900">${escapeHtml(entry.title || 'Assignment')}</p><p class="mt-1 text-sm text-slate-600">${escapeHtml(entry.subject || 'Subject')} · Due ${escapeHtml(entry.dueDate || 'No due date')}</p><p class="mt-2 text-sm text-slate-600">${escapeHtml(entry.instructions || entry.description || '')}</p></article>`).join('') : '<p class="text-sm text-slate-600">No assignments created yet.</p>'}</div></div>`,
     lessons: `<div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm"><p class="text-sm uppercase tracking-[0.3em] text-slate-500">Learning Materials</p><h2 class="mt-2 text-2xl font-semibold text-slate-900">Lessons for your authorized classes</h2><button type="button" data-teacher-workspace-action="create-lesson" class="mt-5 rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white">Create learning material</button><div class="mt-5 space-y-3">${lessons.length ? lessons.map((entry) => `<article class="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p class="font-semibold text-slate-900">${escapeHtml(entry.title || 'Lesson')}</p><p class="mt-1 text-sm text-slate-600">${escapeHtml(entry.subject || 'Subject')} · ${escapeHtml(entry.className || entry.classId || '')}</p><p class="mt-2 text-sm text-slate-600">${escapeHtml(entry.content || entry.description || '')}</p></article>`).join('') : '<p class="text-sm text-slate-600">No learning materials created yet.</p>'}</div></div>`,
     attendance: `

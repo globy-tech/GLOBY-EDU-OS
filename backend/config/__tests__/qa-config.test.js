@@ -1,7 +1,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { assertIsolatedQaConfiguration } = require('../qa-config');
+const { assertIsolatedQaConfiguration, assertTestDataFilePath } = require('../qa-config');
 
 function createTempDirectory() {
   return fs.mkdtempSync(path.join(os.tmpdir(), `globy-qa-config-${process.pid}-`));
@@ -21,6 +21,23 @@ function createQaEnv(qaHome) {
 
 describe('isolated QA configuration', () => {
   const qaHome = path.join(os.tmpdir(), `globy-qa-config-${process.pid}`);
+
+  test.each(['GLOBY_SCHOOLS_FILE', 'GLOBY_AUDIT_FILE'])(
+    'requires %s to be explicitly configured outside the repository in test mode',
+    (variable) => {
+      const repositoryFile = path.resolve(__dirname, '..', '..', 'data', 'synthetic-test-store.json');
+      const externalFile = path.join(os.tmpdir(), `globy-test-store-${variable}-${process.pid}.json`);
+      expect(() => assertTestDataFilePath({ NODE_ENV: 'test' }, variable)).toThrow(/required in test mode/);
+      expect(() => assertTestDataFilePath({
+        NODE_ENV: 'test',
+        [variable]: repositoryFile,
+      }, variable)).toThrow(/outside the repository in test mode/);
+      expect(() => assertTestDataFilePath({
+        NODE_ENV: 'test',
+        [variable]: externalFile,
+      }, variable)).not.toThrow();
+    },
+  );
 
   test('accepts explicit JSON stores outside the repository', () => {
     expect(() => assertIsolatedQaConfiguration(createQaEnv(qaHome))).not.toThrow();

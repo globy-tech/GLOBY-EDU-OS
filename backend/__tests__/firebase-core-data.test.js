@@ -77,4 +77,128 @@ describe('Firebase core document writes', () => {
     }));
     expect(mockUpdate).toHaveBeenCalledTimes(1);
   });
+
+  test('serializes competing progression decisions for the same student', async () => {
+    const records = new Map([
+      ['students/school-a:STD-1', {
+        schoolId: 'school-a',
+        studentId: 'STD-1',
+        classId: 'class-source',
+        academicYearId: 'year-source',
+        metadata: {},
+      }],
+      ['classes/school-a:class-source', {
+        schoolId: 'school-a',
+        classId: 'class-source',
+        academicYearId: 'year-source',
+        studentIds: ['STD-1'],
+      }],
+      ['classes/school-a:class-target', {
+        schoolId: 'school-a',
+        classId: 'class-target',
+        academicYearId: 'year-target',
+        studentIds: [],
+      }],
+      ['enrollments/school-a:enrollment-source', {
+        schoolId: 'school-a',
+        studentId: 'STD-1',
+        academicYearId: 'year-source',
+        classId: 'class-source',
+        status: 'active',
+        isCurrent: true,
+      }],
+    ]);
+    let transactionQueue = Promise.resolve();
+    mockFirestore.collection.mockImplementation((name) => ({
+      doc: (id) => ({ collectionName: name, id: String(id) }),
+      where: (field, operator, value) => ({
+        collectionName: name,
+        filters: [[field, operator, value]],
+        where(nextField, nextOperator, nextValue) {
+          this.filters.push([nextField, nextOperator, nextValue]);
+          return this;
+        },
+      }),
+    }));
+    mockFirestore.runTransaction.mockImplementation((callback) => {
+      const current = transactionQueue.then(async () => {
+        const writes = [];
+        const transaction = {
+          get: async (reference) => {
+            if (reference.filters) {
+              const docs = [...records.entries()]
+                .filter(([key, data]) => key.startsWith(`${reference.collectionName}/`)
+                  && reference.filters.every(([field, , value]) => data[field] === value))
+                .map(([key, data]) => ({
+                  id: key.slice(reference.collectionName.length + 1),
+                  ref: { collectionName: reference.collectionName, id: key.slice(reference.collectionName.length + 1) },
+                  data: () => data,
+                }));
+              return { docs };
+            }
+            const data = records.get(`${reference.collectionName}/${reference.id}`);
+            return { exists: Boolean(data), data: () => data };
+          },
+          set: (reference, data) => writes.push([reference, data]),
+        };
+        const result = await callback(transaction);
+        writes.forEach(([reference, data]) => {
+          records.set(`${reference.collectionName}/${reference.id}`, {
+            ...(records.get(`${reference.collectionName}/${reference.id}`) || {}),
+            ...data,
+          });
+        });
+        return result;
+      });
+      transactionQueue = current.catch(() => {});
+      return current;
+    });
+
+    const progression = {
+      schoolId: 'school-a',
+      studentId: 'STD-1',
+      fromAcademicYearId: 'year-source',
+      sourceClassId: 'class-source',
+      targetAcademicYearId: 'year-target',
+      targetClassId: 'class-target',
+      operationId: 'progression-op-1',
+      action: 'promote',
+      student: {
+        schoolId: 'school-a',
+        studentId: 'STD-1',
+        classId: 'class-target',
+        academicYearId: 'year-target',
+        metadata: { progressionHistory: [{
+          operationId: 'progression-op-1',
+          action: 'promote',
+          fromAcademicYearId: 'year-source',
+          toAcademicYearId: 'year-target',
+          toClassId: 'class-target',
+        }] },
+      },
+      targetEnrollment: {
+        id: 'STD-1:year-target:class-target',
+        studentId: 'STD-1',
+        classId: 'class-target',
+        academicYearId: 'year-target',
+        status: 'active',
+        isCurrent: true,
+      },
+    };
+
+    const results = await Promise.allSettled([
+      firebaseCore.commitAcademicProgression(progression),
+      firebaseCore.commitAcademicProgression({ ...progression, operationId: 'progression-op-2' }),
+    ]);
+
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect(records.get('students/school-a:STD-1').classId).toBe('class-target');
+    expect(records.get('classes/school-a:class-source').studentIds).toEqual([]);
+    expect(records.get('classes/school-a:class-target').studentIds).toEqual(['STD-1']);
+    expect(records.get('enrollments/school-a:STD-1:year-target:class-target')).toMatchObject({
+      schoolId: 'school-a',
+      isCurrent: true,
+    });
+  });
 });

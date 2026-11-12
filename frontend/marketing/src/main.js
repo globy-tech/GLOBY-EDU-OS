@@ -20,7 +20,7 @@ import { matchesAdminSchoolFilter } from './utils/school-management-filters.mjs'
 import { getAdminState } from './pages/admin-state.js';
 import { PlatformAdminPage } from './pages/platform-admin.js';
 import { SchoolDashboardPage, SchoolAuthorityDashboard, TeacherDashboard, StudentDashboard } from './pages/school-dashboard.js';
-import { fetchSchoolSummary, fetchSchoolDetails, updateSchoolDetails, createFeePayment, createSchoolInvoice, createSchoolRefundRequest, startSchoolInvoiceCheckout, verifySchoolInvoicePayment, searchSchoolData, fetchSchoolEntities, createSchoolEntity, resendTeacherInvitation, updateSchoolEntity, deleteSchoolEntity, requestStudentDeletion, resolveStudentDeletionRequest, fetchAdminDashboardSummary, fetchPlatformAuditLogs, fetchSchoolActivity, fetchAdminSchoolList, fetchArchivedAdminSchools, createAdminSchool, updateAdminSchool, deleteAdminSchool, activateAdminSchool, fetchWorkspaceMessages, fetchMessageRecipients, createWorkspaceMessage, updateWorkspaceMessage, deleteWorkspaceMessage, fetchSupportTickets, createSupportTicket, updateSupportTicket, deleteSupportTicket, fetchAssignments, fetchLessons, createAssignment, createLesson, submitAssignment } from './api/school.js';
+import { fetchSchoolSummary, fetchSchoolDetails, updateSchoolDetails, createFeePayment, createSchoolInvoice, createSchoolRefundRequest, startSchoolInvoiceCheckout, verifySchoolInvoicePayment, searchSchoolData, fetchSchoolEntities, createSchoolEntity, resendTeacherInvitation, updateSchoolEntity, deleteSchoolEntity, requestStudentDeletion, resolveStudentDeletionRequest, fetchAdmissions, createAdmission, updateAdmission, decideAdmission, fetchProgressionPreview, confirmStudentProgression, fetchAdminDashboardSummary, fetchPlatformAuditLogs, fetchSchoolActivity, fetchAdminSchoolList, fetchArchivedAdminSchools, createAdminSchool, updateAdminSchool, deleteAdminSchool, activateAdminSchool, fetchWorkspaceMessages, fetchMessageRecipients, createWorkspaceMessage, updateWorkspaceMessage, deleteWorkspaceMessage, fetchSupportTickets, createSupportTicket, updateSupportTicket, deleteSupportTicket, fetchAssignments, fetchLessons, createAssignment, createLesson, submitAssignment } from './api/school.js';
 import { studentLogin, teacherLogin, schoolAuthorityLogin, schoolLogin as apiLogin, firebaseLogin as apiFirebaseLogin, linkFirebaseIdentity, platformAdminLogin, logout as apiLogout, refreshAuthSession, forgotPassword as apiForgot, register as apiRegister, confirmFirebasePasswordReset, changePassword as apiChangePassword } from './api/auth.js';
 import { isFirebaseConfigured, firebaseSignInWithEmail, firebaseSignInWithGoogle, firebaseLinkGoogle, firebaseApplyActionCode, firebaseSignOutUser } from './firebase/firebase-client.js';
 import { buildChangedFieldsPayload, buildSchoolCollectionPayload, buildSchoolEntityPayload, normalizeAttendanceStatus, buildAttendanceRoster, replaceAttendanceSession } from './utils/school-dashboard-actions.js?v=20261022-attendance-history';
@@ -1475,6 +1475,7 @@ function getAppNavItems(role) {
       { id: 'overview', label: 'Dashboard', path: '#/school/overview', icon: '◉' },
       { id: 'profile', label: 'Profile', path: '#/school/profile', icon: '⌂' },
       { id: 'students', label: 'Students', path: '#/school/students', icon: '👥' },
+      { id: 'admissions', label: 'Admissions', path: '#/school/admissions', icon: '🗂️' },
       { id: 'teachers', label: 'Teachers', path: '#/school/teachers', icon: '🧑‍🏫' },
       { id: 'classes', label: 'Class Management', path: '#/school/classes', icon: '🏫' },
       { id: 'attendance', label: 'Attendance', path: '#/school/attendance', icon: '✓' },
@@ -2054,6 +2055,7 @@ function normalizeSchoolSection(section = 'overview') {
   if (['academic', 'academics', 'structure', 'academic-management'].includes(key)) return 'academic';
   if (['classes', 'class', 'class-management'].includes(key)) return 'classes';
   if (['students', 'student'].includes(key)) return 'students';
+  if (['admissions', 'admission', 'enrollment-applications'].includes(key)) return 'admissions';
   if (['teachers', 'teacher'].includes(key)) return 'teachers';
   if (['attendance', 'attendances'].includes(key)) return 'attendance';
   if (['finance', 'fees', 'payments'].includes(key)) return 'finance';
@@ -2074,6 +2076,7 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
   const schoolName = localStorage.getItem('globyedu_schoolName') || 'School';
   const role = getUserRole() || 'school_authority';
   const normalizedSection = normalizeSchoolSection(section);
+  let schoolDataLoadError = '';
 
   if (navigationId !== routeGeneration) return;
 
@@ -2106,6 +2109,7 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
     attendanceViewAcademicYear: sessionStorage.getItem(`globyedu_attendance_view_year:${schoolId}`) || 'all',
     examRecords: [],
     examResults: [],
+    admissions: [],
     gradeEntries: [],
     reportCards: [],
     academicRecords: [],
@@ -2145,7 +2149,17 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
       const messages = Array.isArray(school.messages) ? school.messages : [];
       const reports = Array.isArray(school.reports) ? school.reports : [];
       let academicRecords = Array.isArray(school.academicRecords) ? school.academicRecords : [];
+      let admissions = [];
 
+      if (normalizedSection === 'admissions') {
+        const admissionResult = await fetchAdmissions(token, schoolId);
+        if (!admissionResult.ok || admissionResult.data?.status !== 'ok') {
+          schoolDataLoadError = admissionResult.data?.message || `Unable to load admission applications (HTTP ${admissionResult.status || 'network error'}).`;
+        } else {
+          admissions = Array.isArray(admissionResult.data.admissions) ? admissionResult.data.admissions : [];
+          await refreshStoredProfilePhotos(admissions, token);
+        }
+      }
       if (normalizedSection === 'academic') {
         const academicEntityTypes = ['academic-years', 'terms', 'semesters', 'departments', 'streams', 'subjects', 'classes'];
         const academicEntityResults = await Promise.all(academicEntityTypes.map((entityType) => fetchSchoolEntities(token, schoolId, entityType, { pageSize: 100 })));
@@ -2183,6 +2197,9 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
         gradeEntries: Array.isArray(school.gradeEntries) ? school.gradeEntries : [],
         reportCards: Array.isArray(school.reportCards) ? school.reportCards : [],
         academicRecords,
+        admissions,
+        schoolDataLoadError,
+        academicYears: Array.isArray(school.academicYears) ? school.academicYears : [],
         teacherActivity: Array.isArray(activityResult?.data?.activity) ? activityResult.data.activity : [],
         teacherActivityLoadError: activityResult && (!activityResult.ok || activityResult.data?.status !== 'ok')
           ? activityResult.data?.message || `Unable to load teacher activity (HTTP ${activityResult.status || 'network error'}).`
@@ -2351,6 +2368,25 @@ async function uploadCreatedEntityProfilePhoto(file, entityType, entity, token, 
   });
   if (!result.ok || result.data?.status !== 'ok') {
     throw new Error(result.data?.message || 'The record was created, but its profile photo could not be saved.');
+  }
+}
+
+async function uploadAdmissionProfilePhoto(file, admission, token, schoolId) {
+  if (!file || typeof file.arrayBuffer !== 'function') return;
+  const validationError = validateProfileImageUpload(file);
+  if (validationError) throw new Error(validationError);
+  const admissionId = admission?.applicationId || admission?.id;
+  if (!admissionId) throw new Error('The admission was created without an application ID, so its photo cannot be safely attached.');
+  const uploadedPhoto = await uploadTenantAsset(file, 'student-profile', true, {
+    type: 'admission',
+    id: admissionId,
+    field: 'profilePhotoPath',
+  });
+  const result = await updateAdmission(token, schoolId, admissionId, {
+    profilePhotoPath: uploadedPhoto.path,
+  });
+  if (!result.ok || result.data?.status !== 'ok') {
+    throw new Error(result.data?.message || 'The application was created, but its photo reference could not be saved.');
   }
 }
 
@@ -3315,11 +3351,383 @@ function attachSchoolHandlers() {
   const schoolId = localStorage.getItem('globyedu_schoolId');
   const token = getAccessToken();
 
+  document.querySelectorAll('[data-school-admission-action]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const action = button.getAttribute('data-school-admission-action');
+      const admissionId = button.getAttribute('data-admission-id');
+      if (!schoolId || !token) return;
+      const schoolResult = await fetchSchoolDetails(token, schoolId);
+      if (!schoolResult.ok || schoolResult.data?.status !== 'ok') {
+        alert(schoolResult.data?.message || 'Unable to load school classes and academic years.');
+        return;
+      }
+      const school = schoolResult.data.school || {};
+      const classOptions = (Array.isArray(school.classes) ? school.classes : [])
+        .filter((entry) => String(entry.status || 'active').toLowerCase() !== 'archived')
+        .map((entry) => ({ label: entry.name || entry.className || entry.classId || entry.id, value: entry.classId || entry.id }))
+        .filter((entry) => entry.value);
+      const yearOptions = (Array.isArray(school.academicYears) ? school.academicYears : [])
+        .filter((entry) => String(entry.status || 'active').toLowerCase() !== 'archived')
+        .map((entry) => ({ label: entry.label || entry.name || entry.id, value: entry.id || entry.academicYearId }))
+        .filter((entry) => entry.value);
+
+      if (action === 'create') {
+        const formData = await showAdminForm('Create admission application', [
+          { name: 'fullName', label: 'Student full name', required: true },
+          { name: 'email', label: 'Student email', type: 'email', required: true },
+          { name: 'profilePhoto', label: 'Student photograph', type: 'file', accept: 'image/*' },
+          { name: 'phone', label: 'Student phone' },
+          { name: 'gender', label: 'Gender' },
+          { name: 'dateOfBirth', label: 'Date of birth', type: 'date' },
+          { name: 'guardian', label: 'Parent / guardian name' },
+          { name: 'parentPhone', label: 'Parent / guardian phone' },
+          { name: 'parentEmail', label: 'Parent / guardian email', type: 'email' },
+          { name: 'address', label: 'Address', type: 'textarea' },
+          { name: 'gradeLevel', label: 'Grade / year' },
+          { name: 'preferredClassId', label: 'Preferred class (optional)', type: 'select', options: [{ label: 'Select later', value: '' }, ...classOptions] },
+          { name: 'preferredAcademicYearId', label: 'Preferred academic year (optional)', type: 'select', options: [{ label: 'Select later', value: '' }, ...yearOptions] },
+        ], { submitLabel: 'Save application' });
+        if (!formData) return;
+        const { profilePhoto, ...applicationData } = formData;
+        const created = await createAdmission(token, schoolId, applicationData);
+        if (!created.ok || created.data?.status !== 'ok') {
+          alert(created.data?.message || 'Unable to create admission application.');
+          return;
+        }
+        try {
+          await uploadAdmissionProfilePhoto(profilePhoto, created.data.admission, token, schoolId);
+        } catch (error) {
+          alert(error.message || 'Admission was saved, but its photograph was not attached.');
+          renderSchoolDashboardPage('admissions', ++routeGeneration);
+          return;
+        }
+        alert(`Admission application saved: ${created.data.admission.applicationNumber}`);
+        renderSchoolDashboardPage('admissions', ++routeGeneration);
+        return;
+      }
+
+      const admissionsResult = await fetchAdmissions(token, schoolId);
+      const admission = admissionsResult.ok && admissionsResult.data?.status === 'ok'
+        ? (admissionsResult.data.admissions || []).find((entry) => String(entry.applicationId || entry.id) === String(admissionId))
+        : null;
+      if (!admission) {
+        alert(admissionsResult.data?.message || 'Admission application not found. Refresh the list and try again.');
+        return;
+      }
+
+      if (action === 'edit') {
+        const formData = await showAdminForm('Review admission application', [
+          { name: 'fullName', label: 'Student full name', value: admission.fullName || '', required: true },
+          { name: 'email', label: 'Student email', type: 'email', value: admission.email || '', required: true },
+          { name: 'phone', label: 'Student phone', value: admission.phone || '' },
+          { name: 'gender', label: 'Gender', value: admission.gender || '' },
+          { name: 'dateOfBirth', label: 'Date of birth', type: 'date', value: admission.dateOfBirth || '' },
+          { name: 'guardian', label: 'Parent / guardian name', value: admission.guardian || '' },
+          { name: 'parentPhone', label: 'Parent / guardian phone', value: admission.parentPhone || '' },
+          { name: 'parentEmail', label: 'Parent / guardian email', type: 'email', value: admission.parentEmail || '' },
+          { name: 'address', label: 'Address', type: 'textarea', value: admission.address || '' },
+          { name: 'gradeLevel', label: 'Grade / year', value: admission.gradeLevel || '' },
+          { name: 'preferredClassId', label: 'Preferred class', type: 'select', options: [{ label: 'Select later', value: '' }, ...classOptions], value: admission.preferredClassId || '' },
+          { name: 'preferredAcademicYearId', label: 'Preferred academic year', type: 'select', options: [{ label: 'Select later', value: '' }, ...yearOptions], value: admission.preferredAcademicYearId || '' },
+        ]);
+        if (!formData) return;
+        const result = await updateAdmission(token, schoolId, admissionId, formData);
+        if (!result.ok || result.data?.status !== 'ok') {
+          alert(result.data?.message || 'Unable to update admission application.');
+          return;
+        }
+        alert('Admission application updated.');
+        renderSchoolDashboardPage('admissions', ++routeGeneration);
+        return;
+      }
+
+      if (action === 'approve') {
+        const formData = await showAdminForm('Approve and enroll student', [
+          { name: 'classId', label: 'Class placement', type: 'select', options: classOptions, value: admission.preferredClassId || '', required: true },
+          { name: 'academicYearId', label: 'Academic year', type: 'select', options: yearOptions, value: admission.preferredAcademicYearId || '', required: true },
+          { name: 'note', label: 'Decision note', type: 'textarea' },
+        ], { submitLabel: 'Approve & enroll' });
+        if (!formData) return;
+        const result = await decideAdmission(token, schoolId, admissionId, { ...formData, decision: 'approved' });
+        if (!result.ok || result.data?.status !== 'ok') {
+          alert(result.data?.message || 'Unable to approve and enroll this student.');
+          return;
+        }
+        alert(`Admission approved and enrolled. Student ID: ${result.data.student?.studentId || 'Saved'}.`);
+        renderSchoolDashboardPage('admissions', ++routeGeneration);
+        return;
+      }
+
+      if (action === 'reject') {
+        const formData = await showAdminForm('Reject admission application', [
+          { name: 'note', label: 'Reason (optional)', type: 'textarea' },
+        ], { submitLabel: 'Reject application' });
+        if (!formData) return;
+        const result = await decideAdmission(token, schoolId, admissionId, { ...formData, decision: 'rejected' });
+        if (!result.ok || result.data?.status !== 'ok') {
+          alert(result.data?.message || 'Unable to reject this admission.');
+          return;
+        }
+        alert('Admission application rejected.');
+        renderSchoolDashboardPage('admissions', ++routeGeneration);
+      }
+    });
+  });
+
   document.querySelectorAll('[data-school-section-action]').forEach((button) => {
     button.addEventListener('click', async () => {
       const action = button.getAttribute('data-school-section-action');
       const entity = button.getAttribute('data-school-section-entity');
       if (!action) return;
+
+      if (action === 'configure-progression') {
+        const detailsResult = await fetchSchoolDetails(token, schoolId);
+        if (!detailsResult.ok || detailsResult.data?.status !== 'ok') {
+          alert(detailsResult.data?.message || 'Unable to load the school academic structure.');
+          return;
+        }
+        const school = detailsResult.data.school || {};
+        const academicStructure = school.academicStructure && typeof school.academicStructure === 'object'
+          ? school.academicStructure
+          : {};
+        const paths = academicStructure.progressionPaths || {};
+        const pathValue = (value) => Array.isArray(value) ? value.join(', ') : String(value || '');
+        const configuredTransitions = academicStructure.progression || academicStructure.classProgression || {};
+        const transitionLines = Array.isArray(configuredTransitions)
+          ? configuredTransitions.map((entry) => `${entry.fromClassId || entry.from || entry.source || ''}: ${entry.toClassId || entry.to || entry.target || ''}`)
+          : Object.entries(configuredTransitions).map(([from, to]) => `${from}: ${typeof to === 'object' ? to.toClassId || to.to || to.target || '' : to}`);
+        const formData = await showAdminForm('Configure academic progression', [
+          { name: 'primaryPath', label: 'Primary progression (comma-separated class names)', type: 'textarea', rows: 2, value: pathValue(paths.Primary || paths.primary) },
+          { name: 'jhsPath', label: 'JHS progression (comma-separated class names)', type: 'textarea', rows: 2, value: pathValue(paths.JHS || paths.jhs) },
+          { name: 'shsPath', label: 'SHS progression (comma-separated class names)', type: 'textarea', rows: 2, value: pathValue(paths.SHS || paths.shs) },
+          { name: 'transitions', label: 'Cross-level or custom transitions (one source: next class per line)', type: 'textarea', rows: 4, value: transitionLines.join('\n'), placeholder: 'Primary 6: JHS 1\nJHS 3: SHS 1' },
+          { name: 'graduationClasses', label: 'Graduation classes (comma-separated class names)', type: 'text', value: pathValue(academicStructure.graduationClasses) },
+        ]);
+        if (!formData) return;
+        const parsePath = (value) => String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
+        const progressionPaths = {
+          Primary: parsePath(formData.primaryPath),
+          JHS: parsePath(formData.jhsPath),
+          SHS: parsePath(formData.shsPath),
+        };
+        const progression = {};
+        for (const [index, rawLine] of String(formData.transitions || '').split(/\r?\n/).entries()) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          const separator = line.indexOf(':');
+          const from = separator > 0 ? line.slice(0, separator).trim() : '';
+          const to = separator > 0 ? line.slice(separator + 1).trim() : '';
+          if (!from || !to) {
+            alert(`Transition line ${index + 1} must use the format “Current class: next class”.`);
+            return;
+          }
+          const key = from.toLowerCase().replace(/\s+/g, ' ');
+          if (progression[key] && progression[key].toLowerCase().replace(/\s+/g, ' ') !== to.toLowerCase().replace(/\s+/g, ' ')) {
+            alert(`Class “${from}” has conflicting next-class rules.`);
+            return;
+          }
+          progression[from] = to;
+        }
+        const graduationClasses = parsePath(formData.graduationClasses);
+        const result = await updateSchoolDetails(token, schoolId, {
+          academicStructure: { ...academicStructure, progressionPaths, progression, graduationClasses },
+        });
+        if (!result.ok || result.data?.status !== 'ok') {
+          alert(result.data?.message || 'Unable to save progression rules.');
+          return;
+        }
+        alert('Academic progression rules saved. Unconfigured classes will require manual placement.');
+        renderSchoolDashboardPage('academic', ++routeGeneration);
+        return;
+      }
+
+      if (action === 'student-progression') {
+        const detailsResult = await fetchSchoolDetails(token, schoolId);
+        if (!detailsResult.ok || detailsResult.data?.status !== 'ok') {
+          alert(detailsResult.data?.message || 'Unable to load school academic years and classes.');
+          return;
+        }
+        const school = detailsResult.data.school || {};
+        const years = Array.isArray(school.academicYears) ? school.academicYears : [];
+        const yearOptions = years.map((year) => ({
+          label: year.label || year.name || year.id,
+          value: year.id || year.academicYearId,
+        })).filter((year) => year.value);
+        if (yearOptions.length < 2) {
+          alert('Create at least two academic years before starting student progression.');
+          return;
+        }
+        const activeYear = years.find((year) => String(year.status || '').toLowerCase() === 'active');
+        const formData = await showAdminForm('Preview student progression', [
+          { name: 'fromAcademicYearId', label: 'Current academic year', type: 'select', options: yearOptions, value: activeYear?.id || yearOptions[0].value, required: true },
+          { name: 'targetAcademicYearId', label: 'Next academic year', type: 'select', options: yearOptions, value: yearOptions.find((year) => year.value !== (activeYear?.id || yearOptions[0].value))?.value, required: true },
+        ], { submitLabel: 'Load preview' });
+        if (!formData) return;
+        if (formData.fromAcademicYearId === formData.targetAcademicYearId) {
+          alert('Choose different source and target academic years.');
+          return;
+        }
+        const previewResult = await fetchProgressionPreview(token, schoolId, formData.fromAcademicYearId, formData.targetAcademicYearId);
+        if (!previewResult.ok || previewResult.data?.status !== 'ok') {
+          alert(previewResult.data?.message || 'Unable to preview student progression.');
+          return;
+        }
+        const preview = previewResult.data.preview;
+        if (!preview.students.length) {
+          alert('No active students are currently enrolled in the selected source year.');
+          return;
+        }
+        const targetClasses = (Array.isArray(school.classes) ? school.classes : [])
+          .filter((record) => String(record.academicYearId || record.academicYear) === String(formData.targetAcademicYearId))
+          .map((record) => ({ label: record.name || record.className || record.grade || record.classId || record.id, value: record.classId || record.id }))
+          .filter((record) => record.value);
+        const decisionOptions = [
+          { label: 'Promote', value: 'promote' },
+          { label: 'Repeat current class', value: 'repeat' },
+          { label: 'Manual placement', value: 'manual' },
+          { label: 'Graduate', value: 'graduated' },
+          { label: 'Transfer', value: 'transferred' },
+          { label: 'Withdraw', value: 'withdrawn' },
+        ];
+        const decisionFields = preview.students.flatMap((student) => {
+          const defaultAction = ['promote', 'repeat', 'graduated'].includes(student.action) ? student.action : 'manual';
+          return [
+            {
+              name: `decision_${student.studentId}`,
+              label: `${student.fullName || student.studentId}: ${student.sourceClassName || 'Unassigned'} — ${student.reason || student.targetClassName || defaultAction}`,
+              type: 'select',
+              options: decisionOptions,
+              value: defaultAction,
+            },
+            {
+              name: `class_${student.studentId}`,
+              label: `Target class for ${student.fullName || student.studentId}`,
+              type: 'select',
+              options: [{ label: 'Use configured placement', value: '' }, ...targetClasses],
+              value: student.targetClassId || '',
+            },
+          ];
+        });
+        const decisionsForm = await showAdminForm(
+          `Review progression for ${preview.students.length} students`,
+          decisionFields,
+          { submitLabel: 'Review and confirm' },
+        );
+        if (!decisionsForm) return;
+        const exitStudents = preview.students.filter((student) => (
+          ['transferred', 'withdrawn'].includes(decisionsForm[`decision_${student.studentId}`])
+        ));
+        const exitDetails = exitStudents.length
+          ? await showAdminForm('Record transfer or withdrawal details', exitStudents.flatMap((student) => [
+              ...(decisionsForm[`decision_${student.studentId}`] === 'transferred' ? [{
+                name: `destination_${student.studentId}`,
+                label: `Transfer destination (optional) — ${student.fullName || student.studentId}`,
+                type: 'text',
+              }] : []),
+              {
+                name: `reason_${student.studentId}`,
+                label: `Decision note (optional) — ${student.fullName || student.studentId}`,
+                type: 'text',
+              },
+            ]), { submitLabel: 'Save decision details' })
+          : {};
+        if (exitStudents.length && !exitDetails) return;
+        const operationId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const decisions = preview.students.map((student) => ({
+          studentId: student.studentId,
+          action: decisionsForm[`decision_${student.studentId}`],
+          ...(decisionsForm[`class_${student.studentId}`] ? { targetClassId: decisionsForm[`class_${student.studentId}`] } : {}),
+          ...(exitDetails[`destination_${student.studentId}`] ? { transferDestination: exitDetails[`destination_${student.studentId}`] } : {}),
+          ...(exitDetails[`reason_${student.studentId}`] ? { note: exitDetails[`reason_${student.studentId}`] } : {}),
+        }));
+        const approved = window.confirm(`Apply these ${decisions.length} student decisions? Prior attendance, results, classes, and enrollment records will be retained.`);
+        if (!approved) return;
+        const result = await confirmStudentProgression(token, schoolId, {
+          ...formData,
+          decisions,
+          operationId,
+          confirmed: true,
+        });
+        if (!result.ok || result.data?.status !== 'ok') {
+          alert(result.data?.message || 'Student progression could not be completed.');
+          return;
+        }
+        const counts = result.data.results.reduce((summary, item) => {
+          summary[item.action] = (summary[item.action] || 0) + 1;
+          return summary;
+        }, {});
+        alert(`Student progression saved: ${Object.entries(counts).map(([name, count]) => `${count} ${name}`).join(', ')}.`);
+        renderSchoolDashboardPage('academic', ++routeGeneration);
+        return;
+      }
+
+      if (action === 'configure-class-equivalences') {
+        const detailsResult = await fetchSchoolDetails(token, schoolId);
+        if (!detailsResult.ok || detailsResult.data?.status !== 'ok') {
+          alert(detailsResult.data?.message || 'Unable to load the school academic structure.');
+          return;
+        }
+        const school = detailsResult.data.school || {};
+        const academicStructure = school.academicStructure && typeof school.academicStructure === 'object'
+          ? school.academicStructure
+          : {};
+        const configuredAliases = academicStructure.classAliases || {};
+        const aliasLines = Array.isArray(configuredAliases)
+          ? configuredAliases.map((entry) => `${entry.canonical || entry.name || ''}: ${(Array.isArray(entry.aliases) ? entry.aliases : []).join(', ')}`)
+          : Object.entries(configuredAliases).map(([canonical, aliases]) => (
+            `${canonical}: ${Array.isArray(aliases) ? aliases.join(', ') : aliases || ''}`
+          ));
+        const formData = await showAdminForm('Configure class aliases', [
+          {
+            name: 'classAliases',
+            label: 'One equivalence per line (Canonical name: alias 1, alias 2)',
+            type: 'textarea',
+            rows: 8,
+            value: escapeHtml(aliasLines.join('\n')),
+            placeholder: 'JHS 1: Basic 7, Form 1\nJHS 2: Basic 8, Form 2\nJHS 3: Basic 9, Form 3',
+          },
+        ]);
+        if (!formData) return;
+
+        const aliases = {};
+        const aliasOwners = new Map();
+        for (const [index, rawLine] of String(formData.classAliases || '').split(/\r?\n/).entries()) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          const separator = line.indexOf(':');
+          if (separator <= 0) {
+            alert(`Line ${index + 1} must use the format “Canonical name: alias 1, alias 2”.`);
+            return;
+          }
+          const canonical = line.slice(0, separator).trim();
+          const classAliases = line.slice(separator + 1).split(',').map((alias) => alias.trim()).filter(Boolean);
+          if (!canonical) {
+            alert(`Line ${index + 1} needs a canonical class name.`);
+            return;
+          }
+          aliases[canonical] = classAliases;
+          for (const value of [canonical, ...classAliases]) {
+            const key = value.toLowerCase().replace(/\s+/g, ' ');
+            const owner = aliasOwners.get(key);
+            if (owner && owner !== canonical.toLowerCase().replace(/\s+/g, ' ')) {
+              alert(`“${value}” is assigned to more than one canonical class.`);
+              return;
+            }
+            aliasOwners.set(key, canonical.toLowerCase().replace(/\s+/g, ' '));
+          }
+        }
+
+        const result = await updateSchoolDetails(token, schoolId, {
+          academicStructure: { ...academicStructure, classAliases: aliases },
+        });
+        if (!result.ok || result.data?.status !== 'ok') {
+          alert(result.data?.message || 'Unable to save class aliases.');
+          return;
+        }
+        alert('Class aliases saved. No unconfigured class names were merged.');
+        renderSchoolDashboardPage('classes', ++routeGeneration);
+        return;
+      }
 
       if (action === 'create-academic-record') {
         let academicFields = [
@@ -3333,6 +3741,21 @@ function attachSchoolHandlers() {
             { name: 'grade', label: 'Grade / level', placeholder: 'Optional, e.g. JHS 1' },
             { name: 'section', label: 'Section / stream', placeholder: 'Optional, e.g. A' },
           ];
+          const yearsResult = await fetchSchoolEntities(token, schoolId, 'academic-years', { pageSize: 100 });
+          const yearOptions = yearsResult.ok && yearsResult.data?.status === 'ok'
+            ? (yearsResult.data.items || []).map((year) => ({ label: year.label, value: year.id }))
+            : [];
+          if (yearOptions.length) {
+            const activeYear = (yearsResult.data.items || []).find((year) => String(year.status || '').toLowerCase() === 'active');
+            academicFields.push({
+              name: 'academicYearId',
+              label: 'Academic year',
+              type: 'select',
+              options: yearOptions,
+              value: activeYear?.id || '',
+              required: true,
+            });
+          }
         } else if (['academic-years', 'terms', 'semesters'].includes(entity)) {
           academicFields = [
             { name: 'label', label: 'Label', placeholder: entity === 'academic-years' ? '2026/2027' : entity === 'terms' ? 'Term 1' : 'Semester 1', required: true },
@@ -3371,13 +3794,35 @@ function attachSchoolHandlers() {
           return;
         }
         if (action === 'edit-class') {
-          const formData = await showAdminForm('Edit class', [
+          const yearsResult = await fetchSchoolEntities(token, schoolId, 'academic-years', { pageSize: 100 });
+          const yearOptions = yearsResult.ok && yearsResult.data?.status === 'ok'
+            ? (yearsResult.data.items || []).map((year) => ({ label: year.label, value: year.id }))
+            : [];
+          const classFields = [
             { name: 'name', label: 'Class name', value: classRecord.name || '', required: true },
             { name: 'grade', label: 'Grade / level', value: classRecord.grade || '' },
             { name: 'section', label: 'Section / stream', value: classRecord.section || '' },
+          ];
+          if (yearOptions.length) {
+            classFields.push({
+              name: 'academicYearId',
+              label: 'Academic year',
+              type: 'select',
+              options: yearOptions,
+              value: classRecord.academicYearId || '',
+              required: true,
+            });
+          }
+          const formData = await showAdminForm('Edit class', [
+            ...classFields,
           ]);
           if (!formData) return;
-          const result = await updateSchoolEntity(token, schoolId, 'classes', classId, { name: formData.name, grade: formData.grade || null, section: formData.section || null });
+          const result = await updateSchoolEntity(token, schoolId, 'classes', classId, {
+            name: formData.name,
+            grade: formData.grade || null,
+            section: formData.section || null,
+            ...(formData.academicYearId ? { academicYearId: formData.academicYearId } : {}),
+          });
           if (!result.ok || result.data?.status !== 'ok') {
             alert(result.data?.message || 'Unable to update class.');
             return;
@@ -3389,16 +3834,25 @@ function attachSchoolHandlers() {
         const teacherOptions = (Array.isArray(school.teachers) ? school.teachers : [])
           .filter((teacher) => String(teacher.status || 'active').toLowerCase() !== 'archived')
           .map((teacher) => ({ label: `${teacher.fullName || teacher.name || teacher.email} (${teacher.teacherId || teacher.username || teacher.email})`, value: teacher.teacherId || teacher.username || teacher.email }));
-        const formData = await showAdminForm('Assign class teacher', [
-          { name: 'teacherId', label: 'Teacher', type: 'select', options: [{ label: 'Unassigned', value: '' }, ...teacherOptions], value: classRecord.teacherId || classRecord.teacher || '' },
+        const formData = await showAdminForm('Assign class teachers', [
+          {
+            name: 'teacherIds',
+            label: 'Teachers',
+            type: 'select',
+            multiple: true,
+            options: teacherOptions,
+            value: Array.isArray(classRecord.teacherIds) && classRecord.teacherIds.length
+              ? classRecord.teacherIds
+              : [classRecord.teacherId || classRecord.teacher].filter(Boolean),
+          },
         ]);
         if (!formData) return;
-        const result = await updateSchoolEntity(token, schoolId, 'classes', classId, { teacherId: formData.teacherId || null, teacher: formData.teacherId || null });
+        const result = await updateSchoolEntity(token, schoolId, 'classes', classId, { teacherIds: formData.teacherIds || [] });
         if (!result.ok || result.data?.status !== 'ok') {
-          alert(result.data?.message || 'Unable to assign class teacher.');
+          alert(result.data?.message || 'Unable to assign class teachers.');
           return;
         }
-        alert('Class teacher assignment saved.');
+        alert('Class teacher assignments saved.');
         renderSchoolDashboardPage('classes', ++routeGeneration);
         return;
       }
@@ -4115,7 +4569,7 @@ function attachSchoolHandlers() {
         const studentIdentifier = studentRecord.studentId || studentRecord.id || studentRecord.email;
         const approve = action === 'approve-deletion';
         const prompt = approve
-          ? `Permanently delete ${studentRecord.fullName || studentIdentifier} after approving the teacher's request?`
+          ? `Archive ${studentRecord.fullName || studentIdentifier} and preserve its history after approving the teacher's request?`
           : `Reject the deletion request for ${studentRecord.fullName || studentIdentifier}?`;
         if (!confirm(prompt)) return;
         const result = await resolveStudentDeletionRequest(
@@ -4129,7 +4583,7 @@ function attachSchoolHandlers() {
           alert(result.data?.message || 'Unable to resolve the student deletion request.');
           return;
         }
-        alert(approve ? 'Student deletion request approved and the account was deleted.' : 'Student deletion request rejected.');
+        alert(approve ? 'Student deletion request approved; the student record was archived and its history preserved.' : 'Student deletion request rejected.');
         renderSchoolDashboardPage('students');
         return;
       }

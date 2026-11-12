@@ -12,6 +12,12 @@ jest.mock('../../modules/school/fallback.school', () => ({
   loadSchoolData: jest.fn(() => []),
 }));
 
+jest.mock('../../modules/school/admissions.service', () => ({
+  getAdmission: jest.fn(),
+  findAdmissionsByPhotoPath: jest.fn().mockResolvedValue([]),
+  updateAdmission: jest.fn(),
+}));
+
 jest.mock('../../firebase.data', () => ({
   isFirebaseDataConfigured: jest.fn(() => true),
   getStorageBucket: jest.fn(),
@@ -75,6 +81,7 @@ jest.mock('../../lib/supabaseClient', () => ({
 const firebaseData = require('../../firebase.data');
 const storage = require('../../lib/supabaseClient');
 const schoolService = require('../../modules/school/school.service');
+const admissionsService = require('../../modules/school/admissions.service');
 const fileRoutes = require('../files');
 const firebaseSave = jest.fn(async () => {});
 const firebaseFile = {
@@ -350,6 +357,25 @@ describe('production file storage routing', () => {
     );
   });
 
+  test('allows an assigned teacher to upload a student profile photo', async () => {
+    global.__uploadUser = { tenantId: 'school-a', username: 'TCH-1', roles: ['teacher'] };
+    const response = await runRequest(
+      'POST',
+      '/files/upload?filename=student-profile/assigned-student.png&ownerType=student&ownerId=STU-1&ownerField=profilePhotoPath',
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    );
+
+    expect(response.status).toBe(201);
+    expect(storage.uploadSchoolFile).toHaveBeenCalledTimes(1);
+    expect(schoolService.updateEntity).toHaveBeenCalledWith(
+      'school-a',
+      'students',
+      'STU-1',
+      { profilePhotoPath: 'student-profile/assigned-student.png' },
+      global.__uploadUser
+    );
+  });
+
   test('rejects a student uploading to another same-tenant student record before storage', async () => {
     global.__uploadUser = { tenantId: 'school-a', username: 'STU-1', roles: ['student'] };
     global.__uploadSchool.students.push({
@@ -393,6 +419,42 @@ describe('production file storage routing', () => {
     global.__uploadSchool.students[0].classId = 'class-b';
     const deniedResponse = await runRequest('POST', url, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
     expect(deniedResponse.status).toBe(403);
+    expect(storage.uploadSchoolFile).not.toHaveBeenCalled();
+  });
+
+  test('allows School Authority to upload and persist a pending admission photo', async () => {
+    global.__uploadUser = { tenantId: 'school-a', username: 'AUTH-1', roles: ['school_authority'] };
+    admissionsService.getAdmission.mockResolvedValue({
+      applicationId: 'app-1',
+      status: 'pending',
+      email: 'applicant@example.test',
+    });
+    admissionsService.findAdmissionsByPhotoPath.mockResolvedValue([]);
+    admissionsService.updateAdmission.mockResolvedValue({ applicationId: 'app-1' });
+    const response = await runRequest(
+      'POST',
+      '/files/upload?filename=student-profile/admission.png&ownerType=admission&ownerId=app-1&ownerField=profilePhotoPath',
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+
+    expect(response.status).toBe(201);
+    expect(admissionsService.updateAdmission).toHaveBeenCalledWith(
+      'school-a',
+      'app-1',
+      { profilePhotoPath: 'student-profile/admission.png' },
+      expect.objectContaining({ roles: ['school_authority'] }),
+    );
+  });
+
+  test('denies a teacher from uploading a pending admission photo', async () => {
+    global.__uploadUser = { tenantId: 'school-a', username: 'TCH-1', roles: ['teacher'] };
+    const response = await runRequest(
+      'POST',
+      '/files/upload?filename=student-profile/admission.png&ownerType=admission&ownerId=app-1&ownerField=profilePhotoPath',
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+
+    expect(response.status).toBe(403);
     expect(storage.uploadSchoolFile).not.toHaveBeenCalled();
   });
 

@@ -11,7 +11,8 @@
   "scripts": {
     "start": "node backend/server.js",
     "qa:provision": "node scripts/provision-local-qa.js",
-    "qa:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-local-qa.ps1",
+    "qa:start": "node scripts/start-local-qa.js",
+    "qa:start:ps": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-local-qa.ps1",
     "build": "node scripts/build-production.js",
     "bootstrap:super-admin": "node backend/scripts/bootstrap-super-admin.js",
     "recover:orphaned-super-admin": "node backend/scripts/recover-orphaned-super-admin.js",
@@ -19,7 +20,7 @@
     "dev": "concurrently \"npm --prefix backend run dev\"",
     "lint": "eslint . --ext .ts,.tsx,.js,.jsx",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
-    "test": "jest --passWithNoTests --runInBand"
+    "test": "node scripts/run-jest-tests.js"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^5.0.2",

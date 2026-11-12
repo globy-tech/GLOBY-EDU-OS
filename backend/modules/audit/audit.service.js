@@ -2,7 +2,10 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const prisma = require('../../config/prisma.client');
-const { assertIsolatedQaConfiguration } = require('../../config/qa-config');
+const {
+  assertIsolatedQaConfiguration,
+  assertTestDataFilePath,
+} = require('../../config/qa-config');
 const firebaseData = require('../../firebase.data');
 
 const AUDIT_FILE = process.env.GLOBY_AUDIT_FILE
@@ -18,6 +21,15 @@ function isProductionRuntime() {
 function assertFallbackAuditAllowed() {
   if (isProductionRuntime()) throw new Error('[audit.service] JSON audit storage is disabled in production.');
   assertIsolatedQaConfiguration();
+
+  const isTestRuntime = process.env.NODE_ENV === 'test';
+  const qaMode = String(process.env.GLOBY_QA_MODE || '').trim().toLowerCase() === 'true';
+  if (isTestRuntime) assertTestDataFilePath(process.env, 'GLOBY_AUDIT_FILE');
+  if ((isTestRuntime || qaMode) && path.resolve(process.env.GLOBY_AUDIT_FILE) !== AUDIT_FILE) {
+    const error = new Error('[audit.service] Audit data path changed after fallback storage was initialized.');
+    error.code = 'ERR_UNSAFE_TEST_DATA_PATH';
+    throw error;
+  }
 }
 
 function sanitizeValue(value, key = '') {
@@ -109,6 +121,7 @@ async function recordAuditEvent(event = {}) {
     saveFallbackLogs([...loadFallbackLogs(), record]);
     return record;
   } catch (error) {
+    if (error?.code === 'ERR_UNSAFE_TEST_DATA_PATH') throw error;
     if (isProductionRuntime()) {
       console.error('[audit.service] Durable audit event was not persisted.');
       return record;
@@ -116,6 +129,7 @@ async function recordAuditEvent(event = {}) {
     try {
       saveFallbackLogs([...loadFallbackLogs(), record]);
     } catch (persistError) {
+      if (persistError?.code === 'ERR_UNSAFE_TEST_DATA_PATH') throw persistError;
       // Audit persistence must not take down the business request.
     }
     return record;

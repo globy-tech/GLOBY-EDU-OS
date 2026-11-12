@@ -57,8 +57,107 @@ const TEACHER_ASSIGNABLE_CLASSES = new Set([
 ]);
 
 function normalizeTeacherAssignedClasses(value) {
-  const classes = normalizeArray(value);
-  return classes;
+  const seen = new Set();
+  return normalizeArray(value).map((className) => String(className).trim()).filter((className) => {
+    const key = className.toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function normalizeClassIdentityPart(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function getConfiguredClassAliasGroups(school = {}) {
+  const aliases = school.academicStructure?.classAliases || school.classAliases;
+  if (Array.isArray(aliases)) {
+    return aliases
+      .filter((entry) => entry && typeof entry === 'object')
+      .map((entry) => ({
+        canonical: String(entry.canonical || entry.name || '').trim(),
+        aliases: normalizeArray(entry.aliases),
+      }))
+      .filter((entry) => entry.canonical);
+  }
+  if (aliases && typeof aliases === 'object') {
+    return Object.entries(aliases).map(([canonical, values]) => ({
+      canonical: String(canonical).trim(),
+      aliases: normalizeArray(values),
+    })).filter((entry) => entry.canonical);
+  }
+  return [];
+}
+
+function resolveConfiguredClassName(school, value) {
+  const normalized = normalizeClassIdentityPart(value);
+  if (!normalized) return '';
+  const matches = getConfiguredClassAliasGroups(school).filter(({ canonical, aliases }) => (
+    [canonical, ...aliases].some((candidate) => normalizeClassIdentityPart(candidate) === normalized)
+  ));
+  const canonicalNames = [...new Set(matches.map(({ canonical }) => normalizeClassIdentityPart(canonical)))];
+  return canonicalNames.length === 1 ? canonicalNames[0] : normalized;
+}
+
+function getClassIdentity(school, classRecord = {}) {
+  return JSON.stringify([
+    normalizeClassIdentityPart(classRecord.academicYearId || classRecord.academicYear || school.academicYearId || school.academicYear),
+    resolveConfiguredClassName(school, classRecord.grade || classRecord.name || classRecord.className),
+    normalizeClassIdentityPart(classRecord.section),
+    normalizeClassIdentityPart(classRecord.streamId || classRecord.stream),
+  ]);
+}
+
+function assertUniqueClassIdentity(school, candidate, ignoredId = '') {
+  const candidateId = normalizeClassIdentityPart(ignoredId);
+  const identity = getClassIdentity(school, candidate);
+  const duplicate = (Array.isArray(school.classes) ? school.classes : []).find((record) => {
+    const recordId = normalizeClassIdentityPart(record.classId || record.id);
+    return recordId !== candidateId && getClassIdentity(school, record) === identity;
+  });
+  if (duplicate) {
+    throw new Error('A class with this name, section, stream, and academic year already exists. Update the existing class instead.');
+  }
+}
+
+function getClassTeacherIds(classRecord = {}) {
+  const hasTeacherList = Array.isArray(classRecord.teacherIds) || Array.isArray(classRecord.teachers);
+  const values = hasTeacherList
+    ? (Array.isArray(classRecord.teacherIds) ? classRecord.teacherIds : classRecord.teachers)
+      .map((teacher) => (
+      typeof teacher === 'object' ? teacher.teacherId || teacher.id || teacher.username || teacher.email : teacher
+      ))
+    : [classRecord.teacherId, classRecord.teacher, classRecord.classTeacher];
+  return [...new Map(values
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .map((value) => [value.toLowerCase(), value])).values()];
+}
+
+function getUpdatedClassTeacherIds(currentClass, updates = {}) {
+  if (Array.isArray(updates.teacherIds) || Array.isArray(updates.teachers)) {
+    return getClassTeacherIds({
+      teacherIds: Array.isArray(updates.teacherIds) ? updates.teacherIds : updates.teachers,
+    });
+  }
+  if (['teacherId', 'teacher', 'classTeacher'].some((key) => Object.hasOwn(updates, key))) {
+    return getClassTeacherIds({
+      teacherId: updates.teacherId,
+      teacher: updates.teacher,
+      classTeacher: updates.classTeacher,
+    });
+  }
+  return getClassTeacherIds(currentClass);
+}
+
+function setClassTeacherAssignments(classRecord, teacherIds) {
+  const normalizedTeacherIds = normalizeTeacherAssignedClasses(teacherIds);
+  return {
+    ...classRecord,
+    teacherIds: normalizedTeacherIds,
+    teacherId: normalizedTeacherIds[0] || null,
+  };
 }
 
 function generateTeacherId(school) {
@@ -559,13 +658,12 @@ function resolveTeacherAuthorization(school, actor = {}, classId = '') {
       .filter(Boolean)
       .map((value) => String(value).trim().toLowerCase());
     if (classKey && !classValues.includes(classKey)) return false;
-    const assignedToTeacher = [entry.teacherId, entry.teacher, entry.classTeacher]
-      .filter(Boolean)
+    const assignedToTeacher = getClassTeacherIds(entry)
       .some((value) => teacherIdentifiers.includes(String(value).trim().toLowerCase()));
     return assignedToTeacher || classValues.some((value) => assignedClasses.includes(value));
   });
   if (!classKey) return assignedClasses.length > 0 || (Array.isArray(school.classes) ? school.classes : []).some((entry) =>
-    [entry.teacherId, entry.teacher, entry.classTeacher].filter(Boolean).some((value) => teacherIdentifiers.includes(String(value).trim().toLowerCase()))
+    getClassTeacherIds(entry).some((value) => teacherIdentifiers.includes(String(value).trim().toLowerCase()))
   );
   return classMatches || assignedClasses.includes(classKey);
 }
@@ -2268,10 +2366,13 @@ function getTeacherSchoolView(school, user = {}) {
   ].filter(Boolean).map((value) => String(value).trim().toLowerCase()));
   const classes = schoolClasses.filter((entry) => {
     const classId = String(entry.classId || entry.id || '').trim().toLowerCase();
-    const classTeacher = String(entry.teacherId || entry.teacher || entry.classTeacher || '').trim().toLowerCase();
+    const assignedTeacherIds = getClassTeacherIds(entry).map((value) => String(value).trim().toLowerCase());
     const className = String(entry.name || entry.className || '').trim().toLowerCase();
     const grade = String(entry.grade || '').trim().toLowerCase();
-    return teacherIdentifiers.has(classTeacher) || assignedNames.has(classId) || assignedNames.has(className) || assignedNames.has(grade);
+    return assignedTeacherIds.some((teacherId) => teacherIdentifiers.has(teacherId))
+      || assignedNames.has(classId)
+      || assignedNames.has(className)
+      || assignedNames.has(grade);
   });
   const classIds = new Set(classes.map((entry) => String(entry.classId || entry.id || '').trim().toLowerCase()).filter(Boolean));
   const classNames = new Set(classes.flatMap((entry) => [entry.name, entry.className, entry.grade]).filter(Boolean).map((value) => String(value).trim().toLowerCase()));
@@ -3157,26 +3258,6 @@ function applyAcademicYearWorkflow(school, createdYear, payload = {}) {
     previousYear.archivedAt = new Date().toISOString();
   }
 
-  if (payload.promoteStudents) {
-    const students = Array.isArray(school.students) ? school.students : [];
-    students.forEach((student) => {
-      if (student.status !== 'graduated') {
-        student.status = 'active';
-      }
-      student.currentAcademicYear = createdYear.name || createdYear.id;
-      student.gradeLevel = Number(student.gradeLevel || 0) + 1;
-    });
-  }
-
-  if (payload.graduateFinalYearStudents) {
-    const students = Array.isArray(school.students) ? school.students : [];
-    students.forEach((student) => {
-      if (String(student.gradeLevel || '').includes('12') || String(student.grade || '').includes('12')) {
-        student.status = 'graduated';
-      }
-    });
-  }
-
   if (payload.copySubjects && Array.isArray(school.subjects) && school.subjects.length) {
     createdYear.subjects = school.subjects.map((subject) => ({ ...subject, id: subject.id || `${subject.name || 'subject'}-${Date.now()}` }));
   }
@@ -3383,6 +3464,8 @@ async function createRoleLinkedUser(tenantId, roleName, payload) {
     firstName: payload.firstName || name.firstName,
     lastName: payload.lastName || name.lastName,
     phone: payload.phone || null,
+    teacherId: roleName === 'teacher' ? payload.teacherId || suppliedMetadata.teacherId || null : null,
+    studentId: roleName === 'student' ? payload.studentId || suppliedMetadata.studentId || null : null,
     passwordHash,
     passwordNeedsReset: !payload.password,
     status: payload.status || 'active',
@@ -3398,8 +3481,11 @@ async function createRoleLinkedUser(tenantId, roleName, payload) {
       nationality: payload.nationality || (payload.metadata && payload.metadata.nationality) || null,
       nationalId: roleName === 'teacher' ? null : payload.nationalId || (payload.metadata && payload.metadata.nationalId) || null,
       address: payload.address || (payload.metadata && payload.metadata.address) || null,
+      profilePhotoPath: payload.profilePhotoPath || suppliedMetadata.profilePhotoPath || null,
       signature: roleName === 'teacher' ? null : payload.signature || (payload.metadata && payload.metadata.signature) || null,
-      teacherId: payload.teacherId || (payload.metadata && payload.metadata.teacherId) || generateTeacherId(),
+      teacherId: roleName === 'teacher'
+        ? payload.teacherId || (payload.metadata && payload.metadata.teacherId) || generateTeacherId()
+        : null,
       studentId: payload.studentId || (payload.metadata && payload.metadata.studentId) || null,
       admissionNumber: payload.admissionNumber || (payload.metadata && payload.metadata.admissionNumber) || null,
       classId: payload.classId || (payload.metadata && payload.metadata.classId) || null,
@@ -3468,6 +3554,22 @@ async function createEntity(schoolId, entityType, payload, actor = {}) {
     if (!school) throw new Error('School not found');
     ensureSchoolEntities(school);
     const roles = getUserRoleList(actor);
+    if (field === 'classes') {
+      assertUniqueClassIdentity(school, payload);
+      const teacherIds = getClassTeacherIds(payload);
+      const availableTeachers = [...school.teachers, ...school.users].filter((teacher) => (
+        ['teacher'].includes(String(teacher.role || (Array.isArray(teacher.roles) ? teacher.roles[0] : '')).toLowerCase())
+        || teacher.teacherId
+      ));
+      for (const teacherId of teacherIds) {
+        const found = availableTeachers.some((teacher) => (
+          [teacher.teacherId, teacher.username, teacher.email, teacher.id]
+            .some((value) => normalizeClassIdentityPart(value) === normalizeClassIdentityPart(teacherId))
+        ));
+        if (!found) throw new Error('Teacher does not belong to this school');
+      }
+      payload = setClassTeacherAssignments(payload, teacherIds);
+    }
     if (roles.includes('teacher') && field !== 'students') throw new Error('Teachers can only manage students here');
     if (field === 'teachers') {
       if (!roles.some((role) => ['school_authority', 'school_head', 'super_admin'].includes(role))) {
@@ -3476,6 +3578,9 @@ async function createEntity(schoolId, entityType, payload, actor = {}) {
       if (!roles.includes('super_admin') && String(actor.tenantId || actor.schoolId || '') !== String(schoolId)) {
         throw new Error('School does not match the authenticated account.');
       }
+    }
+    if (field === 'students' && roles.includes('teacher') && !payload.classId) {
+      throw new Error('Class is required for teacher student creation');
     }
     if (field === 'students' && payload.classId) {
       const classRecord = school.classes.find((item) => String(item.classId || item.id) === String(payload.classId));
@@ -3502,27 +3607,87 @@ async function createEntity(schoolId, entityType, payload, actor = {}) {
     const collection = field === 'teachers' ? 'teachers' : field === 'students' ? 'students' : field;
     const identifier = created.teacherId || created.studentId || created.classId || created.id || `${field}-${Date.now()}`;
     const safeCreated = field === 'teachers' ? sanitizeTeacherRecord(created) : field === 'students' ? sanitizeStudentRecord(created) : created;
-    await firebaseCore.saveById(collection, `${schoolId}:${identifier}`, { ...safeCreated, schoolId }, false);
-    if (field === 'teachers' || field === 'students') {
-      await firebaseCore.saveById('users', `${schoolId}:${created.email || created.username || identifier}`, {
-        schoolId,
-        tenantId: schoolId,
-        username: created.username || created.email || identifier,
-        email: created.email || null,
-        fullName: created.fullName || payload.fullName || payload.name || 'User',
-        role: field === 'teachers' ? 'teacher' : 'student',
-        roles: [field === 'teachers' ? 'teacher' : 'student'],
-        teacherId: created.teacherId || null,
-        studentId: created.studentId || null,
-        classId: created.classId || null,
-        className: created.className || null,
-        passwordHash,
-        passwordNeedsReset: !payload.password,
-        isVerified: created.emailVerified !== false,
-        emailVerified: created.emailVerified !== false,
-        status: created.status || 'active',
-      }, false);
-      await firebaseCore.saveById('roles', `${schoolId}:${field === 'teachers' ? 'teacher' : 'student'}`, { schoolId, name: field === 'teachers' ? 'teacher' : 'student' }, true);
+    if (field === 'students') {
+      const studentDocumentId = `${schoolId}:${identifier}`;
+      const username = created.username || created.email || identifier;
+      const userDocumentId = `${schoolId}:${created.email || username}`;
+      let studentCreated = false;
+      let userCreated = false;
+      try {
+        await firebaseCore.createById(collection, studentDocumentId, { ...safeCreated, schoolId });
+        studentCreated = true;
+        await firebaseCore.createById('users', userDocumentId, {
+          schoolId,
+          tenantId: schoolId,
+          username,
+          email: created.email || null,
+          fullName: created.fullName || payload.fullName || payload.name || 'User',
+          role: 'student',
+          roles: ['student'],
+          teacherId: null,
+          studentId: created.studentId || null,
+          classId: created.classId || null,
+          className: created.className || null,
+          passwordHash,
+          passwordNeedsReset: !payload.password,
+          isVerified: created.emailVerified !== false,
+          emailVerified: created.emailVerified !== false,
+          status: created.status || 'active',
+        });
+        userCreated = true;
+        await firebaseCore.saveById('roles', `${schoolId}:student`, { schoolId, name: 'student' }, true);
+      } catch (error) {
+        const cleanupErrors = [];
+        if (userCreated) {
+          try {
+            await firebaseCore.deleteById('users', userDocumentId);
+          } catch (cleanupError) {
+            cleanupErrors.push(cleanupError);
+          }
+        }
+        if (studentCreated) {
+          try {
+            await firebaseCore.deleteById(collection, studentDocumentId);
+          } catch (cleanupError) {
+            cleanupErrors.push(cleanupError);
+          }
+        }
+        if (cleanupErrors.length) {
+          const persistenceError = new Error('Student creation failed and the partially created record could not be fully removed.');
+          persistenceError.cause = error;
+          persistenceError.cleanupErrors = cleanupErrors;
+          throw persistenceError;
+        }
+        throw error;
+      }
+    } else {
+      const documentId = `${schoolId}:${identifier}`;
+      if (field === 'classes') {
+        await firebaseCore.createById(collection, documentId, { ...safeCreated, schoolId });
+      } else {
+        await firebaseCore.saveById(collection, documentId, { ...safeCreated, schoolId }, false);
+      }
+      if (field === 'teachers') {
+        await firebaseCore.saveById('users', `${schoolId}:${created.email || created.username || identifier}`, {
+          schoolId,
+          tenantId: schoolId,
+          username: created.username || created.email || identifier,
+          email: created.email || null,
+          fullName: created.fullName || payload.fullName || payload.name || 'User',
+          role: 'teacher',
+          roles: ['teacher'],
+          teacherId: created.teacherId || null,
+          studentId: null,
+          classId: null,
+          className: null,
+          passwordHash,
+          passwordNeedsReset: !payload.password,
+          isVerified: created.emailVerified !== false,
+          emailVerified: created.emailVerified !== false,
+          status: created.status || 'active',
+        }, false);
+        await firebaseCore.saveById('roles', `${schoolId}:teacher`, { schoolId, name: 'teacher' }, true);
+      }
     }
     return safeCreated;
   }
@@ -3533,11 +3698,19 @@ async function createEntity(schoolId, entityType, payload, actor = {}) {
     if (!school) throw new Error('School not found');
     ensureSchoolEntities(school);
     const roles = getUserRoleList(actor);
-    if (roles.includes('teacher') && field !== 'students') throw new Error('Teachers can only manage students here');
-    if (field === 'classes' && payload.teacherId) {
-      const teacher = school.teachers.find((item) => String(item.teacherId || item.username || item.email) === String(payload.teacherId));
-      if (!teacher) throw new Error('Teacher does not belong to this school');
+    if (field === 'classes') {
+      assertUniqueClassIdentity(school, payload);
+      const teacherIds = getClassTeacherIds(payload);
+      for (const teacherId of teacherIds) {
+        const teacher = [...school.teachers, ...school.users].find((item) => (
+          [item.teacherId, item.username, item.email, item.id]
+            .some((value) => normalizeClassIdentityPart(value) === normalizeClassIdentityPart(teacherId))
+        ));
+        if (!teacher) throw new Error('Teacher does not belong to this school');
+      }
+      payload = setClassTeacherAssignments(payload, teacherIds);
     }
+    if (roles.includes('teacher') && field !== 'students') throw new Error('Teachers can only manage students here');
     if (field === 'students' && payload.classId) {
       const classRecord = school.classes.find((item) => String(item.classId || item.id) === String(payload.classId));
       if (!classRecord) throw new Error('Class does not belong to this school');
@@ -3565,6 +3738,16 @@ async function createEntity(schoolId, entityType, payload, actor = {}) {
         const classRecord = school.classes.find((item) => String(item.classId || item.id) === String(payload.classId));
         if (!classRecord) throw new Error('Class does not belong to this school');
       }
+      const incomingIdentity = [payload.email, payload.username, payload.studentId]
+        .map((value) => normalizeClassIdentityPart(value))
+        .filter(Boolean);
+      if ((Array.isArray(school.users) ? school.users : []).some((user) => (
+        ['student'].includes(String(user.role || '').toLowerCase())
+        && [user.email, user.username, user.studentId]
+          .some((value) => incomingIdentity.includes(normalizeClassIdentityPart(value)))
+      ))) {
+        throw new Error('Student with that username, email, or student ID already exists');
+      }
       const temporaryPassword = payload.password || `TempPass!${Math.random().toString(36).slice(2, 8)}`;
       created = createStudentRecord(school, {
         ...payload,
@@ -3573,7 +3756,14 @@ async function createEntity(schoolId, entityType, payload, actor = {}) {
       });
       if (!Array.isArray(school.users)) school.users = [];
       const username = payload.username || payload.email || created.studentId;
-      const existingUser = school.users.find((user) => String(user.username || '').toLowerCase() === String(username).toLowerCase());
+      const createdIdentities = [username, created.studentId, payload.email]
+        .map((value) => normalizeClassIdentityPart(value))
+        .filter(Boolean);
+      const existingUser = school.users.find((user) => (
+        String(user.role || '').toLowerCase() === 'student'
+        && [user.username, user.email, user.studentId]
+          .some((value) => createdIdentities.includes(normalizeClassIdentityPart(value)))
+      ));
       if (existingUser) throw new Error('Student with that username or email already exists');
       school.users.push({
         username,
@@ -3608,9 +3798,15 @@ async function createEntity(schoolId, entityType, payload, actor = {}) {
   const tenant = await prisma.tenant.findUnique({ where: { schoolId } });
   if (!tenant) throw new Error('School not found');
 
-  if (field === 'classes' && payload.teacherId) {
-    const teacher = await findUserByIdentifier(payload.teacherId, tenant.id);
-    if (!teacher || teacher.tenantId !== tenant.id) throw new Error('Teacher does not belong to this school');
+  if (field === 'classes') {
+    const classes = await prisma.class.findMany({ where: { tenantId: tenant.id } });
+    assertUniqueClassIdentity({ ...tenant, classes }, payload);
+    const teacherIds = getClassTeacherIds(payload);
+    for (const teacherId of teacherIds) {
+      const teacher = await findUserByIdentifier(teacherId, tenant.id);
+      if (!teacher || teacher.tenantId !== tenant.id) throw new Error('Teacher does not belong to this school');
+    }
+    payload = setClassTeacherAssignments(payload, teacherIds);
   }
   if (field === 'students' && payload.classId) {
     const classRecord = await prisma.class.findFirst({ where: { id: payload.classId, tenantId: tenant.id } });
@@ -3658,6 +3854,16 @@ async function createEntity(schoolId, entityType, payload, actor = {}) {
     ...payload,
     tenantId: tenant.id,
   };
+  if (field === 'classes') {
+    data.teacherIds = getClassTeacherIds(payload);
+    data.teacherId = data.teacherIds[0] || null;
+    delete data.classId;
+    delete data.className;
+    delete data.teacher;
+    delete data.teachers;
+    delete data.classTeacher;
+    delete data.academicYear;
+  }
 
   return prisma[model].create({ data });
 }
@@ -3720,6 +3926,23 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
         throw new Error('Students can only update their own profile.');
       }
     }
+    if (field === 'classes') {
+      const nextClass = { ...record, ...updates };
+      assertUniqueClassIdentity(school, nextClass, record.classId || record.id);
+      if (['teacherId', 'teacherIds', 'teachers', 'teacher', 'classTeacher'].some((key) => Object.hasOwn(updates || {}, key))) {
+        const teacherIds = getUpdatedClassTeacherIds(record, updates);
+        const availableTeachers = [...school.teachers, ...school.users];
+        for (const teacherId of teacherIds) {
+          if (!availableTeachers.some((teacher) => (
+            [teacher.teacherId, teacher.username, teacher.email, teacher.id]
+              .some((value) => normalizeClassIdentityPart(value) === normalizeClassIdentityPart(teacherId))
+          ))) {
+            throw new Error('Teacher does not belong to this school');
+          }
+        }
+        updates = { ...updates, ...setClassTeacherAssignments({}, teacherIds) };
+      }
+    }
     if (actorRoles.includes('teacher') && field === 'students') {
       const nextClass = updates.classId || updates.className || record.classId || record.className || record.grade;
       if (!resolveTeacherAuthorization(school, actor, nextClass)) throw new Error('Teacher is not authorized for this class');
@@ -3768,6 +3991,8 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
         status: updated.status || record.status || 'active',
         teacherId: record.teacherId || null,
         studentId: record.studentId || null,
+        classId: updated.classId || null,
+        className: updated.className || null,
         profilePhoto: updated.profilePhoto || null,
         profilePhotoPath: updated.profilePhotoPath || null,
         metadata: userMetadata,
@@ -3811,9 +4036,23 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
       delete updates.studentPasswordHash;
       delete updates.passwordNeedsReset;
     }
-    if (field === 'classes' && updates.teacherId) {
-      const teacher = school.teachers.find((item) => String(item.teacherId || item.username || item.email) === String(updates.teacherId));
-      if (!teacher) throw new Error('Teacher does not belong to this school');
+    if (field === 'classes') {
+      const currentClass = school.classes.find((item) => (
+        [item.classId, item.id, item.name].some((value) => normalizeClassIdentityPart(value) === normalizeClassIdentityPart(entityId))
+      ));
+      if (!currentClass) throw new Error('Entity not found');
+      assertUniqueClassIdentity(school, { ...currentClass, ...updates }, currentClass.classId || currentClass.id);
+      if (['teacherId', 'teacherIds', 'teachers', 'teacher', 'classTeacher'].some((key) => Object.hasOwn(updates || {}, key))) {
+        const teacherIds = getUpdatedClassTeacherIds(currentClass, updates);
+        for (const teacherId of teacherIds) {
+          const teacher = [...school.teachers, ...school.users].find((item) => (
+            [item.teacherId, item.username, item.email, item.id]
+              .some((value) => normalizeClassIdentityPart(value) === normalizeClassIdentityPart(teacherId))
+          ));
+          if (!teacher) throw new Error('Teacher does not belong to this school');
+        }
+        updates = { ...updates, ...setClassTeacherAssignments({}, teacherIds) };
+      }
     }
     if (field === 'students' && updates.classId) {
       const classRecord = school.classes.find((item) => String(item.classId || item.id) === String(updates.classId));
@@ -3870,7 +4109,7 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
       );
       if (userIndex !== -1) {
         const user = school.users[userIndex];
-        const syncedFields = ['status', 'metadata', 'profilePhoto', 'profilePhotoPath', 'fullName', 'phone'];
+        const syncedFields = ['status', 'metadata', 'profilePhoto', 'profilePhotoPath', 'fullName', 'phone', 'classId', 'className'];
         school.users[userIndex] = {
           ...user,
           ...Object.fromEntries(syncedFields
@@ -3980,6 +4219,14 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
       if (updatesWithEmail.dateOfBirth !== undefined) metadata.dateOfBirth = updatesWithEmail.dateOfBirth;
       if (updatesWithEmail.address !== undefined) metadata.address = updatesWithEmail.address;
       if (updatesWithEmail.documents !== undefined) metadata.documents = normalizeArray(updatesWithEmail.documents);
+      for (const metadataField of [
+        'studentId', 'admissionNumber', 'className', 'classId', 'gradeLevel',
+        'currentAcademicYear', 'currentTerm', 'guardian', 'parentPhone',
+        'parentEmail', 'medical', 'house', 'transportMode', 'enrollmentDate',
+        'gender', 'dateOfBirth', 'address', 'documents',
+      ]) {
+        delete updatesWithEmail[metadataField];
+      }
     }
 
     if (field === 'teachers') {
@@ -4023,6 +4270,32 @@ async function updateEntity(schoolId, entityType, entityId, updates, actor = {})
   }
   const existing = await prisma[model].findFirst({ where: { id: entityId, tenantId: tenant.id } });
   if (!existing) throw new Error('Entity not found');
+  if (field === 'classes') {
+    const classes = await prisma.class.findMany({ where: { tenantId: tenant.id } });
+    const classSchool = { ...tenant, classes };
+    assertUniqueClassIdentity(classSchool, { ...existing, ...updates }, existing.id);
+    if (['teacherId', 'teacherIds', 'teachers', 'teacher', 'classTeacher'].some((key) => Object.hasOwn(updates || {}, key))) {
+      const teacherIds = getUpdatedClassTeacherIds(existing, updates);
+      for (const teacherId of teacherIds) {
+        const teacher = await findUserByIdentifier(teacherId, tenant.id);
+        if (!teacher || teacher.tenantId !== tenant.id) throw new Error('Teacher does not belong to this school');
+      }
+      updates = { ...updates, ...setClassTeacherAssignments({}, teacherIds) };
+    }
+  }
+  if (field === 'classes') {
+    updates = { ...updates };
+    if (['teacherId', 'teacherIds', 'teachers', 'teacher', 'classTeacher'].some((key) => Object.hasOwn(updates, key))) {
+      updates.teacherIds = getUpdatedClassTeacherIds(existing, updates);
+      updates.teacherId = updates.teacherIds[0] || null;
+    }
+    delete updates.classId;
+    delete updates.className;
+    delete updates.teacher;
+    delete updates.teachers;
+    delete updates.classTeacher;
+    delete updates.academicYear;
+  }
   return prisma[model].update({ where: { id: existing.id }, data: updates });
 }
 
@@ -4319,6 +4592,54 @@ async function requestStudentDeletion(schoolId, studentId, reason, actor = {}) {
   return { studentId: identifier, deletionRequest: updated.metadata?.deletionRequest };
 }
 
+async function archiveStudentRecord(schoolId, student, actor, reason, deletionDecision = null) {
+  const identifier = getSchoolAccountIdentifier(student, 'students');
+  if (String(student.status || '').toLowerCase() === 'archived'
+      && (!deletionDecision || student.metadata?.deletionRequest?.status === 'approved')) {
+    return student;
+  }
+  const archivedAt = new Date().toISOString();
+  const priorClass = {
+    classId: student.classId || null,
+    className: student.className || null,
+    grade: student.gradeLevel || student.grade || null,
+    academicYearId: student.currentAcademicYear || student.metadata?.currentAcademicYear || null,
+    archivedAt,
+  };
+  const classHistory = Array.isArray(student.metadata?.classHistory)
+    ? [...student.metadata.classHistory]
+    : [];
+  if (priorClass.classId || priorClass.className || priorClass.grade) {
+    const alreadyRecorded = classHistory.some((entry) => (
+      String(entry.classId || '') === String(priorClass.classId || '')
+      && String(entry.className || '') === String(priorClass.className || '')
+      && String(entry.academicYearId || '') === String(priorClass.academicYearId || '')
+    ));
+    if (!alreadyRecorded) classHistory.push(priorClass);
+  }
+  const metadata = {
+    ...(student.metadata || {}),
+    classHistory,
+    archivedAt,
+    archivedBy: String(actor.userId || actor.username || actor.email || ''),
+    archiveReason: String(reason || 'School Authority archive').trim().slice(0, 500),
+    ...(deletionDecision ? {
+      deletionRequest: {
+        ...(student.metadata?.deletionRequest || {}),
+        status: 'approved',
+        resolvedAt: archivedAt,
+        resolvedBy: String(actor.userId || actor.username || actor.email || ''),
+      },
+    } : {}),
+  };
+  return updateEntity(schoolId, 'students', identifier, {
+    status: 'archived',
+    classId: null,
+    className: null,
+    metadata,
+  }, actor);
+}
+
 async function resolveStudentDeletionRequest(schoolId, studentId, decision, confirmation, actor = {}) {
   assertAccountManagementAccess(actor, schoolId);
   const normalizedDecision = String(decision || '').trim().toLowerCase();
@@ -4329,54 +4650,33 @@ async function resolveStudentDeletionRequest(schoolId, studentId, decision, conf
   if (normalizedDecision === 'approved') {
     const school = await getSchoolBySchoolId(schoolId);
     const student = school ? findSchoolAccount(school, 'students', studentId) : null;
-    const jobId = getAccountDeletionJobId(schoolId, 'students', studentId);
-    const job = firebaseCore.isFirebaseCoreMode()
-      ? await firebaseCore.getById('accountDeletionJobs', jobId)
-      : null;
-
     if (!student) {
-      if (!job || !['in_progress', 'completed'].includes(job.status) ||
-          job.schoolId !== schoolId || job.entityType !== 'students') {
-        if (!school) throw new Error('School not found');
-        throw new Error('Student not found');
-      }
-      if (String(confirmation || '').trim() !== String(job.targetIdentifier || '')) {
-        throw new Error('Type the student ID to confirm permanent deletion.');
-      }
-      if (job.status === 'completed') {
-        return {
-          studentId: job.targetIdentifier,
-          status: 'approved',
-          accountCleanup: createAccountCleanupResult(
-            job.accountCleanup?.retainedFilePaths || job.retainedFilePaths,
-          ),
-        };
-      }
-      const resumed = await deleteEntity(schoolId, 'students', studentId, actor, {
-        confirmation,
-        approvedDeletion: true,
-        requestedEntityId: studentId,
-      });
-      return { ...resumed, studentId: job.targetIdentifier, status: 'approved' };
+      if (!school) throw new Error('School not found');
+      throw new Error('Student not found');
     }
 
     const identifier = getSchoolAccountIdentifier(student, 'students');
     if (String(confirmation || '').trim() !== identifier) {
-      throw new Error('Type the student ID to confirm permanent deletion.');
+      throw new Error('Type the student ID to confirm archival.');
     }
-    if (student.metadata?.deletionRequest?.status !== 'pending' &&
-        !(job?.status === 'in_progress' && job.targetIdentifier === identifier)) {
+    if (student.status === 'archived' && student.metadata?.deletionRequest?.status === 'approved') {
+      return { studentId: identifier, status: 'approved', archived: true, student };
+    }
+    if (student.metadata?.deletionRequest?.status !== 'pending') {
       throw new Error('There is no pending deletion request for this student.');
     }
-    await deleteEntity(schoolId, 'students', identifier, actor, {
-      confirmation: identifier,
-      approvedDeletion: true,
-      requestedEntityId: studentId,
-    });
+    const archivedStudent = await archiveStudentRecord(
+      schoolId,
+      student,
+      actor,
+      student.metadata?.deletionRequest?.reason || 'Approved student archival request',
+      true,
+    );
     return {
       studentId: identifier,
       status: 'approved',
-      accountCleanup: createAccountCleanupResult(getRetainedAccountFilePaths(student)),
+      archived: true,
+      student: archivedStudent,
     };
   }
 
@@ -4413,6 +4713,21 @@ async function deleteEntity(schoolId, entityType, entityId, actor = {}, options 
     assertAccountManagementAccess(actor, schoolId);
   } else if (actorRoles.length > 0 && !hasSchoolAuthorityRole(actor)) {
     throw new Error('Only School Authority can delete or deactivate school records.');
+  }
+  if (field === 'students') {
+    const school = await getSchoolBySchoolId(schoolId);
+    if (!school) throw new Error('School not found');
+    const student = findSchoolAccount(school, 'students', entityId);
+    if (!student) throw new Error('Entity not found');
+    const identifier = getSchoolAccountIdentifier(student, 'students');
+    assertAccountDeletionConfirmation(field, identifier, options.confirmation);
+    const archivedStudent = await archiveStudentRecord(
+      schoolId,
+      student,
+      actor,
+      options.reason || 'School Authority archive',
+    );
+    return { ...sanitizeStudentRecord(archivedStudent), archived: true };
   }
   if (firebaseCore.isFirebaseCoreMode() && ['teachers', 'students'].includes(field)) {
     return deleteFirebaseAccount(schoolId, field, entityId, actor, options);

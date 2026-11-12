@@ -5,6 +5,8 @@ jest.mock('../../../firebase.core', () => ({
   getMaintenanceMode: jest.fn().mockResolvedValue(false),
 }));
 
+const useIsolatedSchoolStore = require('./isolated-school-store');
+const cleanupIsolatedSchoolStore = useIsolatedSchoolStore();
 const authMiddleware = require('../../auth/middleware/auth.middleware');
 const schoolRouter = require('../school.controller');
 
@@ -99,6 +101,10 @@ beforeEach(() => {
 afterEach(() => {
   delete global.__workspaceSnapshot;
   jest.restoreAllMocks();
+});
+
+afterAll(() => {
+  cleanupIsolatedSchoolStore();
 });
 
 describe('student entity-list authorization', () => {

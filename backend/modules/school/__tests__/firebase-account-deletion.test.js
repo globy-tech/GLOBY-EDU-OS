@@ -292,7 +292,7 @@ describe('Firebase account deletion', () => {
     })).resolves.toMatchObject({ accountCleanup: { status: 'completed', completeErasure: false } });
   });
 
-  test('resumes an approved student deletion after the student document was already removed', async () => {
+  test('does not resume a legacy destructive deletion after the student record was removed', async () => {
     const userId = `${SCHOOL_ID}:student@example.test`;
     const jobId = deletionJobId('students', 'STU-100');
     aggregate.students = [];
@@ -331,14 +331,10 @@ describe('Firebase account deletion', () => {
       'approved',
       'STU-100',
       authority,
-    )).resolves.toMatchObject({
-      studentId: 'STU-100',
-      status: 'approved',
-      accountCleanup: { status: 'completed', completeErasure: false },
-    });
+    )).rejects.toThrow('Student not found');
 
-    expect(firebaseCore.deleteById).toHaveBeenCalledTimes(1);
-    expect(firebaseCore.deleteById).toHaveBeenCalledWith('users', userId);
+    expect(firebaseCore.deleteById).not.toHaveBeenCalled();
+    expect(documents.has(`users:${userId}`)).toBe(true);
   });
 
   test('rejects cross-tenant access and missing permanent-delete confirmation without side effects', async () => {

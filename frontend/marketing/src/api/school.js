@@ -98,9 +98,13 @@ async function patchJson(url, body, token) {
   }
 }
 
-async function putJson(url, body, token) {
-  const queued = await queueRequest('PUT', url, body);
-  if (queued) return queued;
+async function putJson(url, body, token, { queueOffline = true } = {}) {
+  if (queueOffline) {
+    const queued = await queueRequest('PUT', url, body);
+    if (queued) return queued;
+  } else if (!isOnline()) {
+    return { ok: false, status: 0, data: { status: 'error', message: 'This operation requires an active connection and was not queued.' } };
+  }
 
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -110,7 +114,7 @@ async function putJson(url, body, token) {
     const data = await res.json().catch(() => null);
     return handleUnauthorized({ ok: res.ok, status: res.status, data });
   } catch (error) {
-    const queued = await queueRequest('PUT', url, body);
+    const queued = queueOffline ? await queueRequest('PUT', url, body) : null;
     return queued || { ok: false, status: 0, data: { status: 'error', message: error.message || 'Network request failed.' } };
   }
 }
@@ -141,6 +145,43 @@ export async function fetchSchoolSummary(token, schoolId) {
 
 export async function fetchSchoolDetails(token, schoolId) {
   return getJson(`/api/v1/schools/${encodeURIComponent(schoolId)}`, token);
+}
+
+export async function fetchAdmissions(token, schoolId, status = '') {
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  return getJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/admissions?${params.toString()}`, token);
+}
+
+export async function createAdmission(token, schoolId, payload) {
+  return postJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/admissions`, payload, token, { queueOffline: false });
+}
+
+export async function updateAdmission(token, schoolId, admissionId, payload) {
+  return putJson(
+    `/api/v1/schools/${encodeURIComponent(schoolId)}/admissions/${encodeURIComponent(admissionId)}`,
+    payload,
+    token,
+    { queueOffline: false },
+  );
+}
+
+export async function decideAdmission(token, schoolId, admissionId, payload) {
+  return putJson(
+    `/api/v1/schools/${encodeURIComponent(schoolId)}/admissions/${encodeURIComponent(admissionId)}/decision`,
+    payload,
+    token,
+    { queueOffline: false },
+  );
+}
+
+export async function fetchProgressionPreview(token, schoolId, fromAcademicYearId, targetAcademicYearId) {
+  const params = new URLSearchParams({ fromAcademicYearId, targetAcademicYearId });
+  return getJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/progression/preview?${params.toString()}`, token);
+}
+
+export async function confirmStudentProgression(token, schoolId, payload) {
+  return postJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/progression/confirm`, payload, token, { queueOffline: false });
 }
 
 export async function updateSchoolDetails(token, schoolId, payload) {

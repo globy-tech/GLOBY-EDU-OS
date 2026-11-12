@@ -432,8 +432,20 @@ test('teachers can create and update students but must request deletion approval
   expect(created.studentId).toMatch(/^STD-/);
   expect(updated.fullName).toBe('Teacher Updated Student');
   const remainingSchool = require('../fallback.school').loadSchoolData().find((entry) => entry.schoolId === school.schoolId);
-  expect(remainingSchool.students.some((entry) => entry.studentId === created.studentId)).toBe(false);
-  expect(remainingSchool.users.some((entry) => entry.studentId === created.studentId)).toBe(false);
+  expect(remainingSchool.students.find((entry) => entry.studentId === created.studentId)).toMatchObject({
+    status: 'archived',
+    classId: null,
+    className: null,
+    metadata: {
+      deletionRequest: { status: 'approved' },
+      classHistory: [expect.objectContaining({ classId: classRecord.classId })],
+    },
+  });
+  expect(remainingSchool.users.find((entry) => entry.studentId === created.studentId)).toMatchObject({
+    status: 'archived',
+    classId: null,
+    className: null,
+  });
 });
 
 test('assigned teacher can create and update students using an assigned class grade', async () => {
@@ -665,6 +677,177 @@ test('Firebase student photo updates persist to Firestore student and user recor
     profilePhotoPath: updated.profilePhotoPath,
     metadata: expect.objectContaining({ profilePhotoPath: updated.profilePhotoPath }),
   }), true);
+});
+
+test('Firebase student creation uses create-only persistence and rolls back a partial identity write', async () => {
+  const schoolId = 'school-live-create';
+  const school = {
+    id: schoolId,
+    schoolId,
+    students: [],
+    teachers: [],
+    users: [],
+    classes: [],
+  };
+  const records = new Map();
+  jest.spyOn(firebaseCore, 'isFirebaseCoreMode').mockReturnValue(true);
+  jest.spyOn(firebaseCore, 'getSchoolAggregate').mockResolvedValue(school);
+  jest.spyOn(firebaseCore, 'createById').mockImplementation(async (collection, id, data) => {
+    const key = `${collection}:${id}`;
+    if (records.has(key)) {
+      const error = new Error('Document already exists');
+      error.code = 6;
+      throw error;
+    }
+    records.set(key, data);
+    return { id, ...data };
+  });
+  jest.spyOn(firebaseCore, 'deleteById').mockImplementation(async (collection, id) => {
+    records.delete(`${collection}:${id}`);
+  });
+  jest.spyOn(firebaseCore, 'saveById').mockResolvedValue({});
+
+  const actor = { roles: ['school_authority'], schoolId, tenantId: schoolId };
+  const student = await schoolService.createEntity(schoolId, 'students', {
+    studentId: 'STD-006-ZXC',
+    fullName: 'Persisted Student',
+    email: 'persisted@student.test',
+  }, actor);
+
+  expect(student.studentId).toBe('STD-006-ZXC');
+  expect(records.get(`students:${schoolId}:STD-006-ZXC`)).toEqual(expect.objectContaining({
+    studentId: 'STD-006-ZXC',
+    schoolId,
+  }));
+  expect(records.get(`users:${schoolId}:persisted@student.test`)).toEqual(expect.objectContaining({
+    studentId: 'STD-006-ZXC',
+    email: 'persisted@student.test',
+  }));
+  await expect(schoolService.createEntity(schoolId, 'students', {
+    studentId: 'STD-006-ZXC',
+    fullName: 'Persisted Student',
+    email: 'persisted@student.test',
+  }, actor)).rejects.toThrow('already exists');
+  expect(records.get(`students:${schoolId}:STD-006-ZXC`).fullName).toBe('Persisted Student');
+
+  const partialSchoolId = 'school-live-partial';
+  jest.spyOn(firebaseCore, 'getSchoolAggregate').mockResolvedValue({
+    id: partialSchoolId,
+    schoolId: partialSchoolId,
+    students: [],
+    teachers: [],
+    users: [],
+    classes: [],
+  });
+  jest.spyOn(firebaseCore, 'createById').mockImplementation(async (collection, id, data) => {
+    if (collection === 'users') throw new Error('User write failed');
+    records.set(`${collection}:${id}`, data);
+    return { id, ...data };
+  });
+
+  await expect(schoolService.createEntity(partialSchoolId, 'students', {
+    studentId: 'STD-PARTIAL',
+    fullName: 'Partial Student',
+    email: 'partial@student.test',
+  }, { roles: ['school_authority'], schoolId: partialSchoolId, tenantId: partialSchoolId }))
+    .rejects.toThrow('User write failed');
+  expect(records.has(`students:${partialSchoolId}:STD-PARTIAL`)).toBe(false);
+});
+
+test('class identity is unique within an academic year and only configured aliases are equivalent', async () => {
+  fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
+  const school = await schoolService.createSchool({ name: 'Class Identity School' });
+
+  await schoolService.createEntity(school.schoolId, 'classes', {
+    name: 'JHS 1',
+    grade: 'JHS 1',
+    academicYearId: 'AY-1',
+  });
+  await expect(schoolService.createEntity(school.schoolId, 'classes', {
+    name: 'JHS 1',
+    grade: 'JHS 1',
+    academicYearId: 'AY-1',
+  })).rejects.toThrow('already exists');
+
+  await expect(schoolService.createEntity(school.schoolId, 'classes', {
+    name: 'Basic 7',
+    grade: 'Basic 7',
+    academicYearId: 'AY-1',
+  })).resolves.toBeTruthy();
+  await schoolService.updateSchool(school.id, {
+    academicStructure: { classAliases: { 'JHS 1': ['Basic 7', 'Form 1'] } },
+  });
+  await expect(schoolService.createEntity(school.schoolId, 'classes', {
+    name: 'Form 1',
+    grade: 'Form 1',
+    academicYearId: 'AY-1',
+  })).rejects.toThrow('already exists');
+
+  await expect(schoolService.createEntity(school.schoolId, 'classes', {
+    name: 'Form 1',
+    grade: 'Form 1',
+    academicYearId: 'AY-2',
+  })).resolves.toBeTruthy();
+
+  for (const grade of ['JHS 2', 'JHS 3']) {
+    await expect(schoolService.createEntity(school.schoolId, 'classes', {
+      name: grade,
+      grade,
+      academicYearId: 'AY-1',
+    })).resolves.toBeTruthy();
+  }
+});
+
+test('a class supports multiple persistent teacher assignments and assigned-class student access', async () => {
+  fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
+  const school = await schoolService.createSchool({ name: 'Multi Teacher School' });
+  const teachers = [];
+  for (const teacherId of ['T-MULTI-1', 'T-MULTI-2', 'T-UNASSIGNED']) {
+    teachers.push(await schoolService.createEntity(school.schoolId, 'teachers', {
+      teacherId,
+      fullName: teacherId,
+      email: `${teacherId.toLowerCase()}@school.test`,
+    }));
+  }
+  const assignedIds = teachers.slice(0, 2).map((teacher) => teacher.teacherId);
+  const classRecord = await schoolService.createEntity(school.schoolId, 'classes', {
+    name: 'JHS 3 Blue',
+    grade: 'JHS 3',
+    section: 'Blue',
+    academicYearId: 'AY-1',
+    teacherIds: [...assignedIds, assignedIds[0]],
+  });
+  const teacherActors = assignedIds.map((teacherId) => ({
+    userId: `${school.schoolId}:${teacherId}`,
+    username: teacherId,
+    roles: ['teacher'],
+    schoolId: school.schoolId,
+    tenantId: school.schoolId,
+  }));
+
+  expect(classRecord.teacherIds).toEqual(assignedIds);
+  for (const teacherActor of teacherActors) {
+    const classList = await schoolService.getEntities(school.schoolId, 'classes', {}, teacherActor);
+    expect(classList.items.map((entry) => entry.classId || entry.id)).toContain(classRecord.classId);
+  }
+  await expect(schoolService.createEntity(school.schoolId, 'students', {
+    fullName: 'Assigned Teacher Student',
+    email: 'assigned-student@school.test',
+    classId: classRecord.classId,
+    className: classRecord.name,
+  }, teacherActors[1])).resolves.toMatchObject({ classId: classRecord.classId });
+  await expect(schoolService.createEntity(school.schoolId, 'students', {
+    fullName: 'Unassigned Teacher Student',
+    email: 'unassigned-student@school.test',
+    classId: classRecord.classId,
+    className: classRecord.name,
+  }, {
+    userId: `${school.schoolId}:${teachers[2].teacherId}`,
+    username: teachers[2].teacherId,
+    roles: ['teacher'],
+    schoolId: school.schoolId,
+    tenantId: school.schoolId,
+  })).rejects.toThrow('not authorized');
 });
 
 test('createSchool assigns a normalized, collision-safe subdomain and persists it', async () => {

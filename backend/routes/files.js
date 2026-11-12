@@ -2,6 +2,7 @@ const express = require('express');
 const authMiddleware = require('../modules/auth/middleware/auth.middleware');
 const tenantMiddleware = require('../modules/school/middleware/tenant.middleware');
 const schoolService = require('../modules/school/school.service');
+const admissionsService = require('../modules/school/admissions.service');
 const firebaseData = require('../firebase.data');
 const { isProductionRuntime } = require('../config/app-url.config');
 const {
@@ -190,6 +191,14 @@ async function resolveAuthorizedFile(req, school, relativePath, target = {}) {
     };
   }
 
+  if (target.ownerType === 'admission') {
+    const prefix = relativePath.split('/')[0];
+    if (!isSchoolAuthority(roles)
+      || !['student-profile', 'profilePhoto'].includes(prefix)
+      || target.ownerField !== 'profilePhotoPath') return null;
+    const record = await admissionsService.getAdmission(schoolId, target.ownerId, req.user);
+    return { type: 'admission', record, field: 'profilePhotoPath', authorized: true };
+  }
   if (target.ownerType !== 'student' && target.ownerType !== 'teacher') return null;
   const entityType = target.ownerType === 'student' ? 'students' : 'teachers';
   const prefix = relativePath.split('/')[0];
@@ -213,7 +222,7 @@ async function resolveAuthorizedFile(req, school, relativePath, target = {}) {
   return authorized ? { type: target.ownerType, entityType, record, field: 'profilePhotoPath', authorized: true } : null;
 }
 
-function getExistingPathReferences(school, relativePath) {
+async function getExistingPathReferences(school, relativePath, actor) {
   const matches = [];
   const schoolFields = ['logoPath', 'coverImagePath', 'stampPath', 'principalSignaturePath'];
   for (const field of schoolFields) {
@@ -229,11 +238,22 @@ function getExistingPathReferences(school, relativePath) {
       }
     }
   }
+  const schoolId = String(school.schoolId || school.id || '');
+  const admissions = await admissionsService.findAdmissionsByPhotoPath(schoolId, relativePath, actor);
+  admissions.forEach((record) => {
+    const linkedStudent = String(record.status || '').toLowerCase() === 'approved'
+      && (Array.isArray(school.students) ? school.students : []).some((student) => (
+        String(student.studentId || '') === String(record.studentId || '')
+        && String(student.profilePhotoPath || student.metadata?.profilePhotoPath || '') === relativePath
+      ));
+    if (linkedStudent) return;
+    matches.push({ type: 'admission', entityType: 'admissions', record, field: 'profilePhotoPath' });
+  });
   return matches;
 }
 
 async function authorizeExistingPath(req, school, relativePath) {
-  const matches = getExistingPathReferences(school, relativePath);
+  const matches = await getExistingPathReferences(school, relativePath, req.user);
   if (matches.length !== 1) return null;
 
   const match = matches[0];
@@ -244,6 +264,7 @@ async function authorizeExistingPath(req, school, relativePath) {
       && (roles.has('teacher') || roles.has('student'));
     return tenantBranding ? match : null;
   }
+  if (match.type === 'admission') return isSchoolAuthority(roles) ? match : null;
   if (match.type === 'student') {
     if (isSchoolAuthority(roles) || (roles.has('student') && isOwnRecord(req, match.record))) return match;
     return isTeacherAssignedToStudent(school, req, match.record) ? match : null;
@@ -255,6 +276,16 @@ async function authorizeExistingPath(req, school, relativePath) {
 async function persistFileReference(school, owner, relativePath, actor) {
   if (owner.type === 'school') {
     await schoolService.updateSchool(school.id || school.schoolId, { [owner.field]: relativePath });
+    return;
+  }
+
+  if (owner.type === 'admission') {
+    await admissionsService.updateAdmission(
+      school.schoolId || school.id,
+      owner.record.applicationId || owner.record.id,
+      { profilePhotoPath: relativePath },
+      actor,
+    );
     return;
   }
 
@@ -300,7 +331,7 @@ router.post('/upload', authMiddleware, parseUploadBody, tenantMiddleware, async 
     if (!owner) {
       return res.status(403).json({ status: 'error', message: 'You are not authorized to upload a file for this record.' });
     }
-    const existingReferences = getExistingPathReferences(school, filename);
+    const existingReferences = await getExistingPathReferences(school, filename, req.user);
     if (existingReferences.some((reference) => reference.record !== owner.record || reference.field !== owner.field)) {
       return res.status(409).json({ status: 'error', message: 'This storage path is already linked to another record.' });
     }
@@ -347,7 +378,7 @@ router.post('/upload', authMiddleware, parseUploadBody, tenantMiddleware, async 
       try {
         const latestSchool = await schoolService.getSchoolBySchoolId(school.schoolId || school.id);
         if (!latestSchool) throw new Error('Unable to verify whether the uploaded file has an active reference.');
-        if (!getExistingPathReferences(latestSchool, filename).length) {
+        if (!(await getExistingPathReferences(latestSchool, filename, req.user)).length) {
           if (firebaseFile) {
             if (!uploadedFileMetadata?.generation) {
               throw new Error('Cannot safely remove the Firebase upload without its object generation.');

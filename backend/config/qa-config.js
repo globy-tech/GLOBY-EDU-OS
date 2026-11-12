@@ -32,6 +32,25 @@ function resolveCanonicalPath(candidate) {
   return path.resolve(fs.realpathSync.native(current), ...suffix);
 }
 
+function assertTestDataFilePath(env, variable, backendRoot = path.resolve(__dirname, '..')) {
+  if (env.NODE_ENV !== 'test') return;
+
+  const configuredPath = String(env[variable] || '').trim();
+  if (!configuredPath) {
+    const error = new Error(`[qa-config] ${variable} is required in test mode; repository data cannot be used.`);
+    error.code = 'ERR_UNSAFE_TEST_DATA_PATH';
+    throw error;
+  }
+
+  const repositoryRoot = resolveCanonicalPath(path.resolve(backendRoot, '..'));
+  const resolvedPath = resolveCanonicalPath(configuredPath);
+  if (isWithin(repositoryRoot, resolvedPath)) {
+    const error = new Error(`[qa-config] ${variable} must be outside the repository in test mode.`);
+    error.code = 'ERR_UNSAFE_TEST_DATA_PATH';
+    throw error;
+  }
+}
+
 const EXTERNAL_SERVICE_VARIABLES = [
   'FIREBASE_PROJECT_ID',
   'FIREBASE_CLIENT_EMAIL',
@@ -108,4 +127,8 @@ function assertIsolatedQaConfiguration(env = process.env, backendRoot = path.res
   }
 }
 
-module.exports = { assertIsolatedQaConfiguration, EXTERNAL_SERVICE_VARIABLES };
+module.exports = {
+  assertIsolatedQaConfiguration,
+  assertTestDataFilePath,
+  EXTERNAL_SERVICE_VARIABLES,
+};

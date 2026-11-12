@@ -53,6 +53,7 @@ model Tenant {
   terms            Term[]
   semesters        Semester[]
   classes          Class[]
+  admissionApplications AdmissionApplication[]
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -201,20 +202,25 @@ model Semester {
 }
 
 model Class {
-  id          String   @id @default(uuid())
-  name        String
-  grade       String?
-  stream      Stream?   @relation(fields: [streamId], references: [id])
-  streamId    String?
-  teacherId   String?
-  studentIds  String[]  @default([])
-  status      String   @default("active")
-  tenant      Tenant   @relation(fields: [tenantId], references: [id])
-  tenantId    String
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id             String   @id @default(uuid())
+  name           String
+  grade          String?
+  section        String?
+  academicYearId String?
+  stream         Stream?   @relation(fields: [streamId], references: [id])
+  streamId       String?
+  teacherId      String?
+  teacherIds     String[]  @default([])
+  studentIds     String[]  @default([])
+  status         String   @default("active")
+  tenant         Tenant   @relation(fields: [tenantId], references: [id])
+  tenantId       String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   enrollments Enrollment[]
+
+  @@index([tenantId, academicYearId, name])
 }
 
 model Enrollment {
@@ -233,6 +239,27 @@ model Enrollment {
   @@index([userId, isCurrent])
   @@index([classId, isCurrent])
   @@unique([userId, academicYearId, classId])
+}
+
+model AdmissionApplication {
+  id                String   @id @default(uuid())
+  applicationNumber String
+  status            String   @default("pending")
+  studentData       Json
+  history           Json     @default("[]")
+  submittedBy       String?
+  reviewedBy        String?
+  studentId         String?
+  classId           String?
+  academicYearId    String?
+  tenant            Tenant   @relation(fields: [tenantId], references: [id])
+  tenantId          String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([tenantId, applicationNumber])
+  @@unique([tenantId, studentId])
+  @@index([tenantId, status, createdAt])
 }
 
 model Permission {

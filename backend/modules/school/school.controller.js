@@ -4,6 +4,8 @@
 const express = require('express');
 const router = express.Router();
 const schoolService = require('./school.service');
+const admissionsService = require('./admissions.service');
+const academicProgressionService = require('./academic-progression.service');
 const authMiddleware = require('../auth/middleware/auth.middleware');
 const { roleGuard } = require('../auth/middleware/role.middleware');
 const tenantMiddleware = require('./middleware/tenant.middleware');
@@ -33,6 +35,7 @@ const SCHOOL_AUTHORITY_UPDATE_FIELDS = new Set([
   'principalSignaturePath',
   'branding',
   'settings',
+  'academicStructure',
   'announcements',
   'messages',
   'reports',
@@ -62,6 +65,117 @@ function schoolArchiveErrorStatus(error) {
   if (['SCHOOL_ALREADY_ARCHIVED', 'SCHOOL_NOT_ARCHIVED', 'SCHOOL_HAS_DEPENDENCIES', 'SCHOOL_ARCHIVED'].includes(error?.code)) return 409;
   return 500;
 }
+
+router.get('/:schoolId/admissions', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const admissions = await admissionsService.getAdmissions(req.params.schoolId, req.user || {}, {
+      status: req.query.status || '',
+    });
+    return res.json({ status: 'ok', admissions });
+  } catch (err) {
+    return res.status(400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.post('/:schoolId/admissions', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const admission = await admissionsService.createAdmission(req.params.schoolId, req.body || {}, req.user || {});
+    await auditSchoolAction(req, {
+      action: 'admission.created',
+      resourceType: 'admission',
+      resourceId: admission.applicationId,
+      metadata: { applicationNumber: admission.applicationNumber, status: admission.status },
+    });
+    return res.status(201).json({ status: 'ok', admission });
+  } catch (err) {
+    return res.status(400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.put('/:schoolId/admissions/:admissionId', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const admission = await admissionsService.updateAdmission(
+      req.params.schoolId,
+      req.params.admissionId,
+      req.body || {},
+      req.user || {},
+    );
+    await auditSchoolAction(req, {
+      action: 'admission.updated',
+      resourceType: 'admission',
+      resourceId: admission.applicationId,
+      metadata: { status: admission.status },
+    });
+    return res.json({ status: 'ok', admission });
+  } catch (err) {
+    return res.status(400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.put('/:schoolId/admissions/:admissionId/decision', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const result = await admissionsService.decideAdmission(
+      req.params.schoolId,
+      req.params.admissionId,
+      req.body || {},
+      req.user || {},
+    );
+    await auditSchoolAction(req, {
+      action: result.admission.status === 'approved' ? 'admission.approved_and_enrolled' : 'admission.rejected',
+      resourceType: 'admission',
+      resourceId: result.admission.applicationId,
+      metadata: {
+        applicationNumber: result.admission.applicationNumber,
+        studentId: result.student?.studentId || null,
+        classId: result.admission.classId || null,
+        academicYearId: result.admission.academicYearId || null,
+        idempotentRetry: result.idempotent === true,
+      },
+    });
+    return res.json({ status: 'ok', ...result });
+  } catch (err) {
+    return res.status(400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.get('/:schoolId/progression/preview', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const preview = await academicProgressionService.previewProgression(req.params.schoolId, {
+      fromAcademicYearId: req.query.fromAcademicYearId,
+      targetAcademicYearId: req.query.targetAcademicYearId,
+    }, req.user || {});
+    return res.json({ status: 'ok', preview });
+  } catch (err) {
+    return res.status(400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.post('/:schoolId/progression/confirm', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const result = await academicProgressionService.confirmProgression(
+      req.params.schoolId,
+      req.body || {},
+      req.user || {},
+    );
+    await auditSchoolAction(req, {
+      action: 'student.progression_completed',
+      resourceType: 'academic_progression',
+      resourceId: result.operationId,
+      metadata: {
+        fromAcademicYearId: result.fromAcademicYearId,
+        targetAcademicYearId: result.targetAcademicYearId,
+        decisions: result.results.reduce((counts, entry) => {
+          counts[entry.action] = (counts[entry.action] || 0) + 1;
+          return counts;
+        }, {}),
+        idempotentRetry: result.results.length > 0 && result.results.every((entry) => entry.idempotent),
+      },
+    });
+    return res.json({ status: 'ok', ...result });
+  } catch (err) {
+    return res.status(400).json({ status: 'error', message: err.message });
+  }
+});
 
 // POST /api/v1/schools - Super Admin only
 router.post('/', authMiddleware, roleGuard(['super_admin']), async (req, res) => {
@@ -625,6 +739,13 @@ router.post('/:schoolId/entities/:entityType', authMiddleware, tenantMiddleware,
     const entity = await schoolService.createEntity(schoolId, entityType, payload, req.user);
     if (['students', 'teachers'].includes(entityType)) {
       await auditSchoolAction(req, { action: `${entityType.slice(0, -1)}.created`, resourceType: entityType.slice(0, -1), resourceId: entity?.id || entity?.teacherId || entity?.studentId || entity?.email });
+    } else if (entityType === 'classes') {
+      await auditSchoolAction(req, {
+        action: 'class.created',
+        resourceType: 'class',
+        resourceId: entity?.classId || entity?.id,
+        metadata: { name: entity?.name, academicYearId: entity?.academicYearId || null },
+      });
     }
     return res.status(201).json({ status: 'ok', entity });
   } catch (err) {
@@ -665,6 +786,15 @@ router.put('/:schoolId/entities/:entityType/:entityId', authMiddleware, tenantMi
     const entity = await schoolService.updateEntity(schoolId, entityType, entityId, updates, req.user);
     if (['students', 'teachers'].includes(entityType)) {
       await auditSchoolAction(req, { action: `${entityType.slice(0, -1)}.updated`, resourceType: entityType.slice(0, -1), resourceId: entityId });
+    } else if (entityType === 'classes') {
+      await auditSchoolAction(req, {
+        action: Object.keys(updates).some((field) => ['teacherId', 'teacherIds', 'teachers', 'teacher', 'classTeacher'].includes(field))
+          ? 'class.teacher_assignment.updated'
+          : 'class.updated',
+        resourceType: 'class',
+        resourceId: entityId,
+        metadata: { name: entity?.name, academicYearId: entity?.academicYearId || null },
+      });
     }
     return res.json({ status: 'ok', entity });
   } catch (err) {

@@ -1,9 +1,9 @@
 const crypto = require('crypto');
 
+const useIsolatedSchoolStore = require('../../school/__tests__/isolated-school-store');
+const cleanupIsolatedSchoolStore = useIsolatedSchoolStore();
 const previousAccessSecret = process.env.JWT_ACCESS_SECRET;
-const previousQaMode = process.env.GLOBY_QA_MODE;
 process.env.JWT_ACCESS_SECRET = crypto.randomBytes(32).toString('hex');
-process.env.GLOBY_QA_MODE = 'true';
 
 jest.mock('../../../firebase.data', () => ({ isFirebaseDataConfigured: () => false }));
 jest.mock('../../../firebase.core', () => ({
@@ -94,8 +94,7 @@ afterAll(async () => {
   else delete global.__workspaceSnapshot;
   if (previousAccessSecret === undefined) delete process.env.JWT_ACCESS_SECRET;
   else process.env.JWT_ACCESS_SECRET = previousAccessSecret;
-  if (previousQaMode === undefined) delete process.env.GLOBY_QA_MODE;
-  else process.env.GLOBY_QA_MODE = previousQaMode;
+  cleanupIsolatedSchoolStore();
 });
 
 test('normal login works before logout, revoked access is rejected, and a fresh login works', async () => {

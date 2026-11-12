@@ -3,7 +3,10 @@ const path = require('path');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const config = require('../../config/auth.config');
-const { assertIsolatedQaConfiguration } = require('../../config/qa-config');
+const {
+  assertIsolatedQaConfiguration,
+  assertTestDataFilePath,
+} = require('../../config/qa-config');
 const { generateSchoolSubdomain } = require('./tenant-hostname');
 
 const SCHOOLS_FILE = process.env.GLOBY_SCHOOLS_FILE
@@ -37,9 +40,15 @@ function assertFallbackStoreAllowed() {
 
   if (qaMode) {
     assertIsolatedQaConfiguration(process.env, path.resolve(__dirname, '../..'));
-    if (path.resolve(process.env.GLOBY_SCHOOLS_FILE) !== SCHOOLS_FILE) {
-      throw new Error('[fallback.school] QA school data path changed after fallback storage was initialized.');
-    }
+  }
+
+  if (isTestRuntime) {
+    assertTestDataFilePath(process.env, 'GLOBY_SCHOOLS_FILE', path.resolve(__dirname, '../..'));
+  }
+
+  if ((isTestRuntime || qaMode)
+    && path.resolve(process.env.GLOBY_SCHOOLS_FILE) !== SCHOOLS_FILE) {
+    throw new Error('[fallback.school] School data path changed after fallback storage was initialized.');
   }
 
   if (isTestRuntime || qaMode || dataStoreMode === 'json') {
@@ -201,6 +210,7 @@ function getEntityMeta(entityType) {
     streams: { collection: 'streams', idKey: 'id' },
     subjects: { collection: 'subjects', idKey: 'id' },
     'academic-years': { collection: 'academicYears', idKey: 'id' },
+    academicYears: { collection: 'academicYears', idKey: 'id' },
     terms: { collection: 'terms', idKey: 'id' },
     semesters: { collection: 'semesters', idKey: 'id' },
     classes: { collection: 'classes', idKey: 'classId' },
@@ -230,6 +240,8 @@ function ensureSchoolEntities(school) {
   if (!school.classes) school.classes = [];
   if (!Array.isArray(school.teachers)) school.teachers = [];
   if (!Array.isArray(school.students)) school.students = [];
+  if (!Array.isArray(school.admissions)) school.admissions = [];
+  if (!Array.isArray(school.enrollments)) school.enrollments = [];
   if (!Array.isArray(school.assignments)) school.assignments = [];
   if (!Array.isArray(school.lessons)) school.lessons = [];
   if (Array.isArray(school.users)) {
@@ -500,11 +512,14 @@ function createStudentRecord(school, payload) {
   if (!Array.isArray(school.students)) school.students = [];
   const { password, passwordHash, studentPasswordHash, passwordNeedsReset, ...safePayload } = payload || {};
   const studentId = safePayload.studentId || createStudentIdentifier(school, safePayload.fullName || safePayload.username || 'student');
-  const identity = String(safePayload.email || safePayload.username || '').trim().toLowerCase();
+  const identities = [safePayload.email, safePayload.username]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean);
   const duplicate = school.students.find((student) => (
-    (identity && String(student.email || student.username || '').toLowerCase() === identity) ||
+    identities.some((identity) => [student.email, student.username]
+      .some((value) => String(value || '').trim().toLowerCase() === identity)) ||
     String(student.studentId || '').toLowerCase() === String(studentId).toLowerCase() ||
-    (safePayload.admissionNumber && String(student.admissionNumber || '').toLowerCase() === String(safePayload.admissionNumber).toLowerCase())
+    (safePayload.admissionNumber && String(student.admissionNumber || '').trim().toLowerCase() === String(safePayload.admissionNumber).trim().toLowerCase())
   ));
   if (duplicate) throw new Error('Student with that email, student ID, or admission number already exists');
   const newStudent = {

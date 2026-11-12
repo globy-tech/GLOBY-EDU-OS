@@ -83,6 +83,14 @@ describe('school authority workspace', () => {
     expect(mainSource).toContain('currentSchoolTeachers');
   });
 
+  it('describes approved student deletion requests as archival with history retention', () => {
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
+
+    expect(mainSource).toContain('student record was archived and its history preserved');
+    expect(mainSource).not.toContain('Permanently delete ${studentRecord.fullName');
+    expect(mainSource).not.toContain('the account was deleted.');
+  });
+
   it('offers the requested teacher management fields and curriculum coverage', () => {
     const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
     const actionsSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'utils', 'school-dashboard-actions.cjs'), 'utf8');

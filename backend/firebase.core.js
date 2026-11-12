@@ -7,6 +7,7 @@ const CORE_COLLECTIONS = Object.freeze({
   roles: 'roles',
   teachers: 'teachers',
   students: 'students',
+  admissions: 'admissions',
   classes: 'classes',
   enrollments: 'enrollments',
   payments: 'payments',
@@ -270,6 +271,135 @@ async function createById(collectionName, id, data) {
   return { id: documentId, ...payload };
 }
 
+async function commitAcademicProgression({
+  schoolId,
+  studentId,
+  fromAcademicYearId,
+  sourceClassId,
+  targetAcademicYearId,
+  targetClassId,
+  operationId,
+  action,
+  student,
+  userId,
+  user,
+  targetEnrollment,
+}) {
+  const tenantId = assertSchoolId(schoolId);
+  const studentKey = String(studentId || '').trim();
+  const operationKey = String(operationId || '').trim();
+  if (!studentKey || !operationKey) throw new Error('Student and operation IDs are required.');
+
+  const studentRef = collectionRef(CORE_COLLECTIONS.students).doc(`${tenantId}:${studentKey}`);
+  const sourceClassRef = sourceClassId
+    ? collectionRef(CORE_COLLECTIONS.classes).doc(`${tenantId}:${sourceClassId}`)
+    : null;
+  const targetClassRef = targetClassId
+    ? collectionRef(CORE_COLLECTIONS.classes).doc(`${tenantId}:${targetClassId}`)
+    : null;
+  const userRef = userId ? collectionRef(CORE_COLLECTIONS.users).doc(`${tenantId}:${userId}`) : null;
+  const enrollmentQuery = collectionRef(CORE_COLLECTIONS.enrollments)
+    .where('schoolId', '==', tenantId)
+    .where('studentId', '==', studentKey);
+
+  return firebaseData.getFirestore().runTransaction(async (transaction) => {
+    const [studentSnapshot, sourceSnapshot, targetSnapshot, enrollmentSnapshot] = await Promise.all([
+      transaction.get(studentRef),
+      sourceClassRef ? transaction.get(sourceClassRef) : Promise.resolve(null),
+      targetClassRef ? transaction.get(targetClassRef) : Promise.resolve(null),
+      transaction.get(enrollmentQuery),
+    ]);
+    if (!studentSnapshot.exists) throw new Error('Student not found in this school.');
+
+    const currentStudent = studentSnapshot.data();
+    if (currentStudent.schoolId !== tenantId) throw new Error('Student does not belong to this school.');
+    const metadata = currentStudent.metadata && typeof currentStudent.metadata === 'object' ? currentStudent.metadata : {};
+    const previousOperation = (Array.isArray(metadata.progressionHistory) ? metadata.progressionHistory : [])
+      .find((entry) => entry.operationId === operationKey);
+    if (previousOperation) {
+      if (previousOperation.action !== action
+        || String(previousOperation.fromAcademicYearId) !== String(fromAcademicYearId)
+        || String(previousOperation.toAcademicYearId) !== String(targetAcademicYearId)
+        || (targetClassId && String(previousOperation.toClassId) !== String(targetClassId))) {
+        throw new Error(`Progression operation ${operationKey} was already applied with a different decision.`);
+      }
+      return { idempotent: true };
+    }
+
+    const currentClassId = currentStudent.classId || metadata.classId || '';
+    const currentYearId = currentStudent.academicYearId || currentStudent.currentAcademicYear || metadata.academicYearId || '';
+    if (String(currentClassId) !== String(sourceClassId)
+      || String(currentYearId) !== String(fromAcademicYearId)) {
+      throw new Error('The student placement changed after the progression preview. Generate a new preview.');
+    }
+
+    const sourceClass = sourceSnapshot?.exists ? sourceSnapshot.data() : null;
+    const targetClass = targetSnapshot?.exists ? targetSnapshot.data() : null;
+    if (sourceClassId && (!sourceClass || sourceClass.schoolId !== tenantId
+      || String(sourceClass.academicYearId || sourceClass.academicYear) !== String(fromAcademicYearId))) {
+      throw new Error('The source class no longer belongs to this school and academic year.');
+    }
+    if (targetClassId && (!targetClass || targetClass.schoolId !== tenantId
+      || String(targetClass.academicYearId || targetClass.academicYear) !== String(targetAcademicYearId))) {
+      throw new Error('The target class no longer belongs to this school and academic year.');
+    }
+
+    const enrollmentDocuments = enrollmentSnapshot.docs || [];
+    if (targetClassId && enrollmentDocuments.some((document) => {
+      const enrollment = document.data();
+      return String(enrollment.academicYearId) === String(targetAcademicYearId)
+        && enrollment.isCurrent !== false
+        && String(enrollment.status || 'active').toLowerCase() === 'active';
+    })) {
+      throw new Error(`A current enrollment already exists for ${studentKey} in the target academic year.`);
+    }
+
+    const now = new Date().toISOString();
+    const writes = [];
+    if (sourceClass) {
+      writes.push([sourceClassRef, {
+        ...sourceClass,
+        studentIds: (sourceClass.studentIds || []).filter((id) => String(id).split(':').pop().trim().toLowerCase() !== studentKey.toLowerCase()),
+        schoolId: tenantId,
+        updatedAt: now,
+      }]);
+    }
+    if (targetClass) {
+      const targetStudents = (targetClass.studentIds || []).filter((id) => String(id).split(':').pop().trim().toLowerCase() !== studentKey.toLowerCase());
+      targetStudents.push(studentKey);
+      writes.push([targetClassRef, { ...targetClass, studentIds: targetStudents, schoolId: tenantId, updatedAt: now }]);
+    }
+    enrollmentDocuments.forEach((document) => {
+      const enrollment = document.data();
+      if (enrollment.isCurrent !== false && String(enrollment.status || 'active').toLowerCase() === 'active') {
+        writes.push([document.ref, {
+          ...enrollment,
+          isCurrent: false,
+          status: ['promote', 'repeat', 'manual'].includes(action) ? 'completed' : action,
+          updatedAt: now,
+        }]);
+      }
+    });
+    if (targetEnrollment) {
+      const enrollmentId = String(targetEnrollment.id || '');
+      const documentId = enrollmentId.startsWith(`${tenantId}:`) ? enrollmentId : `${tenantId}:${enrollmentId}`;
+      writes.push([collectionRef(CORE_COLLECTIONS.enrollments).doc(documentId), {
+        ...targetEnrollment,
+        id: documentId,
+        schoolId: tenantId,
+        updatedAt: now,
+      }]);
+    }
+    writes.push([studentRef, { ...student, schoolId: tenantId, updatedAt: now }]);
+    if (userRef && user) writes.push([userRef, { ...user, schoolId: tenantId, tenantId, updatedAt: now }]);
+
+    writes.forEach(([reference, data]) => {
+      transaction.set(reference, sanitizeFirestoreData(data), { merge: true });
+    });
+    return { idempotent: false };
+  });
+}
+
 async function deleteById(collectionName, id) {
   await collectionRef(collectionName).doc(String(id)).delete();
 }
@@ -307,10 +437,11 @@ async function setMaintenanceMode(enabled, updatedBy = null) {
 async function getSchoolAggregate(schoolId) {
   const tenant = await getTenant(schoolId);
   if (!tenant) return null;
-  const [users, teachers, students, classes, enrollments] = await Promise.all([
+  const [users, teachers, students, admissions, classes, enrollments] = await Promise.all([
     listBySchool(CORE_COLLECTIONS.users, schoolId),
     listBySchool(CORE_COLLECTIONS.teachers, schoolId),
     listBySchool(CORE_COLLECTIONS.students, schoolId),
+    listBySchool(CORE_COLLECTIONS.admissions, schoolId),
     listBySchool(CORE_COLLECTIONS.classes, schoolId),
     listBySchool(CORE_COLLECTIONS.enrollments, schoolId),
   ]);
@@ -319,6 +450,7 @@ async function getSchoolAggregate(schoolId) {
     users,
     teachers,
     students,
+    admissions,
     classes,
     enrollments,
   };
@@ -341,6 +473,7 @@ module.exports = {
   saveById,
   updateById,
   createById,
+  commitAcademicProgression,
   deleteById,
   deleteSessionsForUser,
   getMaintenanceMode,
