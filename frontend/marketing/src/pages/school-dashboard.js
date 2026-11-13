@@ -888,6 +888,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
                 <div class="mt-4 flex flex-wrap gap-2">
                   <button type="button" data-school-section-action="edit-class" data-class-id="${escapeHtml(classId)}" class="rounded-full border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-semibold text-sky-700">Edit</button>
                   <button type="button" data-school-section-action="assign-class-teacher" data-class-id="${escapeHtml(classId)}" class="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700">Assign teacher</button>
+                  <button type="button" data-school-section-action="archive-class" data-class-id="${escapeHtml(classId)}" class="rounded-full border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">Archive class</button>
                 </div>
                 <div class="mt-4 border-t border-slate-100 pt-4"><p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Students</p>${enrolledStudents.length ? `<ul class="mt-2 space-y-1 text-sm text-slate-700">${enrolledStudents.slice(0, 5).map((student) => `<li>${escapeHtml(student.fullName || student.name || student.studentId || 'Student')}</li>`).join('')}</ul>` : '<p class="mt-2 text-sm text-slate-500">No students enrolled yet.</p>'}</div>
               </article>`;
@@ -1487,6 +1488,7 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
     <div class="min-h-screen bg-slate-50 text-slate-900">
       <main class="mx-auto max-w-7xl px-0 py-4 sm:px-2 sm:py-6 lg:px-8 lg:py-8">
         <div class="rounded-4xl border border-slate-200 bg-white p-4 shadow-2xl shadow-slate-200/50 sm:p-6 lg:p-10">
+          ${sectionData.schoolDataLoadError && section !== 'admissions' ? `<div class="mb-6 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800" role="alert">${escapeHtml(sectionData.schoolDataLoadError)}</div>` : ''}
           ${renderedSection}
         </div>
       </main>
@@ -1666,6 +1668,7 @@ export function TeacherDashboard(section = 'overview', teacherData = {}) {
           </div>
         </div>
 
+        ${teacherData.schoolDataLoadError ? `<div class="mt-6 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800" role="alert">${escapeHtml(teacherData.schoolDataLoadError)}</div>` : ''}
         ${content || `<div class="mt-8 grid gap-6 lg:grid-cols-2">
           <div class="rounded-lg border border-slate-200 bg-slate-50 p-6">
             <p class="text-sm font-semibold text-slate-900">Assigned classes</p>
@@ -1905,6 +1908,7 @@ export function StudentDashboard(section = 'overview', studentData = {}) {
   const normalized = String(section || 'overview').toLowerCase();
   return `
     <div class="space-y-8">
+      ${studentData.schoolDataLoadError ? `<div class="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800" role="alert">${escapeHtml(studentData.schoolDataLoadError)}</div>` : ''}
       ${sectionMap[normalized] || sectionMap.overview}
     </div>
   `;

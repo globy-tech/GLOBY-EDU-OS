@@ -271,6 +271,40 @@ async function createById(collectionName, id, data) {
   return { id: documentId, ...payload };
 }
 
+async function runClassMutation(schoolId, classIds, operation) {
+  const schoolKey = assertSchoolId(schoolId);
+  const classDocumentIds = [...new Set((Array.isArray(classIds) ? classIds : [classIds])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .map((value) => value.startsWith(`${schoolKey}:`) ? value : `${schoolKey}:${value}`))];
+  if (!classDocumentIds.length) throw new Error('At least one class is required for this mutation.');
+
+  const references = classDocumentIds.map((id) => collectionRef(CORE_COLLECTIONS.classes).doc(id));
+  return firebaseData.getFirestore().runTransaction(async (transaction) => {
+    const snapshots = await Promise.all(references.map((reference) => transaction.get(reference)));
+    const missingClass = snapshots.find((snapshot) => !snapshot.exists);
+    if (missingClass) throw new Error('Class does not belong to this school');
+
+    const classRecords = snapshots.map((snapshot) => ({ ...snapshot.data(), id: snapshot.id }));
+    const updates = await operation({
+      transaction,
+      classRecords,
+      classReferences: references,
+      getDocumentReference: (collectionName, id) => collectionRef(collectionName).doc(String(id)),
+      getSchoolQuery: (collectionName) => collectionRef(collectionName).where('schoolId', '==', schoolKey),
+      sanitizeData: sanitizeFirestoreData,
+    });
+    const classUpdatesById = updates?.classUpdatesById || {};
+    for (const reference of references) {
+      transaction.set(reference, sanitizeFirestoreData({
+        ...(classUpdatesById[reference.id] || {}),
+        updatedAt: new Date().toISOString(),
+      }), { merge: true });
+    }
+    return updates && Object.hasOwn(updates, 'result') ? updates.result : updates;
+  });
+}
+
 async function commitAcademicProgression({
   schoolId,
   studentId,
@@ -342,6 +376,9 @@ async function commitAcademicProgression({
     if (targetClassId && (!targetClass || targetClass.schoolId !== tenantId
       || String(targetClass.academicYearId || targetClass.academicYear) !== String(targetAcademicYearId))) {
       throw new Error('The target class no longer belongs to this school and academic year.');
+    }
+    if (targetClassId && String(targetClass.status || 'active').toLowerCase() === 'archived') {
+      throw new Error('Students cannot be enrolled in an archived class.');
     }
 
     const enrollmentDocuments = enrollmentSnapshot.docs || [];
@@ -473,6 +510,7 @@ module.exports = {
   saveById,
   updateById,
   createById,
+  runClassMutation,
   commitAcademicProgression,
   deleteById,
   deleteSessionsForUser,

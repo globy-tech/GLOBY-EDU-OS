@@ -37,6 +37,8 @@ let accessTokenRefreshTimer = null;
 const LANDING_ROUTES = ['home', 'features', 'solutions', 'pricing', 'about', 'contact'];
 const SESSION_LIMIT = 2;
 const PWA_STATUS_ID = 'globyedu-pwa-status';
+const PROFILE_PHOTO_URL_CACHE_DURATION_MS = 50 * 60 * 1000;
+const refreshedProfilePhotoUrls = new Map();
 
 function dispatchMaintenanceResponse(response, data) {
   if (response.status === 503 && data?.code === 'MAINTENANCE_MODE') {
@@ -1379,6 +1381,19 @@ function renderAuthenticatedAppShell(section = 'overview', role = 'super_admin',
   attachAccountProfilePhotoHandlers(roleKey);
 }
 
+function showDashboardLoadingState(section) {
+  const main = root.querySelector('main');
+  if (!main) return;
+  main.setAttribute('aria-busy', 'true');
+  main.querySelector('[data-dashboard-loading]')?.remove();
+  const status = document.createElement('p');
+  status.dataset.dashboardLoading = 'true';
+  status.setAttribute('role', 'status');
+  status.className = 'mx-auto max-w-7xl px-6 py-4 text-sm text-slate-500';
+  status.textContent = `Loading ${section}...`;
+  main.prepend(status);
+}
+
 function showAccountProfilePhoto(url) {
   if (!url) return;
   const imageSelectors = ['[data-account-profile-photo]', '[data-school-profile-photo]', '[data-platform-profile-photo]'];
@@ -1924,8 +1939,9 @@ async function renderRolePage(role = 'super_admin', section = 'overview', naviga
   const userName = localStorage.getItem('globyedu_userFullName') || 'User';
   const schoolName = localStorage.getItem('globyedu_schoolName') || 'School';
   const schoolId = localStorage.getItem('globyedu_schoolId') || '';
-  
+
   if (navigationId !== routeGeneration) return;
+  showDashboardLoadingState(section);
   let schoolDataLoadError = '';
 
   let dashboardContent = '';
@@ -1953,8 +1969,12 @@ async function renderRolePage(role = 'super_admin', section = 'overview', naviga
     if (navigationId !== routeGeneration) return;
     if (result.ok && result.data?.status === 'ok') {
       const school = result.data.school || {};
-      await refreshStoredSchoolAssets(school, token);
-      await refreshStoredProfilePhotos([school.student || school.profile], token);
+      if (!['teacher', 'student'].includes(role) && ['overview', 'profile'].includes(section)) {
+        await refreshStoredSchoolAssets(school, token);
+      }
+      if (role === 'student') {
+        await refreshStoredProfilePhotos([school.student || school.profile], token);
+      }
       const audience = role === 'teacher' ? 'teachers' : role === 'student' ? 'students' : 'all';
       const visible = (entry) => {
         const target = String(entry.audience || entry.recipientType || entry.recipient || 'all').toLowerCase();
@@ -1978,8 +1998,12 @@ async function renderRolePage(role = 'super_admin', section = 'overview', naviga
         examRecords: Array.isArray(school.examRecords) ? school.examRecords : [],
         examResults: Array.isArray(school.examResults) ? school.examResults : [],
       };
-      await refreshStoredProfilePhotos(schoolData.teachers, token);
-      await refreshStoredProfilePhotos(schoolData.students, token);
+      if (['overview', 'profile'].includes(section)) {
+        await refreshStoredProfilePhotos(schoolData.teachers, token);
+      }
+      if (role === 'teacher' && section === 'students') {
+        await refreshStoredProfilePhotos(schoolData.students, token);
+      }
     } else {
       schoolDataLoadError = result.data?.message || `Unable to load school data (HTTP ${result.status || 'network error'}).`;
     }
@@ -1992,9 +2016,23 @@ async function renderRolePage(role = 'super_admin', section = 'overview', naviga
       needsAssignments ? fetchAssignments(token, schoolId, academicQuery) : Promise.resolve(null),
       needsLessons ? fetchLessons(token, schoolId, academicQuery) : Promise.resolve(null),
     ]);
-    assignments = assignmentResult?.ok && assignmentResult.data?.status === 'ok' ? assignmentResult.data.items || [] : [];
-    lessons = lessonResult?.ok && lessonResult.data?.status === 'ok' ? lessonResult.data.items || [] : [];
+    const workspaceFailures = [
+      ['assignments', assignmentResult],
+      ['lessons', lessonResult],
+    ].filter(([, result]) => result && (!result.ok || result.data?.status !== 'ok'))
+      .map(([name, result]) => result.data?.message || `Unable to load ${name} (HTTP ${result.status || 'network error'}).`);
+    if (workspaceFailures.length) {
+      schoolDataLoadError = [schoolDataLoadError, ...workspaceFailures].filter(Boolean).join(' ');
+    }
+    if (assignmentResult?.ok && assignmentResult.data?.status === 'ok') {
+      assignments = assignmentResult.data.items || [];
+    }
+    if (lessonResult?.ok && lessonResult.data?.status === 'ok') {
+      lessons = lessonResult.data.items || [];
+    }
   }
+
+  if (navigationId !== routeGeneration) return;
   
   if (role === 'teacher') {
     teacherData = {
@@ -2039,6 +2077,7 @@ async function renderRolePage(role = 'super_admin', section = 'overview', naviga
       schoolLocalDate: schoolData.schoolLocalDate || '',
       schoolTimeZone: schoolData.timezone || '',
       examResults: schoolData.examResults || [],
+      schoolDataLoadError,
       announcements: schoolData.announcements || [],
       messages: schoolData.messages || [],
       payments: schoolData.payments || [],
@@ -2089,6 +2128,7 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
   let schoolDataLoadError = '';
 
   if (navigationId !== routeGeneration) return;
+  showDashboardLoadingState(normalizedSection);
 
   let summary = {
     name: schoolName,
@@ -2150,11 +2190,13 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
     if (schoolResult.ok && schoolResult.data?.status === 'ok') {
       const school = schoolResult.data.school || {};
       summary = schoolResult.data.summary || summary;
-      await refreshStoredSchoolAssets(school, token);
+      if (['overview', 'profile'].includes(normalizedSection)) {
+        await refreshStoredSchoolAssets(school, token);
+      }
       const students = Array.isArray(school.students) ? school.students : [];
       const teachers = Array.isArray(school.teachers) ? school.teachers : [];
-      await refreshStoredProfilePhotos(students, token);
-      await refreshStoredProfilePhotos(teachers, token);
+      if (normalizedSection === 'students') await refreshStoredProfilePhotos(students, token);
+      if (normalizedSection === 'teachers') await refreshStoredProfilePhotos(teachers, token);
       const classes = Array.isArray(school.classes) ? school.classes : [];
       const attendanceRecords = Array.isArray(school.attendanceRecords) ? school.attendanceRecords : [];
       const announcements = Array.isArray(school.announcements) ? school.announcements : [];
@@ -2180,6 +2222,10 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
       if (normalizedSection === 'academic') {
         const academicEntityTypes = ['academic-years', 'terms', 'semesters', 'departments', 'streams', 'subjects', 'classes'];
         const academicEntityResults = await Promise.all(academicEntityTypes.map((entityType) => fetchSchoolEntities(token, schoolId, entityType, { pageSize: 100 })));
+        const failedEntityResult = academicEntityResults.find((result) => !result.ok || result.data?.status !== 'ok');
+        if (failedEntityResult && !schoolDataLoadError) {
+          schoolDataLoadError = failedEntityResult.data?.message || `Unable to load all academic records (HTTP ${failedEntityResult.status || 'network error'}).`;
+        }
         academicRecords = academicEntityResults.flatMap((result, index) => {
           if (!result.ok || result.data?.status !== 'ok') return [];
           return (Array.isArray(result.data.items) ? result.data.items : []).map((item) => ({
@@ -2236,9 +2282,14 @@ async function renderSchoolDashboardPage(section = 'overview', navigationId = ro
         teacherCount: teachers.length || summary.teacherCount || 0,
         classCount: classes.length || summary.classCount || 0,
       };
+    } else {
+      schoolDataLoadError = schoolResult.data?.message
+        || `Unable to load school details (HTTP ${schoolResult.status || 'network error'}).`;
     }
   }
 
+  if (navigationId !== routeGeneration) return;
+  sectionData.schoolDataLoadError = schoolDataLoadError;
   currentSchoolStudents = sectionData.students || [];
   currentSchoolTeachers = sectionData.teachers || [];
 
@@ -2416,7 +2467,14 @@ async function refreshStoredProfilePhotos(records, token) {
   await Promise.all((Array.isArray(records) ? records : [])
     .filter((record) => record && record.profilePhotoPath)
     .map(async (record) => {
-      const encodedPath = String(record.profilePhotoPath).split('/').map(encodeURIComponent).join('/');
+      const photoPath = String(record.profilePhotoPath);
+      const cacheKey = `${localStorage.getItem('globyedu_schoolId') || ''}:${photoPath}`;
+      const cachedPhoto = refreshedProfilePhotoUrls.get(cacheKey);
+      if (cachedPhoto && cachedPhoto.expiresAt > Date.now()) {
+        record.profilePhoto = cachedPhoto.url;
+        return;
+      }
+      const encodedPath = photoPath.split('/').map(encodeURIComponent).join('/');
       try {
         const response = await fetch(`/api/v1/files/${encodedPath}?expiresIn=3600`, {
           method: 'GET',
@@ -2427,12 +2485,18 @@ async function refreshStoredProfilePhotos(records, token) {
         if (!response.ok || data?.status !== 'ok' || !data.url) {
           console.warn('Unable to refresh stored profile photo URL.', data || response);
           record.profilePhoto = '';
+          refreshedProfilePhotoUrls.delete(cacheKey);
           return;
         }
         record.profilePhoto = data.url;
+        refreshedProfilePhotoUrls.set(cacheKey, {
+          url: data.url,
+          expiresAt: Date.now() + PROFILE_PHOTO_URL_CACHE_DURATION_MS,
+        });
       } catch (error) {
         console.warn('Unable to refresh stored profile photo URL.', error);
         record.profilePhoto = '';
+        refreshedProfilePhotoUrls.delete(cacheKey);
       }
     }));
 }
@@ -3309,7 +3373,15 @@ function attachSchoolHandlers() {
 
   // Attach sidebar navigation handlers
   attachSidebarHandlers(
-    (section) => renderSchoolDashboardPage(section), // onNavigate
+    (section) => {
+      const navigationId = ++routeGeneration;
+      const activeRole = getUserRole() || 'school_authority';
+      if (activeRole === 'teacher' || activeRole === 'student') {
+        renderRolePage(activeRole, section, navigationId);
+      } else {
+        renderSchoolDashboardPage(section, navigationId);
+      }
+    }, // onNavigate
     () => {
       // onLogout
       clearAuthenticationState();
@@ -3891,7 +3963,7 @@ function attachSchoolHandlers() {
         return;
       }
 
-      if (action === 'edit-class' || action === 'assign-class-teacher') {
+      if (action === 'edit-class' || action === 'assign-class-teacher' || action === 'archive-class') {
         const classId = button.getAttribute('data-class-id');
         if (!classId) return;
         const detailsResult = await fetchSchoolDetails(token, schoolId);
@@ -3900,6 +3972,17 @@ function attachSchoolHandlers() {
         const classRecord = classes.find((entry) => String(entry.classId || entry.id) === String(classId));
         if (!classRecord) {
           alert('Class not found. Refresh the page and try again.');
+          return;
+        }
+        if (action === 'archive-class') {
+          const className = classRecord.name || classRecord.className || classId;
+          if (!confirm(`Archive ${className}? Student records and attendance history will be retained. Reassign students and unassign teachers first.`)) return;
+          const result = await deleteSchoolEntity(token, schoolId, 'classes', classId);
+          if (!result.ok || result.data?.status !== 'ok') {
+            alert(result.data?.message || 'Unable to archive class.');
+            return;
+          }
+          renderSchoolDashboardPage('classes', ++routeGeneration);
           return;
         }
         if (action === 'edit-class') {

@@ -158,6 +158,21 @@ describe('school authority workspace', () => {
     expect(apiSource).toContain("message: error.message || 'Network request failed.'");
   });
 
+  it('limits teacher photo URL refreshes and surfaces assignment and lesson load failures', () => {
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
+    const dashboardSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js'), 'utf8');
+
+    expect(mainSource).toMatch(/if \(\['overview', 'profile'\]\.includes\(section\)\) \{\s+await refreshStoredProfilePhotos\(schoolData\.teachers, token\);/);
+    expect(mainSource).toContain('PROFILE_PHOTO_URL_CACHE_DURATION_MS = 50 * 60 * 1000');
+    expect(mainSource).toContain('cachedPhoto.expiresAt > Date.now()');
+    expect(mainSource).toContain("['assignments', assignmentResult]");
+    expect(mainSource).toContain("['lessons', lessonResult]");
+    expect(mainSource).toContain('schoolDataLoadError = [schoolDataLoadError, ...workspaceFailures]');
+    expect(dashboardSource).toContain('sectionData.schoolDataLoadError');
+    expect(dashboardSource).toContain('teacherData.schoolDataLoadError');
+    expect(dashboardSource).toContain('studentData.schoolDataLoadError');
+  });
+
   it('stores a workspace notification when a teacher creates an assignment', () => {
     const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
 

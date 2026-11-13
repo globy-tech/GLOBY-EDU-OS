@@ -907,6 +907,13 @@ router.delete('/:schoolId/entities/:entityType/:entityId', authMiddleware, tenan
     });
     if (['students', 'teachers'].includes(entityType)) {
       await auditSchoolAction(req, { action: `${entityType.slice(0, -1)}.archived`, resourceType: entityType.slice(0, -1), resourceId: entityId });
+    } else if (entityType === 'classes') {
+      await auditSchoolAction(req, {
+        action: 'class.archived',
+        resourceType: 'class',
+        resourceId: entity.classId || entity.id || entityId,
+        metadata: { name: entity.name, academicYearId: entity.academicYearId || null },
+      });
     }
     return res.json({ status: 'ok', entity });
   } catch (err) {

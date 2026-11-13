@@ -289,20 +289,8 @@ async function validatePlacement(schoolId, admission, placement) {
 
 async function persistEnrollment(schoolId, school, student, placement, admissionId) {
   if (firebaseCore.isFirebaseCoreMode()) {
-    const activeEnrollments = Array.isArray(school.enrollments) ? school.enrollments : [];
-    for (const current of activeEnrollments) {
-      if (String(current.studentId) === String(student.studentId)
-        && current.isCurrent === true
-        && !(String(current.classId) === String(placement.classId)
-          && String(current.academicYearId) === String(placement.academicYearId))) {
-        await firebaseCore.saveById('enrollments', current.id, {
-          isCurrent: false,
-          status: 'completed',
-        }, true);
-      }
-    }
     const enrollmentId = `${schoolId}:${student.studentId}:${placement.academicYearId}:${placement.classId}`;
-    return firebaseCore.saveById('enrollments', enrollmentId, {
+    const enrollment = {
       id: enrollmentId,
       schoolId,
       studentId: student.studentId,
@@ -311,7 +299,42 @@ async function persistEnrollment(schoolId, school, student, placement, admission
       admissionId,
       status: 'active',
       isCurrent: true,
-    }, true);
+    };
+    return firebaseCore.runClassMutation(schoolId, [placement.classId], async ({
+      transaction,
+      classRecords,
+      classReferences,
+      getDocumentReference,
+      getSchoolQuery,
+      sanitizeData,
+    }) => {
+      if (String(classRecords[0].status || 'active').toLowerCase() === 'archived') {
+        throw new Error('Class does not belong to this school or is not active.');
+      }
+      const currentSnapshot = await transaction.get(
+        getSchoolQuery('enrollments').where('studentId', '==', String(student.studentId)),
+      );
+      const currentEnrollments = currentSnapshot.docs.filter((document) => {
+        const current = document.data();
+        return current.isCurrent === true
+          && !(String(current.classId) === String(placement.classId)
+            && String(current.academicYearId) === String(placement.academicYearId));
+      });
+      currentEnrollments.forEach((document) => transaction.set(
+        document.ref,
+        sanitizeData({ isCurrent: false, status: 'completed' }),
+        { merge: true },
+      ));
+      transaction.set(
+        getDocumentReference('enrollments', enrollmentId),
+        sanitizeData(enrollment),
+        { merge: true },
+      );
+      return {
+        result: { ...enrollment, updatedAt: new Date().toISOString() },
+        classUpdatesById: { [classReferences[0].id]: {} },
+      };
+    });
   }
   if (prisma && !prisma.__stub) {
     const tenantId = await getTenantId(schoolId);

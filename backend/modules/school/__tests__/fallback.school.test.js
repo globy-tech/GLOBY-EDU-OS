@@ -31,7 +31,7 @@ process.env.DATA_STORE_MODE = 'json';
 process.env.GLOBY_QA_MODE = 'true';
 Object.assign(process.env, isolatedPaths);
 const fallbackSchool = require('../fallback.school');
-const { ensureDemoSchool, loadSchoolData } = fallbackSchool;
+const { ensureDemoSchool, loadSchoolData, saveSchoolData } = fallbackSchool;
 const schoolService = require('../school.service');
 const firebaseCore = require('../../../firebase.core');
 const firebaseData = require('../../../firebase.data');
@@ -616,6 +616,262 @@ test('new schools support class, teacher, and student onboarding without manual 
   expect(student.studentId).toBeTruthy();
   expect(reloaded.students.find((item) => item.studentId === student.studentId).classId).toBe(createdClass.classId);
   expect(reloaded.teachers.find((item) => item.teacherId === teacher.teacherId).assignedClasses).toContain(createdClass.classId);
+});
+
+test('class archival preserves history and requires current students and teachers to be reassigned', async () => {
+  fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
+  const school = await schoolService.createSchool({
+    name: 'Class Archive Test School',
+    headEmail: 'archive-head@globy.test',
+    headFullName: 'Archive Head',
+  });
+  const classRecord = await schoolService.createEntity(school.schoolId, 'classes', { name: 'Grade 7A' });
+  const teacher = await schoolService.createEntity(school.schoolId, 'teachers', {
+    fullName: 'Archive Test Teacher',
+    email: 'archive-teacher@globy.test',
+    assignedClasses: [classRecord.classId],
+  });
+  const student = await schoolService.createEntity(school.schoolId, 'students', {
+    fullName: 'Archive Test Student',
+    classId: classRecord.classId,
+    className: classRecord.name,
+  });
+  const persistedSchools = loadSchoolData();
+  const persistedSchool = persistedSchools.find((entry) => entry.schoolId === school.schoolId);
+  persistedSchool.attendanceRecords = [{
+    studentId: student.studentId,
+    classId: classRecord.classId,
+    date: '2026-09-01',
+    status: 'present',
+  }];
+  saveSchoolData(persistedSchools);
+  const authority = { roles: ['school_authority'], tenantId: school.schoolId };
+
+  await expect(schoolService.deleteEntity(school.schoolId, 'classes', classRecord.classId, authority))
+    .rejects.toThrow('Students are still assigned to this class.');
+  await schoolService.updateEntity(school.schoolId, 'students', student.studentId, {
+    classId: null,
+    className: null,
+  }, authority);
+  await expect(schoolService.deleteEntity(school.schoolId, 'classes', classRecord.classId, authority))
+    .rejects.toThrow('Teachers are still assigned to this class.');
+  await schoolService.updateEntity(school.schoolId, 'teachers', teacher.teacherId, { assignedClasses: [] }, authority);
+
+  const archived = await schoolService.deleteEntity(school.schoolId, 'classes', classRecord.classId, authority);
+  const reloaded = await schoolService.getSchoolBySchoolId(school.schoolId);
+
+  expect(archived.status).toBe('archived');
+  expect(reloaded.classes.find((entry) => entry.classId === classRecord.classId).status).toBe('archived');
+  expect(reloaded.students.some((entry) => entry.studentId === student.studentId)).toBe(true);
+  expect(reloaded.attendanceRecords).toEqual([expect.objectContaining({ studentId: student.studentId, classId: classRecord.classId })]);
+  await expect(schoolService.createEntity(school.schoolId, 'students', {
+    fullName: 'New Student',
+    classId: classRecord.classId,
+  }, authority)).rejects.toThrow('Students cannot be enrolled in an archived class.');
+});
+
+test('class archival cannot race with a concurrent enrollment', async () => {
+  fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
+  const school = await schoolService.createSchool({
+    name: 'Concurrent Class Archive Test School',
+    headEmail: 'concurrent-archive-head@globy.test',
+    headFullName: 'Concurrent Archive Head',
+  });
+  const classRecord = await schoolService.createEntity(school.schoolId, 'classes', { name: 'Grade 9A' });
+  const authority = { roles: ['school_authority'], tenantId: school.schoolId };
+
+  const [archiveResult, enrollmentResult] = await Promise.allSettled([
+    schoolService.deleteEntity(school.schoolId, 'classes', classRecord.classId, authority),
+    schoolService.createEntity(school.schoolId, 'students', {
+      fullName: 'Concurrent Enrollment Student',
+      classId: classRecord.classId,
+    }, authority),
+  ]);
+  const reloaded = await schoolService.getSchoolBySchoolId(school.schoolId);
+
+  expect(archiveResult.status).toBe('fulfilled');
+  expect(enrollmentResult.status).toBe('rejected');
+  expect(enrollmentResult.reason.message).toMatch(/archived class/i);
+  expect(reloaded.classes.find((entry) => entry.classId === classRecord.classId).status).toBe('archived');
+  expect(reloaded.students).toHaveLength(0);
+});
+
+test('class archival cannot race with a concurrent teacher assignment', async () => {
+  fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
+  const school = await schoolService.createSchool({
+    name: 'Concurrent Assignment Test School',
+    headEmail: 'concurrent-assignment-head@globy.test',
+    headFullName: 'Concurrent Assignment Head',
+  });
+  const classRecord = await schoolService.createEntity(school.schoolId, 'classes', { name: 'Grade 10A' });
+  const teacher = await schoolService.createEntity(school.schoolId, 'teachers', {
+    fullName: 'Concurrent Assignment Teacher',
+    email: 'concurrent-assignment-teacher@globy.test',
+  });
+  const authority = { roles: ['school_authority'], tenantId: school.schoolId };
+
+  const [archiveResult, assignmentResult] = await Promise.allSettled([
+    schoolService.deleteEntity(school.schoolId, 'classes', classRecord.classId, authority),
+    schoolService.updateEntity(school.schoolId, 'classes', classRecord.classId, {
+      teacherIds: [teacher.teacherId],
+    }, authority),
+  ]);
+  const reloaded = await schoolService.getSchoolBySchoolId(school.schoolId);
+
+  expect(archiveResult.status).toBe('fulfilled');
+  expect(assignmentResult.status).toBe('rejected');
+  expect(assignmentResult.reason.message).toMatch(/archived class/i);
+  expect(reloaded.classes.find((entry) => entry.classId === classRecord.classId)).toMatchObject({
+    status: 'archived',
+    teacherIds: [],
+  });
+});
+
+test('teacher-created students persist for School Authority and every teacher assigned to the class', async () => {
+  fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
+  const school = await schoolService.createSchool({
+    name: 'Shared Roster Test School',
+    headEmail: 'shared-roster-head@globy.test',
+    headFullName: 'Shared Roster Head',
+  });
+  const classRecord = await schoolService.createEntity(school.schoolId, 'classes', { name: 'Grade 8A' });
+  const teachers = [];
+  for (const suffix of ['one', 'two']) {
+    teachers.push(await schoolService.createEntity(school.schoolId, 'teachers', {
+      fullName: `Roster Teacher ${suffix}`,
+      email: `roster-teacher-${suffix}@globy.test`,
+      assignedClasses: [classRecord.classId],
+    }));
+  }
+  await schoolService.updateEntity(school.schoolId, 'classes', classRecord.classId, {
+    teacherIds: teachers.map((teacher) => teacher.teacherId),
+  }, { roles: ['school_authority'], tenantId: school.schoolId });
+
+  const persistedBeforeStudent = await schoolService.getSchoolBySchoolId(school.schoolId);
+  expect(persistedBeforeStudent.classes.find((entry) => entry.classId === classRecord.classId).teacherIds)
+    .toEqual(teachers.map((teacher) => teacher.teacherId));
+  expect(schoolService.getTeacherSchoolView(persistedBeforeStudent, {
+    username: teachers[0].email,
+    roles: ['teacher'],
+  }).classes.map((entry) => entry.classId)).toContain(classRecord.classId);
+
+  const createdStudent = await schoolService.createEntity(school.schoolId, 'students', {
+    fullName: 'Teacher-created Student',
+    email: 'teacher-created-student@globy.test',
+    classId: classRecord.classId,
+    className: classRecord.name,
+  }, {
+    roles: ['teacher'],
+    userId: `${school.schoolId}:${teachers[0].teacherId}`,
+    tenantId: school.schoolId,
+  });
+  const reloaded = await schoolService.getSchoolBySchoolId(school.schoolId);
+
+  expect(reloaded.students.find((student) => student.studentId === createdStudent.studentId).classId)
+    .toBe(classRecord.classId);
+  for (const teacher of teachers) {
+    const teacherView = schoolService.getTeacherSchoolView(reloaded, {
+      userId: `${school.schoolId}:${teacher.teacherId}`,
+      username: teacher.email,
+      roles: ['teacher'],
+    });
+    expect(teacherView.students.map((student) => student.studentId)).toContain(createdStudent.studentId);
+  }
+});
+
+test('Firebase class archival updates the existing tenant-scoped class document', async () => {
+  const schoolId = 'firebase-archive-school';
+  const school = {
+    schoolId,
+    classes: [{ classId: 'class-a', name: 'Class A', status: 'active', teacherIds: [] }],
+    students: [],
+    teachers: [],
+    users: [],
+  };
+  const classReference = { id: `${schoolId}:class-a` };
+  const transaction = {
+    get: jest.fn(async () => ({ docs: [] })),
+    set: jest.fn(),
+  };
+  jest.spyOn(firebaseCore, 'isFirebaseCoreMode').mockReturnValue(true);
+  jest.spyOn(firebaseCore, 'getSchoolAggregate').mockResolvedValue(school);
+  const runClassMutation = jest.spyOn(firebaseCore, 'runClassMutation').mockImplementation(async (
+    requestedSchoolId,
+    classIds,
+    operation,
+  ) => {
+    expect(requestedSchoolId).toBe(schoolId);
+    expect(classIds).toEqual(['class-a']);
+    const updates = await operation({
+      transaction,
+      classRecords: [{ ...school.classes[0], id: classReference.id }],
+      classReferences: [classReference],
+      getSchoolQuery: (collectionName) => ({ collectionName }),
+    });
+    transaction.set(classReference, updates.classUpdatesById[classReference.id], { merge: true });
+    return updates.result;
+  });
+
+  const result = await schoolService.deleteEntity(schoolId, 'classes', 'class-a', {
+    roles: ['school_authority'],
+    tenantId: schoolId,
+  });
+
+  expect(result.status).toBe('archived');
+  expect(runClassMutation).toHaveBeenCalledWith(schoolId, ['class-a'], expect.any(Function));
+  expect(transaction.get).toHaveBeenCalledTimes(4);
+  expect(transaction.set).toHaveBeenCalledWith(
+    classReference,
+    expect.objectContaining({ status: 'archived' }),
+    { merge: true },
+  );
+});
+
+test('Firebase class archival blocks a current enrollment read inside its transaction', async () => {
+  const schoolId = 'firebase-enrollment-archive-school';
+  const school = {
+    schoolId,
+    classes: [{ classId: 'class-a', name: 'Class A', status: 'active', teacherIds: [] }],
+    students: [],
+    teachers: [],
+    users: [],
+  };
+  const classReference = { id: `${schoolId}:class-a` };
+  const transaction = {
+    get: jest.fn(async (query) => ({
+      docs: query.collectionName === 'enrollments'
+        ? [{ id: `${schoolId}:enrollment-1`, data: () => ({
+            studentId: 'STU-1',
+            classId: 'class-a',
+            status: 'active',
+            isCurrent: true,
+          }) }]
+        : [],
+    })),
+    set: jest.fn(),
+  };
+  jest.spyOn(firebaseCore, 'isFirebaseCoreMode').mockReturnValue(true);
+  jest.spyOn(firebaseCore, 'getSchoolAggregate').mockResolvedValue(school);
+  jest.spyOn(firebaseCore, 'runClassMutation').mockImplementation(async (
+    requestedSchoolId,
+    classIds,
+    operation,
+  ) => {
+    expect(requestedSchoolId).toBe(schoolId);
+    expect(classIds).toEqual(['class-a']);
+    return operation({
+      transaction,
+      classRecords: [{ ...school.classes[0], id: classReference.id }],
+      classReferences: [classReference],
+      getSchoolQuery: (collectionName) => ({ collectionName }),
+    });
+  });
+
+  await expect(schoolService.deleteEntity(schoolId, 'classes', 'class-a', {
+    roles: ['school_authority'],
+    tenantId: schoolId,
+  })).rejects.toThrow('Students are still assigned to this class.');
+  expect(transaction.set).not.toHaveBeenCalled();
 });
 
 test('super admin list includes newly created schools instead of filtering to the demo tenant only', async () => {

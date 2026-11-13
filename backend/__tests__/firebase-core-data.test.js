@@ -78,6 +78,49 @@ describe('Firebase core document writes', () => {
     expect(mockUpdate).toHaveBeenCalledTimes(1);
   });
 
+  test('runs class-related writes in a transaction that also updates the class record', async () => {
+    const classReference = { collectionName: 'classes', id: 'school-a:class-1' };
+    const writes = [];
+    const transaction = {
+      get: jest.fn(async (reference) => ({
+        exists: reference === classReference,
+        id: reference.id,
+        data: () => ({ schoolId: 'school-a', classId: 'class-1', status: 'active' }),
+      })),
+      set: jest.fn((reference, data, options) => writes.push({ reference, data, options })),
+    };
+    mockFirestore.collection.mockImplementation((name) => ({
+      doc: (id) => (name === 'classes' && id === classReference.id
+        ? classReference
+        : { collectionName: name, id: String(id) }),
+      where: jest.fn(() => ({ collectionName: name })),
+    }));
+    mockFirestore.runTransaction.mockImplementation((callback) => callback(transaction));
+
+    await expect(firebaseCore.runClassMutation('school-a', ['class-1'], async ({
+      transaction: currentTransaction,
+      classRecords,
+      getDocumentReference,
+    }) => {
+      expect(classRecords[0]).toMatchObject({ id: classReference.id, classId: 'class-1' });
+      currentTransaction.set(getDocumentReference('students', 'school-a:student-1'), { classId: 'class-1' });
+      return { result: 'saved' };
+    })).resolves.toBe('saved');
+
+    expect(transaction.get).toHaveBeenCalledWith(classReference);
+    expect(writes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        reference: { collectionName: 'students', id: 'school-a:student-1' },
+        data: { classId: 'class-1' },
+      }),
+      expect.objectContaining({
+        reference: classReference,
+        data: { updatedAt: expect.any(String) },
+        options: { merge: true },
+      }),
+    ]));
+  });
+
   test('serializes competing progression decisions for the same student', async () => {
     const records = new Map([
       ['students/school-a:STD-1', {
