@@ -246,6 +246,64 @@ describe('workspace messaging and support', () => {
     expect(view.students.map((entry) => entry.studentId)).toEqual(['STU-QA']);
   });
 
+  it('resolves teacher database IDs and exposes shared class rosters to assigned teachers only', () => {
+    const school = {
+      schoolId,
+      teachers: [
+        { id: 'database-teacher-a', teacherId: 'T-A', email: 'teacher-a@school.test', fullName: 'Shared Name' },
+        { id: 'database-teacher-b', teacherId: 'T-B', email: 'teacher-b@school.test', fullName: 'Shared Name' },
+      ],
+      users: [],
+      classes: [
+        { classId: 'class-a', name: 'Class A', teacherIds: ['T-A', 'T-B'] },
+        { classId: 'class-b', name: 'Class B', teacherIds: ['T-B'] },
+      ],
+      students: [
+        { studentId: 'STU-A', classId: 'class-a', className: 'Class A' },
+        { studentId: 'STU-B', classId: 'class-b', className: 'Class B' },
+      ],
+    };
+
+    const firstTeacherView = schoolService.getTeacherSchoolView(school, {
+      userId: 'database-teacher-a',
+      roles: ['teacher'],
+    });
+    const secondTeacherView = schoolService.getTeacherSchoolView(school, {
+      userId: 'database-teacher-b',
+      email: 'teacher-b@school.test',
+      roles: ['teacher'],
+    });
+
+    expect(firstTeacherView.classes.map((entry) => entry.classId)).toEqual(['class-a']);
+    expect(firstTeacherView.students.map((entry) => entry.studentId)).toEqual(['STU-A']);
+    expect(secondTeacherView.classes.map((entry) => entry.classId)).toEqual(['class-a', 'class-b']);
+    expect(secondTeacherView.students.map((entry) => entry.studentId)).toEqual(['STU-A', 'STU-B']);
+  });
+
+  it('fails closed when a legacy teacher class name matches multiple classes', () => {
+    const school = {
+      schoolId,
+      teachers: [{ teacherId: 'T-AMBIGUOUS', username: 'T-AMBIGUOUS', assignedClasses: ['Shared Class'] }],
+      users: [],
+      classes: [
+        { classId: 'class-a', name: 'Shared Class' },
+        { classId: 'class-b', name: 'Shared Class' },
+      ],
+      students: [
+        { studentId: 'STU-A', className: 'Shared Class' },
+        { studentId: 'STU-B', classId: 'class-b', className: 'Shared Class' },
+      ],
+    };
+
+    const teacherView = schoolService.getTeacherSchoolView(school, {
+      userId: `${schoolId}:T-AMBIGUOUS`,
+      roles: ['teacher'],
+    });
+
+    expect(teacherView.classes).toEqual([]);
+    expect(teacherView.students).toEqual([]);
+  });
+
   it('persists teacher attendance and marks only for assigned students without duplicates', async () => {
     const snapshot = JSON.parse(JSON.stringify(loadSchoolData()));
     const school = snapshot.find((entry) => entry.schoolId === schoolId);

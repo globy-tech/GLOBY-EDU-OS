@@ -39,12 +39,12 @@ function createSchool(schoolId) {
     subscriptionStatus: 'active',
     users: [],
     teachers: schoolId === SCHOOL_ID
-      ? [{ teacherId: 'TEACHER-A', username: 'TEACHER-A', assignedClasses: ['class-a'] }]
+      ? [{ teacherId: 'TEACHER-A', username: 'TEACHER-A', assignedClasses: [] }]
       : [],
     students: schoolId === SCHOOL_ID ? roster : [],
     classes: schoolId === SCHOOL_ID
       ? [
-        { classId: 'class-a', name: 'Class A', teacherId: 'TEACHER-A' },
+        { classId: 'class-a', name: 'Class A', teacherId: 'TEACHER-A', teacherIds: [] },
         { classId: 'class-b', name: 'Class B', teacherId: 'TEACHER-B' },
       ]
       : [],
@@ -127,6 +127,36 @@ describe('student entity-list authorization', () => {
     const responseItems = res.json.mock.calls[0][0].items;
     expect(responseItems).toHaveLength(8);
     expect(responseItems.some((student) => student.classId === 'class-b')).toBe(false);
+  });
+
+  test('the actual entity-list route resolves a legacy teacherId when teacherIds is an empty array', async () => {
+    const req = createRequest('teacher');
+    req.params.entityType = 'classes';
+    const res = createResponse();
+    await dispatchAfterAuthentication(req, res);
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'ok',
+      entityType: 'classes',
+      total: 1,
+      items: [expect.objectContaining({ classId: 'class-a' })],
+    }));
+  });
+
+  test('the actual entity-list route resolves a legacy class-name student link against its canonical class', async () => {
+    global.__workspaceSnapshot[0].students[0].classId = 'Class A';
+    const res = createResponse();
+    await dispatchAfterAuthentication(createRequest('teacher'), res);
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'ok',
+      total: 8,
+      items: expect.arrayContaining([
+        expect.objectContaining({ studentId: 'CLASS-A-1', classId: 'Class A' }),
+      ]),
+    }));
+    expect(res.json.mock.calls[0][0].items).toHaveLength(8);
+    expect(res.json.mock.calls[0][0].items.some((student) => student.classId === 'class-b')).toBe(false);
   });
 
   test('School Authority retains the full roster in its own tenant', async () => {

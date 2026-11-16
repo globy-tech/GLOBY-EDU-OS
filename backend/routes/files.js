@@ -88,6 +88,17 @@ function getTenantFolder(req) {
   return /^[A-Za-z0-9_-]+$/.test(folder) ? folder : null;
 }
 
+function getRequestSchoolId(req) {
+  return String(
+    req.tenant?.schoolId
+      || req.params?.schoolId
+      || req.body?.schoolId
+      || req.user?.schoolId
+      || req.user?.tenantId
+      || ''
+  ).trim();
+}
+
 function normalizeRelativePath(value) {
   const filePath = String(value || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
   if (!filePath || filePath.includes('\0') || filePath.split('/').some((segment) => !segment || segment === '..')) {
@@ -178,7 +189,7 @@ function getSchoolAssetField(relativePath, field) {
 async function resolveAuthorizedFile(req, school, relativePath, target = {}) {
   const roles = getUserRoles(req);
   const schoolId = String(school.schoolId || school.id || '');
-  if (!schoolId || schoolId !== String(req.user?.tenantId || req.user?.schoolId || '')) return null;
+  if (!schoolId || schoolId !== getRequestSchoolId(req)) return null;
 
   if (target.ownerType === 'school') {
     const field = getSchoolAssetField(relativePath, target.ownerField);
@@ -306,10 +317,10 @@ async function persistFileReference(school, owner, relativePath, actor) {
 }
 
 async function getAuthorizedSchool(req) {
-  const tenantId = req.user?.tenantId || req.user?.schoolId;
-  if (!tenantId) return null;
-  const school = await schoolService.getSchoolBySchoolId(tenantId);
-  if (!school || String(school.schoolId || school.id || '') !== String(tenantId)) return null;
+  const schoolId = getRequestSchoolId(req);
+  if (!schoolId) return null;
+  const school = await schoolService.getSchoolBySchoolId(schoolId);
+  if (!school || String(school.schoolId || school.id || '') !== schoolId) return null;
   return school;
 }
 

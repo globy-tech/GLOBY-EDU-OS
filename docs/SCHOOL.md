@@ -19,7 +19,7 @@ The school/tenant record is the authority boundary for school users and school-o
   ```
 
   These equivalences are school-managed configuration, not global assumptions. Without this configuration, those names remain distinct. The School Authority can edit the academic structure through `PUT /api/v1/schools/:schoolId`; the Classes dashboard provides a line-based alias editor.
-- Classes can list multiple `teacherIds`. Legacy `teacherId` records remain readable. The class assignment workflow validates teachers against the same tenant and persists the assignment in the class record.
+- Classes can list multiple `teacherIds`. Legacy `teacherId` records remain readable when the modern list is absent or empty. The class assignment workflow validates teachers against the same tenant and persists the assignment in the class record. Legacy student class-name links are resolved only when they identify one unambiguous class in the same school.
 - A student has a single `classId` in the school record. Student records and account records are synchronized by the supported create/update workflows. Firebase student creation uses create-only document writes; if the user document write fails after the student document succeeds, the service attempts to remove the partial student document and reports cleanup failures.
 
 ## API workflows

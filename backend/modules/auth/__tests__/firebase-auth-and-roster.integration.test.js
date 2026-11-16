@@ -60,6 +60,7 @@ const mockFirestore = {
     const transaction = {
       get: async (reference) => snapshot(reference, collectionRecords(reference.collection).get(reference.id)),
       create: (reference, data) => writes.push({ type: 'create', reference, data }),
+      set: (reference, data, options = {}) => writes.push({ type: 'set', reference, data, options }),
       update: (reference, data) => writes.push({ type: 'update', reference, data }),
     };
     const result = await callback(transaction);
@@ -67,7 +68,12 @@ const mockFirestore = {
       const records = collectionRecords(write.reference.collection);
       const current = records.get(write.reference.id);
       if (write.type === 'create' && current !== undefined) throw new Error('Document already exists');
-      records.set(write.reference.id, { ...(current || {}), ...structuredClone(write.data) });
+      records.set(
+        write.reference.id,
+        write.type === 'set' && write.options.merge === false
+          ? structuredClone(write.data)
+          : { ...(current || {}), ...structuredClone(write.data) },
+      );
     }
     return result;
   },
@@ -99,11 +105,26 @@ jest.mock('../../../config/prisma.client', () => null);
 jest.mock('../../audit/audit.service', () => ({
   recordAuditEvent: jest.fn().mockResolvedValue(null),
 }));
+jest.mock('../../school/admissions.service', () => ({
+  getAdmission: jest.fn(),
+  findAdmissionsByPhotoPath: jest.fn().mockResolvedValue([]),
+  updateAdmission: jest.fn(),
+}));
+jest.mock('../../../lib/supabaseClient', () => ({
+  uploadSchoolFile: jest.fn(async () => ({ storage: 'r2', eTag: '"integration-test"' })),
+  deleteSchoolFile: jest.fn(async () => true),
+  createSchoolFileSignedUrl: jest.fn(async () => 'https://files.example.test/signed'),
+  isR2Configured: jest.fn(() => true),
+  getR2ConfigurationStatus: jest.fn(() => ({ configured: true, missingVariables: [], invalidVariables: [] })),
+  getSchoolFilePublicUrl: jest.fn(() => null),
+}));
 
 const express = require('express');
 const authRouter = require('../auth.controller');
 const schoolRouter = require('../../school/school.controller');
 const authMiddleware = require('../middleware/auth.middleware');
+const fileRouter = require('../../../routes/files');
+const storage = require('../../../lib/supabaseClient');
 
 const SCHOOL_ID = 'release-school-a';
 const OTHER_SCHOOL_ID = 'release-school-b';
@@ -136,6 +157,7 @@ function seedFixture() {
     classId: 'class-a',
     name: 'Class A',
     teacherId: 'T-A',
+    teacherIds: [],
   });
   collectionRecords('classes').set(`${SCHOOL_ID}:class-b`, {
     schoolId: SCHOOL_ID,
@@ -150,7 +172,7 @@ function seedFixture() {
     email: 'teacher-a@example.test',
     userId: 'release-teacher',
     firebaseUid: 'release-uid-teacher',
-    assignedClasses: ['class-a'],
+    assignedClasses: [],
     status: 'active',
     isVerified: true,
     emailVerified: true,
@@ -232,11 +254,18 @@ async function listStudents(port, token, schoolId = SCHOOL_ID, pageSize = 50) {
   });
 }
 
+async function getSchoolDetails(port, token, schoolId = SCHOOL_ID) {
+  return fetch(`http://127.0.0.1:${port}/api/v1/schools/${schoolId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 beforeAll(async () => {
   const app = express();
   app.use(express.json());
   app.use('/api/v1/auth', authRouter);
   app.use('/api/v1/schools', schoolRouter);
+  app.use('/api/v1/files', fileRouter);
   app.get('/api/v1/private', authMiddleware, (req, res) => res.json({ status: 'ok' }));
   server = await new Promise((resolve) => {
     const instance = app.listen(0, () => resolve(instance));
@@ -265,8 +294,22 @@ test('Firebase school routes enforce roster role and tenant boundaries', async (
   expect(teacherRosterBody.total).toBe(8);
   expect(teacherRosterBody.items.every((student) => student.classId === 'class-a')).toBe(true);
 
+  const teacherDashboard = await getSchoolDetails(port, teacherLogin.body.accessToken);
+  const teacherDashboardBody = await teacherDashboard.json();
+  expect(teacherDashboard.status).toBe(200);
+  expect(teacherDashboardBody.school.classes).toEqual([
+    expect.objectContaining({ classId: 'class-a', teacherId: 'T-A', teacherIds: [] }),
+  ]);
+  expect(teacherDashboardBody.school.students).toHaveLength(8);
+  expect(teacherDashboardBody.school.students.every((student) => student.classId === 'class-a')).toBe(true);
+
   const authorityLogin = await login(port, accounts[1]);
   expect(authorityLogin.response.status).toBe(200);
+  const authorityDashboard = await getSchoolDetails(port, authorityLogin.body.accessToken);
+  const authorityDashboardBody = await authorityDashboard.json();
+  expect(authorityDashboard.status).toBe(200);
+  expect(authorityDashboardBody.school.students).toHaveLength(32);
+
   const authorityRoster = await listStudents(port, authorityLogin.body.accessToken);
   const authorityRosterBody = await authorityRoster.json();
   expect(authorityRoster.status).toBe(200);
@@ -282,6 +325,105 @@ test('Firebase school routes enforce roster role and tenant boundaries', async (
 
   const unauthenticatedRoster = await listStudents(port, null);
   expect(unauthenticatedRoster.status).toBe(401);
+});
+
+test('a School Authority class assignment appears on the teacher dashboard immediately', async () => {
+  const port = server.address().port;
+  const classA = collectionRecords('classes').get(`${SCHOOL_ID}:class-a`);
+  collectionRecords('classes').set(`${SCHOOL_ID}:class-a`, {
+    ...classA,
+    teacherId: null,
+    teacherIds: [],
+  });
+
+  const teacherLogin = await login(port, accounts[0]);
+  expect(teacherLogin.response.status).toBe(200);
+  const beforeAssignment = await getSchoolDetails(port, teacherLogin.body.accessToken);
+  const beforeAssignmentBody = await beforeAssignment.json();
+  expect(beforeAssignment.status).toBe(200);
+  expect(beforeAssignmentBody.school.classes).toHaveLength(0);
+  expect(beforeAssignmentBody.school.students).toHaveLength(0);
+
+  const authorityLogin = await login(port, accounts[1]);
+  expect(authorityLogin.response.status).toBe(200);
+  const assignment = await fetch(`http://127.0.0.1:${port}/api/v1/schools/${SCHOOL_ID}/entities/classes/class-a`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${authorityLogin.body.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ teacherIds: ['T-A'] }),
+  });
+  const assignmentBody = await assignment.json();
+  expect(assignment.status).toBe(200);
+  expect(assignmentBody.entity.teacherIds).toEqual(['T-A']);
+
+  const afterAssignment = await getSchoolDetails(port, teacherLogin.body.accessToken);
+  const afterAssignmentBody = await afterAssignment.json();
+  expect(afterAssignment.status).toBe(200);
+  expect(afterAssignmentBody.school.classes).toEqual([
+    expect.objectContaining({ classId: 'class-a', teacherIds: ['T-A'] }),
+  ]);
+  expect(afterAssignmentBody.school.students).toHaveLength(8);
+  expect(afterAssignmentBody.school.students.every((student) => student.classId === 'class-a')).toBe(true);
+});
+
+test('Firebase-authenticated student photo upload checks ownership and persists the profile reference', async () => {
+  const studentEmail = accounts[2].identifier;
+  const studentUser = collectionRecords('users').get(accounts[2].id);
+  collectionRecords('users').delete(accounts[2].id);
+  collectionRecords('users').set(`${SCHOOL_ID}:${studentEmail}`, studentUser);
+  const studentRecord = collectionRecords('students').get(`${SCHOOL_ID}:CLASS-A-1`);
+  collectionRecords('students').set(`${SCHOOL_ID}:CLASS-A-1`, {
+    ...studentRecord,
+    email: studentEmail,
+    username: studentEmail,
+  });
+
+  const studentLogin = await login(server.address().port, accounts[2]);
+  expect(studentLogin.response.status).toBe(200);
+  storage.uploadSchoolFile.mockClear();
+
+  const previousNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  try {
+    const upload = (studentId, filename) => fetch(
+      `http://127.0.0.1:${server.address().port}/api/v1/files/upload?filename=student-profile/${filename}&ownerType=student&ownerId=${studentId}&ownerField=profilePhotoPath`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${studentLogin.body.accessToken}`,
+          'Content-Type': 'image/png',
+        },
+        body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      },
+    );
+
+    const authorizedUpload = await upload('CLASS-A-1', 'student-photo.png');
+    expect(authorizedUpload.status).toBe(201);
+    expect(await authorizedUpload.json()).toEqual(expect.objectContaining({
+      status: 'ok',
+      path: 'student-profile/student-photo.png',
+    }));
+    expect(storage.uploadSchoolFile).toHaveBeenCalledWith(
+      `${SCHOOL_ID}/student-profile/student-photo.png`,
+      expect.any(Buffer),
+      expect.objectContaining({ upsert: false }),
+    );
+    expect(collectionRecords('students').get(`${SCHOOL_ID}:CLASS-A-1`).profilePhotoPath)
+      .toBe('student-profile/student-photo.png');
+
+    const unauthorizedUpload = await upload('CLASS-B-1', 'other-student-photo.png');
+    expect(unauthorizedUpload.status).toBe(403);
+    expect(await unauthorizedUpload.json()).toEqual(expect.objectContaining({
+      status: 'error',
+      message: 'You are not authorized to upload a file for this record.',
+    }));
+    expect(storage.uploadSchoolFile).toHaveBeenCalledTimes(1);
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+  }
 });
 
 test('teacher login with another valid School ID returns a generic authentication error', async () => {

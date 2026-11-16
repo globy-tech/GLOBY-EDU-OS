@@ -386,6 +386,96 @@ test('entity onboarding generates usable teacher and student credentials without
   expect(reloaded.students.find((entry) => entry.studentId === student.studentId).profilePhoto).toContain('data:image/png');
 });
 
+test("students can update their own profile photo but cannot update another student's", async () => {
+  fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
+
+  const school = ensureDemoSchool();
+  const ownStudent = await schoolService.createEntity(school.schoolId, 'students', {
+    fullName: 'Own Student',
+    email: 'own-student@globy.test',
+  });
+  const peerStudent = await schoolService.createEntity(school.schoolId, 'students', {
+    fullName: 'Peer Student',
+    email: 'peer-student@globy.test',
+  });
+  const persistedSchools = loadSchoolData();
+  const persistedSchool = persistedSchools.find((entry) => entry.schoolId === school.schoolId);
+  persistedSchool.students.find((entry) => entry.studentId === ownStudent.studentId).id = 'db-user-uuid-own';
+  saveSchoolData(persistedSchools);
+  const actor = {
+    userId: 'db-user-uuid-own',
+    roles: ['student'],
+    schoolId: school.schoolId,
+    tenantId: school.schoolId,
+  };
+  const ownPhoto = 'data:image/png;base64,own-student-photo';
+
+  await expect(schoolService.updateEntity(
+    school.schoolId,
+    'students',
+    ownStudent.studentId,
+    { profilePhoto: ownPhoto },
+    actor,
+  )).resolves.toEqual(expect.objectContaining({ profilePhoto: ownPhoto }));
+  await expect(schoolService.updateEntity(
+    school.schoolId,
+    'students',
+    peerStudent.studentId,
+    { profilePhoto: 'data:image/png;base64,peer-student-photo' },
+    actor,
+  )).rejects.toThrow('Students can only update their own profile.');
+
+  const reloaded = await schoolService.getSchoolBySchoolId(school.schoolId);
+  expect(reloaded.students.find((entry) => entry.studentId === ownStudent.studentId).profilePhoto).toBe(ownPhoto);
+  expect(reloaded.students.find((entry) => entry.studentId === peerStudent.studentId).profilePhoto).toBeUndefined();
+});
+
+test("Firebase students can update their own profile photo by trusted user ID but not a peer's", async () => {
+  const schoolId = 'firebase-student-photo-ownership';
+  const school = {
+    schoolId,
+    students: [
+      { id: 'db-user-uuid-own', studentId: 'STD-OWN', email: 'own@student.test' },
+      { id: 'db-user-uuid-peer', studentId: 'STD-PEER', email: 'peer@student.test' },
+    ],
+    teachers: [],
+    classes: [],
+    users: [],
+  };
+  jest.spyOn(firebaseCore, 'isFirebaseCoreMode').mockReturnValue(true);
+  jest.spyOn(firebaseCore, 'getSchoolAggregate').mockResolvedValue(school);
+  const saveById = jest.spyOn(firebaseCore, 'saveById').mockResolvedValue({});
+  const actor = {
+    userId: 'db-user-uuid-own',
+    username: 'stale-student-alias',
+    roles: ['student'],
+    tenantId: schoolId,
+  };
+
+  await expect(schoolService.updateEntity(
+    schoolId,
+    'students',
+    'STD-OWN',
+    { profilePhoto: 'https://images.example.test/own.png' },
+    actor,
+  )).resolves.toEqual(expect.objectContaining({ profilePhoto: 'https://images.example.test/own.png' }));
+  await expect(schoolService.updateEntity(
+    schoolId,
+    'students',
+    'STD-PEER',
+    { profilePhoto: 'https://images.example.test/peer.png' },
+    actor,
+  )).rejects.toThrow('Students can only update their own profile.');
+
+  expect(saveById).toHaveBeenCalledTimes(2);
+  expect(saveById).toHaveBeenCalledWith(
+    'students',
+    `${schoolId}:STD-OWN`,
+    expect.objectContaining({ profilePhoto: 'https://images.example.test/own.png' }),
+    true,
+  );
+});
+
 test('teachers can create and update students but must request deletion approval', async () => {
   fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
 
@@ -1104,6 +1194,83 @@ test('a class supports multiple persistent teacher assignments and assigned-clas
     schoolId: school.schoolId,
     tenantId: school.schoolId,
   })).rejects.toThrow('not authorized');
+});
+
+test('Firebase class assignments persist for each assigned teacher after a fresh school read', async () => {
+  const schoolId = 'firebase-multi-teacher-roster';
+  const classRecord = {
+    classId: 'class-a',
+    name: 'Class A',
+    status: 'active',
+    teacherIds: [],
+    teacherId: null,
+  };
+  const school = {
+    id: schoolId,
+    schoolId,
+    name: 'Firebase Multi Teacher School',
+    status: 'active',
+    schoolStatus: 'active',
+    subscriptionStatus: 'active',
+    teachers: [
+      { teacherId: 'T-FIREBASE-A', email: 'a@school.test', status: 'active' },
+      { teacherId: 'T-FIREBASE-B', email: 'b@school.test', status: 'active' },
+      { teacherId: 'T-FIREBASE-UNASSIGNED', email: 'unassigned@school.test', status: 'active' },
+    ],
+    users: [],
+    classes: [classRecord],
+    students: [
+      { studentId: 'STU-CANONICAL', classId: 'class-a', className: 'Class A' },
+      { studentId: 'STU-LEGACY', className: 'Class A' },
+    ],
+  };
+  const classReference = { id: `${schoolId}:class-a` };
+  jest.spyOn(firebaseCore, 'isFirebaseCoreMode').mockReturnValue(true);
+  jest.spyOn(firebaseCore, 'getSchoolAggregate').mockResolvedValue(school);
+  const runClassMutation = jest.spyOn(firebaseCore, 'runClassMutation').mockImplementation(async (
+    requestedSchoolId,
+    classIds,
+    operation,
+  ) => {
+    expect(requestedSchoolId).toBe(schoolId);
+    expect(classIds).toEqual(['class-a']);
+    const result = await operation({
+      transaction: { set: jest.fn() },
+      classRecords: [{ ...classRecord, id: classReference.id }],
+      classReferences: [classReference],
+      getDocumentReference: (collection, id) => ({ collection, id }),
+      sanitizeData: (record) => record,
+    });
+    Object.assign(classRecord, result.classUpdatesById[classReference.id]);
+    return result.result;
+  });
+  const authority = { roles: ['school_authority'], tenantId: schoolId };
+
+  await schoolService.updateEntity(schoolId, 'classes', 'class-a', {
+    teacherIds: ['T-FIREBASE-A', 'T-FIREBASE-B'],
+  }, authority);
+  expect(classRecord.teacherIds).toEqual(['T-FIREBASE-A', 'T-FIREBASE-B']);
+  expect(runClassMutation).toHaveBeenCalledTimes(1);
+
+  const reloaded = await schoolService.getSchoolBySchoolId(schoolId);
+  for (const teacherId of ['T-FIREBASE-A', 'T-FIREBASE-B']) {
+    const view = schoolService.getTeacherSchoolView(reloaded, {
+      userId: `${schoolId}:${teacherId}`,
+      username: teacherId,
+      roles: ['teacher'],
+      tenantId: schoolId,
+    });
+    expect(view.classes.map((entry) => entry.classId)).toEqual(['class-a']);
+    expect(view.students.map((entry) => entry.studentId)).toEqual(['STU-CANONICAL', 'STU-LEGACY']);
+  }
+  const unassignedView = schoolService.getTeacherSchoolView(reloaded, {
+    userId: `${schoolId}:T-FIREBASE-UNASSIGNED`,
+    username: 'T-FIREBASE-UNASSIGNED',
+    roles: ['teacher'],
+    tenantId: schoolId,
+  });
+  expect(unassignedView.classes).toEqual([]);
+  expect(unassignedView.students).toEqual([]);
 });
 
 test('createSchool assigns a normalized, collision-safe subdomain and persists it', async () => {

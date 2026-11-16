@@ -43,9 +43,26 @@ jest.mock('../../modules/school/school.service', () => ({
         String(value || '').toLowerCase() === String(user.username || user.userId || '').split(':').pop().toLowerCase()
       )
     );
+    const teacherIds = new Set(
+      [teacher?.id, teacher?.teacherId, teacher?.username, teacher?.email]
+        .filter(Boolean)
+        .map((value) => String(value).toLowerCase())
+    );
     const assigned = new Set((teacher?.assignedClasses || []).map((value) => String(value).toLowerCase()));
+    for (const classRecord of school.classes || []) {
+      const teacherList = Array.isArray(classRecord.teacherIds) && classRecord.teacherIds.length
+        ? classRecord.teacherIds
+        : [classRecord.teacherId, classRecord.teacher, classRecord.classTeacher];
+      if (!teacherList.some((value) => teacherIds.has(String(value || '').toLowerCase()))) continue;
+      [classRecord.classId, classRecord.id, classRecord.name, classRecord.className, classRecord.grade]
+        .filter(Boolean)
+        .forEach((value) => assigned.add(String(value).toLowerCase()));
+    }
     return {
-      students: (school.students || []).filter((record) => assigned.has(String(record.classId || record.className || '').toLowerCase())),
+      students: (school.students || []).filter((record) => (
+        assigned.has(String(record.classId || '').toLowerCase())
+        || assigned.has(String(record.className || '').toLowerCase())
+      )),
     };
   }),
   updateSchool: jest.fn(async (id, updates) => Object.assign(global.__uploadSchool, updates)),
@@ -264,6 +281,53 @@ describe('production file storage routing', () => {
     expect(storage.uploadSchoolFile).toHaveBeenCalledWith('school-a/student-profile/photo.png', png, expect.any(Object));
   });
 
+  test('allows School Authority to upload a student profile photo and persist its reference', async () => {
+    global.__uploadUser = { tenantId: 'school-a', username: 'AUTH-1', roles: ['school_authority'] };
+    const response = await runRequest(
+      'POST',
+      '/files/upload?filename=student-profile/authority-photo.png&ownerType=student&ownerId=STU-1&ownerField=profilePhotoPath',
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    );
+
+    expect(response.status).toBe(201);
+    expect(storage.uploadSchoolFile).toHaveBeenCalledTimes(1);
+    expect(schoolService.updateEntity).toHaveBeenCalledWith(
+      'school-a',
+      'students',
+      'STU-1',
+      { profilePhotoPath: 'student-profile/authority-photo.png' },
+      global.__uploadUser
+    );
+  });
+
+  test('uses the middleware-resolved school ID when the authenticated tenant ID is a database ID', async () => {
+    global.__uploadUser = { tenantId: 'tenant-database-id', roles: ['school_authority'] };
+    global.__uploadTenant = {
+      schoolId: 'school-a',
+      schoolStatus: 'active',
+      subscriptionStatus: 'active',
+    };
+    const response = await runRequest(
+      'POST',
+      '/files/upload?filename=student-profile/prisma-photo.png&ownerType=student&ownerId=STU-1&ownerField=profilePhotoPath',
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    );
+
+    expect(response.status).toBe(201);
+    expect(storage.uploadSchoolFile).toHaveBeenCalledWith(
+      'tenant-database-id/student-profile/prisma-photo.png',
+      expect.any(Buffer),
+      expect.any(Object)
+    );
+    expect(schoolService.updateEntity).toHaveBeenCalledWith(
+      'school-a',
+      'students',
+      'STU-1',
+      { profilePhotoPath: 'student-profile/prisma-photo.png' },
+      global.__uploadUser
+    );
+  });
+
   test('allows profile images larger than 2 MB up to the shared 20 MB limit', async () => {
     const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const png = Buffer.concat([signature, Buffer.alloc(3 * 1024 * 1024)]);
@@ -376,6 +440,32 @@ describe('production file storage routing', () => {
     );
   });
 
+  test('allows a teacher with a legacy class assignment to upload a student profile photo', async () => {
+    global.__uploadUser = { tenantId: 'school-a', username: 'TCH-1', roles: ['teacher'] };
+    global.__uploadSchool.teachers[0].assignedClasses = [];
+    global.__uploadSchool.classes[0] = {
+      classId: 'class-a',
+      name: 'Class A',
+      teacherId: 'TCH-1',
+      teacherIds: [],
+    };
+    const response = await runRequest(
+      'POST',
+      '/files/upload?filename=student-profile/legacy-class-photo.png&ownerType=student&ownerId=STU-1&ownerField=profilePhotoPath',
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    );
+
+    expect(response.status).toBe(201);
+    expect(storage.uploadSchoolFile).toHaveBeenCalledTimes(1);
+    expect(schoolService.updateEntity).toHaveBeenCalledWith(
+      'school-a',
+      'students',
+      'STU-1',
+      { profilePhotoPath: 'student-profile/legacy-class-photo.png' },
+      global.__uploadUser
+    );
+  });
+
   test('rejects a student uploading to another same-tenant student record before storage', async () => {
     global.__uploadUser = { tenantId: 'school-a', username: 'STU-1', roles: ['student'] };
     global.__uploadSchool.students.push({
@@ -420,6 +510,33 @@ describe('production file storage routing', () => {
     const deniedResponse = await runRequest('POST', url, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
     expect(deniedResponse.status).toBe(403);
     expect(storage.uploadSchoolFile).not.toHaveBeenCalled();
+  });
+
+  test('allows a teacher photo upload through a legacy class assignment and class-name student link', async () => {
+    global.__uploadUser = { tenantId: 'school-a', username: 'TCH-1', roles: ['teacher'] };
+    global.__uploadSchool.teachers[0].assignedClasses = [];
+    global.__uploadSchool.students[0].classId = 'Class A';
+    global.__uploadSchool.classes[0] = {
+      classId: 'class-a',
+      name: 'Class A',
+      teacherId: 'TCH-1',
+      teacherIds: [],
+    };
+    const response = await runRequest(
+      'POST',
+      '/files/upload?filename=student-profile/legacy-class-photo.png&ownerType=student&ownerId=STU-1&ownerField=profilePhotoPath',
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    );
+
+    expect(response.status).toBe(201);
+    expect(storage.uploadSchoolFile).toHaveBeenCalledTimes(1);
+    expect(schoolService.updateEntity).toHaveBeenCalledWith(
+      'school-a',
+      'students',
+      'STU-1',
+      { profilePhotoPath: 'student-profile/legacy-class-photo.png' },
+      global.__uploadUser
+    );
   });
 
   test('allows School Authority to upload and persist a pending admission photo', async () => {

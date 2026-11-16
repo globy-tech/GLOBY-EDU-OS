@@ -148,12 +148,21 @@ async function withSchoolMutationLock(schoolId, action) {
 }
 
 function getClassTeacherIds(classRecord = {}) {
-  const hasTeacherList = Array.isArray(classRecord.teacherIds) || Array.isArray(classRecord.teachers);
-  const values = hasTeacherList
-    ? (Array.isArray(classRecord.teacherIds) ? classRecord.teacherIds : classRecord.teachers)
-      .map((teacher) => (
-      typeof teacher === 'object' ? teacher.teacherId || teacher.id || teacher.username || teacher.email : teacher
-      ))
+  const teacherList = Array.isArray(classRecord.teacherIds)
+    ? classRecord.teacherIds
+    : Array.isArray(classRecord.teachers)
+      ? classRecord.teachers
+      : [];
+  const listedTeacherIds = teacherList
+    .map((teacher) => (
+      typeof teacher === 'object' && teacher
+        ? teacher.teacherId || teacher.id || teacher.username || teacher.email
+        : teacher
+    ))
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  const values = listedTeacherIds.length
+    ? listedTeacherIds
     : [classRecord.teacherId, classRecord.teacher, classRecord.classTeacher];
   return [...new Map(values
     .map((value) => String(value || '').trim())
@@ -653,6 +662,20 @@ function hasSchoolAuthorityRole(actor = {}) {
 function getIdentityAliases(value) {
   const identifier = String(value || '').trim().toLowerCase();
   return identifier ? [...new Set([identifier, identifier.split(':').pop()])] : [];
+}
+
+function isStudentRecordOwnedByActor(student = {}, actor = {}) {
+  const actorIdentifiers = new Set(['username', 'userId', 'email', 'uid', 'id']
+    .flatMap((key) => getIdentityAliases(actor[key])));
+  const studentIdentifiers = [
+    student.id,
+    student.studentId,
+    student.metadata?.studentId,
+    student.email,
+    student.username,
+  ]
+    .flatMap((value) => getIdentityAliases(value));
+  return studentIdentifiers.some((identifier) => actorIdentifiers.has(identifier));
 }
 
 function getTeacherActorIdentifiers(actor = {}) {
@@ -2598,20 +2621,6 @@ function getTeacherSchoolView(school, user = {}) {
     ...(Array.isArray(teacher?.classes) ? teacher.classes : []),
     teacher?.className,
   ].filter(Boolean).map((value) => String(value).trim().toLowerCase()));
-  const classes = schoolClasses.filter((entry) => {
-    if (String(entry.status || 'active').toLowerCase() === 'archived') return false;
-    const classId = String(entry.classId || entry.id || '').trim().toLowerCase();
-    const assignedTeacherIds = getClassTeacherIds(entry).map((value) => String(value).trim().toLowerCase());
-    const className = String(entry.name || entry.className || '').trim().toLowerCase();
-    const grade = String(entry.grade || '').trim().toLowerCase();
-    return assignedTeacherIds.some((teacherId) => teacherIdentifiers.has(teacherId))
-      || assignedNames.has(classId)
-      || assignedNames.has(className)
-      || assignedNames.has(grade);
-  });
-  const classIds = new Set(classes.map((entry) => String(entry.classId || entry.id || '').trim().toLowerCase()).filter(Boolean));
-  const classNames = new Set(classes.flatMap((entry) => [entry.name, entry.className, entry.grade]).filter(Boolean).map((value) => String(value).trim().toLowerCase()));
-  assignedNames.forEach((name) => classNames.add(name));
   const getClassId = (entry) => String(entry.classId || entry.id || '').trim().toLowerCase();
   const getClassAliases = (entry) => [entry.name, entry.className, entry.grade]
     .filter(Boolean).map((value) => String(value).trim().toLowerCase());
@@ -2619,6 +2628,20 @@ function getTeacherSchoolView(school, user = {}) {
     const alias = String(value || '').trim().toLowerCase();
     return alias ? schoolClasses.filter((entry) => getClassAliases(entry).includes(alias)) : [];
   };
+  const classes = schoolClasses.filter((entry) => {
+    if (String(entry.status || 'active').toLowerCase() === 'archived') return false;
+    const classId = String(entry.classId || entry.id || '').trim().toLowerCase();
+    const assignedTeacherIds = getClassTeacherIds(entry).map((value) => String(value).trim().toLowerCase());
+    return assignedTeacherIds.some((teacherId) => teacherIdentifiers.has(teacherId))
+      || assignedNames.has(classId)
+      || [...assignedNames].some((name) => {
+        const matchingClasses = getClassesForAlias(name);
+        return matchingClasses.length === 1 && matchingClasses[0] === entry;
+      });
+  });
+  const classIds = new Set(classes.map((entry) => String(entry.classId || entry.id || '').trim().toLowerCase()).filter(Boolean));
+  const classNames = new Set(classes.flatMap((entry) => [entry.name, entry.className, entry.grade]).filter(Boolean).map((value) => String(value).trim().toLowerCase()));
+  assignedNames.forEach((name) => classNames.add(name));
   const isAuthorizedClassId = (value) => {
     const classId = String(value || '').trim().toLowerCase();
     const matches = schoolClasses.filter((entry) => getClassId(entry) === classId);
@@ -2635,10 +2658,21 @@ function getTeacherSchoolView(school, user = {}) {
     const classId = String(entry.classId || '').trim().toLowerCase();
     const className = String(entry.className || entry.gradeLevel || entry.grade || '').trim().toLowerCase();
     if (classId) {
-      const classRecord = schoolClasses.find((item) => getClassId(item) === classId);
-      return isAuthorizedClassId(classId)
-        && (!className || !getClassesForAlias(className).length
-          || Boolean(classRecord && getClassAliases(classRecord).includes(className)));
+      const classIdMatches = schoolClasses.filter((item) => getClassId(item) === classId);
+      if (classIdMatches.length) {
+        const [classRecord] = classIdMatches;
+        return classIdMatches.length === 1
+          && classes.includes(classRecord)
+          && (!className || !getClassesForAlias(className).length
+            || getClassAliases(classRecord).includes(className));
+      }
+
+      const classIdAliases = getClassesForAlias(classId);
+      const classNameAliases = getClassesForAlias(className);
+      const matchingClasses = classIdAliases.length
+        ? classIdAliases.filter((item) => !classNameAliases.length || classNameAliases.includes(item))
+        : classNameAliases;
+      return matchingClasses.length === 1 && classes.includes(matchingClasses[0]);
     }
     return isAuthorizedClassAlias(className);
   });
@@ -4209,8 +4243,7 @@ async function updateEntityUnlocked(schoolId, entityType, entityId, updates, act
       throw new Error('Archived classes cannot be updated.');
     }
     if (studentOwnProfileAccess) {
-      const actorId = String(actor.username || actor.userId || '').split(':').pop().trim().toLowerCase();
-      if (![record.studentId, record.email, record.username, record.id].filter(Boolean).some((value) => String(value).toLowerCase() === actorId)) {
+      if (!isStudentRecordOwnedByActor(record, actor)) {
         throw new Error('Students can only update their own profile.');
       }
     }
@@ -4400,6 +4433,9 @@ async function updateEntityUnlocked(schoolId, entityType, entityId, updates, act
       if (String(currentStudent.studentId || currentStudent.id || currentStudent.email || '').toLowerCase() !== String(entityId).trim().toLowerCase()) {
         throw new Error('Students can only update their own profile.');
       }
+      if (!isStudentRecordOwnedByActor(currentStudent, actor)) {
+        throw new Error('Students can only update their own profile.');
+      }
       const selfAllowed = new Set(['profilePhoto', 'profilePhotoPath', 'avatar']);
       const disallowedSelf = Object.keys(updates || {}).filter((key) => !selfAllowed.has(key));
       if (disallowedSelf.length > 0) throw new Error('Students can only update their own profile photo.');
@@ -4545,9 +4581,7 @@ async function updateEntityUnlocked(schoolId, entityType, entityId, updates, act
       }
     }
     if (getUserRoleList(actor).includes('student') && field === 'students') {
-      const selfStudentId = String(user.studentId || user.email || user.id || '').trim().toLowerCase();
-      const actorStudentId = String(actor.username || actor.userId || '').split(':').pop().trim().toLowerCase();
-      if (selfStudentId !== actorStudentId && String(user.email || '').trim().toLowerCase() !== String(actor.username || '').trim().toLowerCase()) {
+      if (!isStudentRecordOwnedByActor(user, actor)) {
         throw new Error('Students can only update their own profile.');
       }
       const selfAllowed = new Set(['profilePhoto', 'profilePhotoPath', 'avatar']);
