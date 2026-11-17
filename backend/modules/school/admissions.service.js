@@ -266,6 +266,25 @@ function findSchoolRecord(records, id, fields) {
   );
 }
 
+function academicYearMatches(year, id) {
+  const identifier = String(id || '').trim();
+  return ['id', 'academicYearId', 'name', 'label']
+    .some((field) => String(year?.[field] || '').trim() === identifier);
+}
+
+function findAcademicYearRecord(years, identifier) {
+  const records = Array.isArray(years) ? years : [];
+  for (const field of ['id', 'academicYearId']) {
+    const record = records.find((year) => String(year[field] || '').trim() === identifier);
+    if (record) return record;
+  }
+  const namedRecords = records.filter((year) => (
+    ['name', 'label'].some((field) => String(year[field] || '').trim() === identifier)
+  ));
+  const activeRecords = namedRecords.filter((year) => String(year.status || 'active').toLowerCase() !== 'archived');
+  return activeRecords.length === 1 ? activeRecords[0] : activeRecords.length === 0 ? namedRecords[0] : null;
+}
+
 async function validatePlacement(schoolId, admission, placement) {
   const school = await schoolService.getSchoolBySchoolId(schoolId);
   if (!school) throw new Error('School not found');
@@ -276,15 +295,18 @@ async function validatePlacement(schoolId, admission, placement) {
   if (!classRecord || String(classRecord.status || 'active').toLowerCase() === 'archived') {
     throw new Error('Class does not belong to this school or is not active.');
   }
-  const yearRecord = findSchoolRecord(school.academicYears, academicYearId, ['id', 'academicYearId']);
+  const yearRecord = findAcademicYearRecord(school.academicYears, academicYearId);
   if (!yearRecord || String(yearRecord.status || 'active').toLowerCase() === 'archived') {
     throw new Error('Academic year does not belong to this school or is not active.');
   }
-  const classYearId = String(classRecord.academicYearId || '').trim();
-  if (classYearId && classYearId !== academicYearId) {
+  const classYearId = String(classRecord.academicYearId || classRecord.academicYear || '').trim();
+  if (classYearId && !academicYearMatches(yearRecord, classYearId)) {
     throw new Error('The selected class belongs to a different academic year.');
   }
-  return { school, classRecord, yearRecord, classId, academicYearId };
+  const canonicalAcademicYearId = String(
+    yearRecord.id || yearRecord.academicYearId || yearRecord.name || yearRecord.label || academicYearId,
+  ).trim();
+  return { school, classRecord, yearRecord, classId, academicYearId: canonicalAcademicYearId };
 }
 
 async function persistEnrollment(schoolId, school, student, placement, admissionId) {

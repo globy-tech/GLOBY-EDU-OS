@@ -186,6 +186,32 @@ test('Prisma class assignments persist for multiple teachers and fresh roster re
   expect(classBAfterChange.students.map((entry) => entry.studentId)).toContain('STU-1');
 });
 
+test('Prisma teacher cannot update an unassigned student by submitting an assigned class ID', async () => {
+  tenantRecord.classes[0].teacherIds = ['T-A'];
+  const student = tenantRecord.users.find((entry) => entry.id === 'db-student-3');
+
+  await expect(schoolService.updateEntity(schoolId, 'students', student.email, {
+    fullName: 'Unauthorized Update',
+    classId: 'class-a',
+  }, teacherActor('db-teacher-a'))).rejects.toThrow('Teacher is not authorized for this class');
+
+  expect(prisma.user.update).not.toHaveBeenCalled();
+  expect(student.firstName).toBe('STU-3');
+});
+
+test('Prisma assigned teacher cannot move a student into another unassigned class', async () => {
+  tenantRecord.classes[0].teacherIds = ['T-A'];
+  const student = tenantRecord.users.find((entry) => entry.id === 'db-student-1');
+
+  await expect(schoolService.updateEntity(schoolId, 'students', student.email, {
+    classId: 'class-b',
+    className: 'Class B',
+  }, teacherActor('db-teacher-a'))).rejects.toThrow('Teacher is not authorized for this class');
+
+  expect(prisma.user.update).not.toHaveBeenCalled();
+  expect(student.metadata).toMatchObject({ classId: 'class-a', className: 'Class A' });
+});
+
 test('Prisma tenant middleware rejects another school before a class roster request', async () => {
   prisma.tenant.findUnique.mockResolvedValue({ id: 'db-other-tenant', schoolId: 'school-other' });
   const req = {

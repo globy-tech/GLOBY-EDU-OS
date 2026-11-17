@@ -765,6 +765,28 @@ function resolveTeacherAuthorization(school, actor = {}, classId = '') {
   return classMatches || assignedClasses.includes(classKey);
 }
 
+function assertTeacherStudentPlacementAccess(school, actor, updates = {}) {
+  const requestedScopes = ['classId', 'className']
+    .flatMap((field) => [updates[field], updates.metadata?.[field]])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  if (!requestedScopes.length) {
+    throw new Error('Teachers must keep students in a class assigned to their account.');
+  }
+  for (const scope of requestedScopes) {
+    const targetClass = getClassRecordsForAssignments(school, [scope])[0];
+    if (!targetClass
+        || String(targetClass.status || 'active').toLowerCase() === 'archived'
+        || !resolveTeacherAuthorization(
+          school,
+          actor,
+          targetClass.classId || targetClass.id || targetClass.name || scope,
+        )) {
+      throw new Error('Teacher is not authorized for this class');
+    }
+  }
+}
+
 function resolveAssignmentOwnership(school, assignment, actor = {}) {
   const roles = getUserRoleList(actor);
   if (roles.includes('school_authority') || roles.includes('super_admin')) return true;
@@ -2774,6 +2796,30 @@ function getTeacherSchoolView(school, user = {}) {
   };
 }
 
+function isTeacherAssignedToStudentRecord(school, actor, student) {
+  const teacherStudents = getTeacherSchoolView(school, actor)?.students || [];
+  const normalize = (value) => String(value || '').trim().toLowerCase();
+  const stableIdentifiers = new Set([
+    student?.studentId,
+    student?.metadata?.studentId,
+    student?.id,
+    student?.userId,
+  ].map(normalize).filter(Boolean));
+  if (stableIdentifiers.size) {
+    return teacherStudents.some((entry) => [
+      entry.studentId,
+      entry.metadata?.studentId,
+      entry.id,
+      entry.userId,
+    ].some((value) => stableIdentifiers.has(normalize(value))));
+  }
+  const fallbackIdentifiers = new Set([student?.email, student?.username].map(normalize).filter(Boolean));
+  return fallbackIdentifiers.size > 0 && teacherStudents.some((entry) => [
+    entry.email,
+    entry.username,
+  ].some((value) => fallbackIdentifiers.has(normalize(value))));
+}
+
 function updateTeacherWorkspace(school, user = {}, updates = {}) {
   const teacherView = getTeacherSchoolView(school, user);
   if (!teacherView?.teacherProfile) throw new Error('Teacher profile not found');
@@ -4265,8 +4311,13 @@ async function updateEntityUnlocked(schoolId, entityType, entityId, updates, act
       }
     }
     if (actorRoles.includes('teacher') && field === 'students') {
-      const nextClass = updates.classId || updates.className || record.classId || record.className || record.grade;
-      if (!resolveTeacherAuthorization(school, actor, nextClass)) throw new Error('Teacher is not authorized for this class');
+      if (!isTeacherAssignedToStudentRecord(school, actor, record)) {
+        throw new Error('Teacher is not authorized for this class');
+      }
+      if (['classId', 'className'].some((key) => Object.hasOwn(updates || {}, key)
+          || Object.hasOwn(updates?.metadata || {}, key))) {
+        assertTeacherStudentPlacementAccess(school, actor, updates);
+      }
     }
     if (field === 'students' && updates.classId) {
       const targetClass = school.classes.find((entry) => String(entry.classId || entry.id) === String(updates.classId));
@@ -4443,9 +4494,13 @@ async function updateEntityUnlocked(schoolId, entityType, entityId, updates, act
     if (roles.includes('teacher') && field === 'students') {
       const currentStudent = school.students.find((item) => [item.studentId, item.id, item.email].filter(Boolean).some((value) => String(value).toLowerCase() === String(entityId).toLowerCase()));
       if (!currentStudent) throw new Error('Entity not found');
-      const currentClass = currentStudent.classId || currentStudent.className || currentStudent.grade;
-      const nextClass = updates.classId || updates.className || currentClass;
-      if (!resolveTeacherAuthorization(school, actor, nextClass)) throw new Error('Teacher is not authorized for this class');
+      if (!isTeacherAssignedToStudentRecord(school, actor, currentStudent)) {
+        throw new Error('Teacher is not authorized for this class');
+      }
+      if (['classId', 'className'].some((key) => Object.hasOwn(updates || {}, key)
+          || Object.hasOwn(updates?.metadata || {}, key))) {
+        assertTeacherStudentPlacementAccess(school, actor, updates);
+      }
       delete updates.studentId;
       delete updates.id;
       delete updates.schoolId;
@@ -4571,13 +4626,18 @@ async function updateEntityUnlocked(schoolId, entityType, entityId, updates, act
       const actorIdentifier = actor.username || actor.email || String(actor.userId || '').split(':').pop();
       const teacher = await findUserByIdentifier(actorIdentifier, tenant.id);
       const classes = await prisma.class.findMany({ where: { tenantId: tenant.id } });
+      const studentRecord = mapUserEntity(user, 'student');
       const teacherSchool = {
         users: teacher ? [mapUserEntity(teacher, 'teacher')] : [],
         classes,
+        students: [studentRecord],
       };
-      const studentClass = updates.classId || updates.className || user.metadata?.classId || user.metadata?.className || user.metadata?.gradeLevel;
-      if (!teacher || teacher.tenantId !== tenant.id || !resolveTeacherAuthorization(teacherSchool, actor, studentClass)) {
+      if (!teacher || teacher.tenantId !== tenant.id || !isTeacherAssignedToStudentRecord(teacherSchool, actor, studentRecord)) {
         throw new Error('Teacher is not authorized for this class');
+      }
+      if (['classId', 'className'].some((key) => Object.hasOwn(updates || {}, key)
+          || Object.hasOwn(updates?.metadata || {}, key))) {
+        assertTeacherStudentPlacementAccess(teacherSchool, actor, updates);
       }
     }
     if (getUserRoleList(actor).includes('student') && field === 'students') {
@@ -5266,6 +5326,213 @@ async function archiveSchoolClass(schoolId, entityId, actor, actorRoles) {
   });
 }
 
+function assertArchivedRecordManagementAccess(actor, schoolId) {
+  const roles = getUserRoleList(actor);
+  if (!roles.some((role) => ['school_authority', 'school_head', 'super_admin'].includes(role))) {
+    throw new Error('Only School Authority can manage archived records.');
+  }
+  if (roles.includes('super_admin') && actor.platformAdmin === true) return;
+  const actorSchoolId = actor.tenantId || actor.schoolId;
+  if (!actorSchoolId || String(actorSchoolId) !== String(schoolId)) {
+    throw new Error('Tenant mismatch');
+  }
+}
+
+function assertClassHasNoHistoricalReferences(school, classRecord) {
+  const classIds = new Set([classRecord.classId, classRecord.id]
+    .filter(Boolean).map((value) => String(value).trim().toLowerCase()));
+  const classNames = new Set([classRecord.name, classRecord.className]
+    .filter(Boolean).map((value) => String(value).trim().toLowerCase()));
+  const referenceFields = new Set(['classId', 'currentClassId', 'assignedClassId', 'className', 'currentClassName']);
+  const referenceArrayFields = new Set(['assignedClasses', 'classIds']);
+  const containsReference = (record) => {
+    const pending = [record];
+    const visited = new Set();
+    while (pending.length) {
+      const current = pending.pop();
+      if (!current || typeof current !== 'object' || visited.has(current)) continue;
+      visited.add(current);
+      if (Array.isArray(current)) {
+        pending.push(...current);
+        continue;
+      }
+      for (const [key, value] of Object.entries(current)) {
+        if (referenceFields.has(key) && typeof value === 'string') {
+          const normalized = value.trim().toLowerCase();
+          if (classIds.has(normalized) || classNames.has(normalized)) return true;
+        }
+        if (referenceArrayFields.has(key) && Array.isArray(value)
+            && value.some((entry) => classIds.has(String(entry || '').trim().toLowerCase())
+              || classNames.has(String(entry || '').trim().toLowerCase()))) return true;
+        if (value && typeof value === 'object') pending.push(value);
+        if (['class', 'classroom', 'assignedClass'].includes(key) && typeof value === 'string') {
+          const normalized = value.trim().toLowerCase();
+          if (classIds.has(normalized) || classNames.has(normalized)) return true;
+        }
+      }
+    }
+    return false;
+  };
+  const collectionNames = [
+    'students',
+    'teachers',
+    'users',
+    'enrollments',
+    'attendanceRecords',
+    'examRecords',
+    'examResults',
+    'reportCards',
+    'admissions',
+    'admissionApplications',
+    'assignments',
+    'lessons',
+    'academicRecords',
+  ];
+  if (normalizeArray(classRecord.studentIds).length || getClassTeacherIds(classRecord).length
+      || collectionNames.some((name) => (Array.isArray(school?.[name]) ? school[name] : []).some(containsReference))) {
+    throw new Error('This class has student, staff, or historical records and cannot be permanently deleted.');
+  }
+}
+
+async function restoreSchoolClass(schoolId, entityId, actor) {
+  assertArchivedRecordManagementAccess(actor, schoolId);
+  const school = await getSchoolBySchoolId(schoolId);
+  if (!school) throw new Error('School not found');
+  const classRecord = getClassForArchive(school, entityId);
+  if (!classRecord) throw new Error('Entity not found');
+  if (String(classRecord.status || '').toLowerCase() !== 'archived') {
+    throw new Error('Only archived classes can be restored.');
+  }
+  const identifier = classRecord.classId || classRecord.id;
+
+  if (firebaseCore.isFirebaseCoreMode()) {
+    return firebaseCore.runClassMutation(schoolId, [identifier], async ({
+      transaction,
+      classRecords,
+      classReferences,
+      getSchoolQuery,
+    }) => {
+      const currentClass = classRecords[0];
+      if (!currentClass || String(currentClass.status || '').toLowerCase() !== 'archived') {
+        throw new Error('Only archived classes can be restored.');
+      }
+      const classSnapshot = await transaction.get(getSchoolQuery('classes'));
+      const activeClasses = classSnapshot.docs
+        .map((document) => ({ ...document.data(), id: document.id }))
+        .filter((entry) => String(entry.status || 'active').toLowerCase() !== 'archived');
+      assertUniqueClassIdentity(
+        { ...school, classes: activeClasses },
+        { ...currentClass, status: 'active' },
+        currentClass.classId || currentClass.id,
+      );
+      return {
+        result: { ...currentClass, schoolId, status: 'active' },
+        classUpdatesById: {
+          [classReferences[0].id]: { schoolId, status: 'active' },
+        },
+      };
+    });
+  }
+
+  const activeClasses = (Array.isArray(school.classes) ? school.classes : [])
+    .filter((entry) => String(entry.status || 'active').toLowerCase() !== 'archived');
+  assertUniqueClassIdentity(
+    { ...school, classes: activeClasses },
+    { ...classRecord, status: 'active' },
+    identifier,
+  );
+
+  if (prisma && prisma.__stub) {
+    const schools = loadSchoolData();
+    const persistedSchool = findSchoolBySchoolId(schools, schoolId);
+    if (!persistedSchool) throw new Error('School not found');
+    const restored = updateSchoolEntity(persistedSchool, 'classes', identifier, { status: 'active' });
+    if (!restored) throw new Error('Entity not found');
+    saveSchoolData(schools);
+    return restored;
+  }
+
+  const tenant = await prisma.tenant.findUnique({ where: { schoolId } });
+  if (!tenant || classRecord.tenantId !== tenant.id) throw new Error('Tenant mismatch');
+  const result = await prisma.class.updateMany({
+    where: { id: classRecord.id, tenantId: tenant.id, status: 'archived' },
+    data: { status: 'active' },
+  });
+  if (!result.count) throw new Error('Only archived classes can be restored.');
+  return { ...classRecord, status: 'active' };
+}
+
+async function restoreSchoolEntity(schoolId, entityType, entityId, actor = {}) {
+  const field = normalizeEntityType(entityType);
+  if (!['classes', 'students'].includes(field)) {
+    throw new Error('Only classes and students can be restored from the archive.');
+  }
+  assertArchivedRecordManagementAccess(actor, schoolId);
+  if (field === 'classes') {
+    return withSchoolMutationLock(schoolId, () => restoreSchoolClass(schoolId, entityId, actor));
+  }
+
+  const school = await getSchoolBySchoolId(schoolId);
+  if (!school) throw new Error('School not found');
+  const student = findSchoolAccount(school, 'students', entityId);
+  if (!student) throw new Error('Entity not found');
+  if (String(student.status || '').toLowerCase() !== 'archived') {
+    throw new Error('Only archived students can be restored.');
+  }
+  const restoredAt = new Date().toISOString();
+  const identifier = getSchoolAccountIdentifier(student, 'students');
+  return updateEntity(schoolId, 'students', identifier, {
+    status: 'active',
+    metadata: {
+      ...(student.metadata || {}),
+      restoredAt,
+      restoredBy: String(actor.userId || actor.username || actor.email || ''),
+    },
+  }, actor);
+}
+
+async function permanentlyDeleteArchivedClass(schoolId, entityId, actor, confirmation) {
+  assertArchivedRecordManagementAccess(actor, schoolId);
+  const school = await getSchoolBySchoolId(schoolId);
+  if (!school) throw new Error('School not found');
+  const classRecord = getClassForArchive(school, entityId);
+  if (!classRecord) throw new Error('Entity not found');
+  if (String(classRecord.status || '').toLowerCase() !== 'archived') {
+    throw new Error('Only archived classes can be permanently deleted.');
+  }
+  const identifier = String(classRecord.classId || classRecord.id || '');
+  if (!identifier || String(confirmation || '').trim() !== identifier) {
+    throw new Error('Type the class ID to confirm permanent deletion.');
+  }
+  assertClassHasNoHistoricalReferences(school, classRecord);
+
+  if (firebaseCore.isFirebaseCoreMode()) {
+    await firebaseCore.deleteById('classes', classRecord.id || `${schoolId}:${identifier}`);
+    return { classId: identifier, permanentlyDeleted: true };
+  }
+  if (prisma && prisma.__stub) {
+    const schools = loadSchoolData();
+    const persistedSchool = findSchoolBySchoolId(schools, schoolId);
+    if (!persistedSchool) throw new Error('School not found');
+    const deleted = deleteSchoolEntity(persistedSchool, 'classes', identifier);
+    if (!deleted) throw new Error('Entity not found');
+    saveSchoolData(schools);
+    return { classId: identifier, permanentlyDeleted: true };
+  }
+
+  const tenant = await prisma.tenant.findUnique({ where: { schoolId } });
+  if (!tenant || classRecord.tenantId !== tenant.id) throw new Error('Tenant mismatch');
+  const [enrollmentCount, admissionCount] = await Promise.all([
+    prisma.enrollment.count({ where: { classId: classRecord.id } }),
+    prisma.admissionApplication.count({ where: { tenantId: tenant.id, classId: classRecord.id } }),
+  ]);
+  if (enrollmentCount || admissionCount) {
+    throw new Error('This class has student, staff, or historical records and cannot be permanently deleted.');
+  }
+  await prisma.class.delete({ where: { id: classRecord.id } });
+  return { classId: identifier, permanentlyDeleted: true };
+}
+
 async function deleteEntityUnlocked(schoolId, entityType, entityId, actor = {}, options = {}) {
   const field = normalizeEntityType(entityType);
   if (!field) {
@@ -5279,6 +5546,9 @@ async function deleteEntityUnlocked(schoolId, entityType, entityId, actor = {}, 
     throw new Error('Only School Authority can delete or deactivate school records.');
   }
   if (field === 'classes') {
+    if (options.permanent === true) {
+      return permanentlyDeleteArchivedClass(schoolId, entityId, actor, options.confirmation);
+    }
     return archiveSchoolClass(schoolId, entityId, actor, actorRoles);
   }
   if (field === 'students') {
@@ -5287,14 +5557,22 @@ async function deleteEntityUnlocked(schoolId, entityType, entityId, actor = {}, 
     const student = findSchoolAccount(school, 'students', entityId);
     if (!student) throw new Error('Entity not found');
     const identifier = getSchoolAccountIdentifier(student, 'students');
-    assertAccountDeletionConfirmation(field, identifier, options.confirmation);
-    const archivedStudent = await archiveStudentRecord(
-      schoolId,
-      student,
-      actor,
-      options.reason || 'School Authority archive',
-    );
-    return { ...sanitizeStudentRecord(archivedStudent), archived: true };
+    if (options.permanent === true) {
+      assertArchivedRecordManagementAccess(actor, schoolId);
+      if (String(student.status || '').toLowerCase() !== 'archived') {
+        throw new Error('Only archived students can be permanently deleted.');
+      }
+      assertAccountDeletionConfirmation(field, identifier, options.confirmation);
+    } else {
+      assertAccountDeletionConfirmation(field, identifier, options.confirmation);
+      const archivedStudent = await archiveStudentRecord(
+        schoolId,
+        student,
+        actor,
+        options.reason || 'School Authority archive',
+      );
+      return { ...sanitizeStudentRecord(archivedStudent), archived: true };
+    }
   }
   if (firebaseCore.isFirebaseCoreMode() && ['teachers', 'students'].includes(field)) {
     return deleteFirebaseAccount(schoolId, field, entityId, actor, options);
@@ -6452,6 +6730,7 @@ module.exports = {
   updateEntity,
   requestStudentDeletion,
   resolveStudentDeletionRequest,
+  restoreSchoolEntity,
   deleteEntity,
   searchEntities,
 };

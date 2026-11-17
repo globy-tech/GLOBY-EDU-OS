@@ -476,6 +476,73 @@ test("Firebase students can update their own profile photo by trusted user ID bu
   );
 });
 
+test('Firebase teachers cannot edit a student outside their assigned classes by submitting an assigned class ID', async () => {
+  const schoolId = 'firebase-teacher-student-ownership';
+  const school = {
+    id: schoolId,
+    schoolId,
+    teachers: [{ id: 'firebase-teacher-a', teacherId: 'T-A' }],
+    users: [],
+    classes: [
+      { classId: 'class-a', name: 'Class A', teacherIds: ['T-A'] },
+      { classId: 'class-b', name: 'Class B', teacherIds: [] },
+    ],
+    students: [
+      { id: 'firebase-student-b', studentId: 'STU-B', classId: 'class-b', fullName: 'Unassigned Student' },
+    ],
+  };
+  jest.spyOn(firebaseCore, 'isFirebaseCoreMode').mockReturnValue(true);
+  jest.spyOn(firebaseCore, 'getSchoolAggregate').mockResolvedValue(school);
+  const saveById = jest.spyOn(firebaseCore, 'saveById').mockResolvedValue({});
+  const teacher = {
+    userId: 'firebase-teacher-a',
+    username: 'T-A',
+    roles: ['teacher'],
+    tenantId: schoolId,
+  };
+
+  await expect(schoolService.updateEntity(schoolId, 'students', 'STU-B', {
+    fullName: 'Changed by unauthorized teacher',
+    classId: 'class-a',
+  }, teacher)).rejects.toThrow('Teacher is not authorized for this class');
+  expect(saveById).not.toHaveBeenCalled();
+});
+
+test('Firebase teachers cannot move an assigned student into an unassigned class', async () => {
+  const schoolId = 'firebase-teacher-student-class-change';
+  const school = {
+    id: schoolId,
+    schoolId,
+    teachers: [{ id: 'firebase-teacher-a', teacherId: 'T-A' }],
+    users: [],
+    classes: [
+      { classId: 'class-a', name: 'Class A', teacherIds: ['T-A'] },
+      { classId: 'class-b', name: 'Class B', teacherIds: [] },
+    ],
+    students: [
+      { id: 'firebase-student-a', studentId: 'STU-A', classId: 'class-a', className: 'Class A', fullName: 'Assigned Student' },
+    ],
+  };
+  jest.spyOn(firebaseCore, 'isFirebaseCoreMode').mockReturnValue(true);
+  jest.spyOn(firebaseCore, 'getSchoolAggregate').mockResolvedValue(school);
+  const saveById = jest.spyOn(firebaseCore, 'saveById').mockResolvedValue({});
+  const teacher = {
+    userId: 'firebase-teacher-a',
+    username: 'T-A',
+    roles: ['teacher'],
+    tenantId: schoolId,
+  };
+
+  await expect(schoolService.updateEntity(schoolId, 'students', 'STU-A', {
+    classId: 'class-b',
+    className: 'Class B',
+  }, teacher)).rejects.toThrow('Teacher is not authorized for this class');
+  await expect(schoolService.updateEntity(schoolId, 'students', 'STU-A', {
+    metadata: { className: 'Class B' },
+  }, teacher)).rejects.toThrow('Teacher is not authorized for this class');
+  expect(saveById).not.toHaveBeenCalled();
+});
+
 test('teachers can create and update students but must request deletion approval', async () => {
   fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
 
@@ -574,6 +641,93 @@ test('assigned teacher can create and update students using an assigned class gr
   });
   expect(persistedUser.passwordHash).toMatch(/^\$2[aby]\$/);
   expect(persistedUser.passwordNeedsReset).toBe(true);
+});
+
+test('assigned teachers cannot move an existing student into a different unassigned class', async () => {
+  fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
+  const school = await schoolService.createSchool({ name: 'Teacher Placement Authorization School' });
+  const assignedClass = await schoolService.createEntity(school.schoolId, 'classes', { name: 'Assigned Class' });
+  const unassignedClass = await schoolService.createEntity(school.schoolId, 'classes', { name: 'Other Class' });
+  const teacherRecord = await schoolService.createEntity(school.schoolId, 'teachers', {
+    teacherId: 'T-PLACEMENT',
+    fullName: 'Placement Teacher',
+    email: 'placement-teacher@school.test',
+  });
+  await schoolService.updateEntity(school.schoolId, 'classes', assignedClass.classId, {
+    teacherIds: [teacherRecord.teacherId],
+  });
+  const teacher = {
+    userId: `${school.schoolId}:${teacherRecord.teacherId}`,
+    username: teacherRecord.teacherId,
+    roles: ['teacher'],
+    schoolId: school.schoolId,
+    tenantId: school.schoolId,
+  };
+  const student = await schoolService.createEntity(school.schoolId, 'students', {
+    fullName: 'Placement Student',
+    email: 'placement-student@school.test',
+    classId: assignedClass.classId,
+    className: assignedClass.name,
+  }, teacher);
+
+  await expect(schoolService.updateEntity(school.schoolId, 'students', student.studentId, {
+    classId: unassignedClass.classId,
+    className: unassignedClass.name,
+  }, teacher)).rejects.toThrow('Teacher is not authorized for this class');
+  const reloaded = await schoolService.getSchoolBySchoolId(school.schoolId);
+  expect(reloaded.students.find((entry) => entry.studentId === student.studentId)).toMatchObject({
+    classId: assignedClass.classId,
+    className: assignedClass.name,
+  });
+});
+
+test('teachers cannot create or edit students outside assigned classes', async () => {
+  fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
+  const school = ensureDemoSchool();
+  const schools = loadSchoolData();
+  const storedSchool = schools.find((entry) => entry.schoolId === school.schoolId);
+  storedSchool.classes.push({
+    classId: 'unassigned-class',
+    name: 'Unassigned Class',
+    status: 'active',
+    teacherIds: [],
+  });
+  saveSchoolData(schools);
+
+  const teacher = {
+    userId: `${school.schoolId}:T001`,
+    username: 'T001',
+    roles: ['teacher'],
+    schoolId: school.schoolId,
+    tenantId: school.schoolId,
+  };
+  await expect(schoolService.createEntity(school.schoolId, 'students', {
+    fullName: 'Unauthorized Create',
+    email: 'unauthorized-create@globy.test',
+    classId: 'unassigned-class',
+    className: 'Unassigned Class',
+  }, teacher)).rejects.toThrow('Teacher is not authorized for this class');
+
+  const authority = {
+    userId: `${school.schoolId}:authority@globy.test`,
+    roles: ['school_authority'],
+    schoolId: school.schoolId,
+    tenantId: school.schoolId,
+  };
+  const student = await schoolService.createEntity(school.schoolId, 'students', {
+    fullName: 'Unassigned Student',
+    email: 'unassigned-student@globy.test',
+    classId: 'unassigned-class',
+    className: 'Unassigned Class',
+  }, authority);
+  await expect(schoolService.updateEntity(school.schoolId, 'students', student.studentId, {
+    fullName: 'Unauthorized Update',
+    classId: 'JHS-3A',
+  }, teacher)).rejects.toThrow('Teacher is not authorized for this class');
+
+  const reloaded = await schoolService.getSchoolBySchoolId(school.schoolId);
+  expect(reloaded.students.find((entry) => entry.studentId === student.studentId).fullName)
+    .toBe('Unassigned Student');
 });
 
 test('teacher access is denied to another school tenant', async () => {
@@ -1353,4 +1507,184 @@ test('expired trial changes subscription state without changing operational scho
   expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'SUBSCRIPTION_EXPIRED' }));
   expect(next).not.toHaveBeenCalled();
   firebaseMode.mockRestore();
+});
+
+test('student archival and restore preserve account history and enforce school ownership', async () => {
+  fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
+  const school = await schoolService.createSchool({ name: 'Student Archive School' });
+  const classRecord = await schoolService.createEntity(school.schoolId, 'classes', { name: 'Archive Class' });
+  const student = await schoolService.createEntity(school.schoolId, 'students', {
+    fullName: 'Archived Student',
+    email: 'archived-student@school.test',
+    classId: classRecord.classId,
+    className: classRecord.name,
+  });
+  const authority = { roles: ['school_authority'], tenantId: school.schoolId };
+
+  const archived = await schoolService.deleteEntity(
+    school.schoolId,
+    'students',
+    student.studentId,
+    authority,
+    { confirmation: student.studentId },
+  );
+  expect(archived).toMatchObject({ status: 'archived', classId: null, className: null });
+  expect(archived.metadata.classHistory).toEqual([
+    expect.objectContaining({ classId: classRecord.classId, className: classRecord.name }),
+  ]);
+  expect(archived.metadata.archivedAt).toBeTruthy();
+
+  const restored = await schoolService.restoreSchoolEntity(
+    school.schoolId,
+    'students',
+    student.studentId,
+    authority,
+  );
+  expect(restored).toMatchObject({
+    status: 'active',
+    classId: null,
+    className: null,
+    metadata: expect.objectContaining({
+      archivedAt: archived.metadata.archivedAt,
+      restoredBy: '',
+    }),
+  });
+  expect(restored.metadata.restoredAt).toBeTruthy();
+  await expect(schoolService.restoreSchoolEntity(
+    school.schoolId,
+    'students',
+    student.studentId,
+    { roles: ['teacher'], tenantId: school.schoolId },
+  )).rejects.toThrow('Only School Authority');
+  await expect(schoolService.restoreSchoolEntity(
+    school.schoolId,
+    'students',
+    student.studentId,
+    { roles: ['school_authority'], tenantId: 'another-school' },
+  )).rejects.toThrow('Tenant mismatch');
+});
+
+test('class archive restore and permanent deletion retain history and enforce confirmation', async () => {
+  fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
+  const school = await schoolService.createSchool({ name: 'Class Restore School' });
+  const classRecord = await schoolService.createEntity(school.schoolId, 'classes', { name: 'Restore Class' });
+  const authority = { roles: ['school_authority'], tenantId: school.schoolId };
+  const persistedSchools = loadSchoolData();
+  const persistedSchool = persistedSchools.find((entry) => entry.schoolId === school.schoolId);
+  persistedSchool.attendanceRecords = [{ classId: classRecord.classId, date: '2026-09-01', status: 'present' }];
+  saveSchoolData(persistedSchools);
+
+  await schoolService.deleteEntity(school.schoolId, 'classes', classRecord.classId, authority);
+  await expect(schoolService.restoreSchoolEntity(
+    school.schoolId,
+    'classes',
+    classRecord.classId,
+    { roles: ['teacher'], tenantId: school.schoolId },
+  )).rejects.toThrow('Only School Authority');
+  const restored = await schoolService.restoreSchoolEntity(
+    school.schoolId,
+    'classes',
+    classRecord.classId,
+    authority,
+  );
+  expect(restored.status).toBe('active');
+  expect((await schoolService.getSchoolBySchoolId(school.schoolId)).attendanceRecords)
+    .toEqual([expect.objectContaining({ classId: classRecord.classId })]);
+
+  await schoolService.deleteEntity(school.schoolId, 'classes', classRecord.classId, authority);
+  await expect(schoolService.deleteEntity(
+    school.schoolId,
+    'classes',
+    classRecord.classId,
+    authority,
+    { permanent: true, confirmation: classRecord.classId },
+  )).rejects.toThrow('historical records');
+
+  const refreshedSchools = loadSchoolData();
+  const refreshedSchool = refreshedSchools.find((entry) => entry.schoolId === school.schoolId);
+  refreshedSchool.attendanceRecords = [];
+  saveSchoolData(refreshedSchools);
+  await expect(schoolService.deleteEntity(
+    school.schoolId,
+    'classes',
+    classRecord.classId,
+    { roles: ['teacher'], tenantId: school.schoolId },
+    { permanent: true, confirmation: classRecord.classId },
+  )).rejects.toThrow('Only School Authority');
+  await expect(schoolService.deleteEntity(
+    school.schoolId,
+    'classes',
+    classRecord.classId,
+    { roles: ['school_authority'], tenantId: 'another-school' },
+    { permanent: true, confirmation: classRecord.classId },
+  )).rejects.toThrow('Tenant mismatch');
+  await expect(schoolService.deleteEntity(
+    school.schoolId,
+    'classes',
+    classRecord.classId,
+    authority,
+    { permanent: true, confirmation: 'wrong-id' },
+  )).rejects.toThrow('Type the class ID');
+
+  await expect(schoolService.deleteEntity(
+    school.schoolId,
+    'classes',
+    classRecord.classId,
+    authority,
+    { permanent: true, confirmation: classRecord.classId },
+  )).resolves.toMatchObject({ classId: classRecord.classId, permanentlyDeleted: true });
+  await expect(schoolService.restoreSchoolEntity(
+    school.schoolId,
+    'classes',
+    classRecord.classId,
+    authority,
+  )).rejects.toThrow('Entity not found');
+});
+
+test('permanent student deletion requires an archived record and exact ID confirmation', async () => {
+  fs.writeFileSync(schoolsFile, JSON.stringify({ schools: [] }, null, 2), 'utf8');
+  const school = await schoolService.createSchool({ name: 'Student Permanent Delete School' });
+  const student = await schoolService.createEntity(school.schoolId, 'students', {
+    fullName: 'Permanent Delete Student',
+    email: 'permanent-delete-student@school.test',
+  });
+  const authority = { roles: ['school_authority'], tenantId: school.schoolId };
+
+  await expect(schoolService.deleteEntity(
+    school.schoolId,
+    'students',
+    student.studentId,
+    { roles: ['teacher'], tenantId: school.schoolId },
+    { permanent: true, confirmation: student.studentId },
+  )).rejects.toThrow('Only School Authority');
+  await expect(schoolService.deleteEntity(
+    school.schoolId,
+    'students',
+    student.studentId,
+    authority,
+    { permanent: true, confirmation: student.studentId },
+  )).rejects.toThrow('Only archived students');
+  await schoolService.deleteEntity(
+    school.schoolId,
+    'students',
+    student.studentId,
+    authority,
+    { confirmation: student.studentId },
+  );
+  await expect(schoolService.deleteEntity(
+    school.schoolId,
+    'students',
+    student.studentId,
+    authority,
+    { permanent: true, confirmation: 'wrong-id' },
+  )).rejects.toThrow('Type the student ID');
+  await expect(schoolService.deleteEntity(
+    school.schoolId,
+    'students',
+    student.studentId,
+    authority,
+    { permanent: true, confirmation: student.studentId },
+  )).resolves.toMatchObject({ studentId: student.studentId });
+  const reloaded = await schoolService.getSchoolBySchoolId(school.schoolId);
+  expect(reloaded.students.some((entry) => entry.studentId === student.studentId)).toBe(false);
 });

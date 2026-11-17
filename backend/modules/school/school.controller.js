@@ -839,8 +839,38 @@ router.put('/:schoolId/entities/:entityType/:entityId', authMiddleware, tenantMi
   try {
     const { schoolId, entityType, entityId } = req.params;
     const updates = req.body || {};
-    const entity = await schoolService.updateEntity(schoolId, entityType, entityId, updates, req.user);
-    if (['students', 'teachers'].includes(entityType)) {
+    const resourceType = entityType === 'classes' ? 'class' : entityType === 'students' ? 'student' : null;
+    let lifecycleAction = null;
+    let entity = null;
+    if (resourceType && ['active', 'archived'].includes(String(updates.status || '').toLowerCase())) {
+      const school = await schoolService.getSchoolBySchoolId(schoolId);
+      const records = entityType === 'classes' ? school?.classes : school?.students;
+      const identityFields = entityType === 'classes'
+        ? ['classId', 'id', 'name']
+        : ['studentId', 'id', 'email', 'username'];
+      const current = (Array.isArray(records) ? records : []).find((record) => identityFields.some((field) => (
+        String(record[field] || '').trim().toLowerCase() === String(entityId).trim().toLowerCase()
+      )));
+      const wasArchived = String(current?.status || '').toLowerCase() === 'archived';
+      const willBeArchived = String(updates.status).toLowerCase() === 'archived';
+      if (current && !wasArchived && willBeArchived) {
+        entity = await schoolService.deleteEntity(schoolId, entityType, entityId, req.user || {}, {
+          confirmation: updates.confirmation,
+        });
+        lifecycleAction = `${resourceType}.archived`;
+      } else if (current && wasArchived && !willBeArchived) {
+        entity = await schoolService.restoreSchoolEntity(schoolId, entityType, entityId, req.user || {});
+        lifecycleAction = `${resourceType}.restored`;
+      }
+    }
+    if (!entity) entity = await schoolService.updateEntity(schoolId, entityType, entityId, updates, req.user);
+    if (lifecycleAction) {
+      await auditSchoolAction(req, {
+        action: lifecycleAction,
+        resourceType,
+        resourceId: entity.classId || entity.studentId || entity.id || entityId,
+      });
+    } else if (['students', 'teachers'].includes(entityType)) {
       await auditSchoolAction(req, { action: `${entityType.slice(0, -1)}.updated`, resourceType: entityType.slice(0, -1), resourceId: entityId });
     } else if (entityType === 'classes') {
       await auditSchoolAction(req, {
@@ -892,7 +922,51 @@ router.put('/:schoolId/entities/students/:studentId/deletion-request', authMiddl
       resourceType: 'student',
       resourceId: result.studentId,
     });
+    if (result.status === 'approved') {
+      await auditSchoolAction(req, {
+        action: 'student.archived',
+        resourceType: 'student',
+        resourceId: result.studentId,
+        metadata: { deletionRequestApproved: true },
+      });
+    }
     return res.json({ status: 'ok', ...result });
+  } catch (err) {
+    return res.status(400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.post('/:schoolId/entities/:entityType/:entityId/restore', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const { schoolId, entityType, entityId } = req.params;
+    const entity = await schoolService.restoreSchoolEntity(schoolId, entityType, entityId, req.user || {});
+    const resourceType = entityType === 'classes' ? 'class' : 'student';
+    await auditSchoolAction(req, {
+      action: `${resourceType}.restored`,
+      resourceType,
+      resourceId: entity.classId || entity.studentId || entity.id || entityId,
+    });
+    return res.json({ status: 'ok', entity });
+  } catch (err) {
+    return res.status(400).json({ status: 'error', message: err.message });
+  }
+});
+
+router.delete('/:schoolId/entities/:entityType/:entityId/permanent', authMiddleware, tenantMiddleware, roleGuard(['school_head', 'school_authority', 'super_admin']), async (req, res) => {
+  try {
+    const { schoolId, entityType, entityId } = req.params;
+    const entity = await schoolService.deleteEntity(schoolId, entityType, entityId, req.user || {}, {
+      confirmation: req.body?.confirmation,
+      permanent: true,
+    });
+    const resourceType = entityType === 'classes' ? 'class' : 'student';
+    await auditSchoolAction(req, {
+      action: `${resourceType}.permanently_deleted`,
+      resourceType,
+      resourceId: entity.classId || entity.studentId || entity.id || entityId,
+      metadata: { permanent: true },
+    });
+    return res.json({ status: 'ok', entity });
   } catch (err) {
     return res.status(400).json({ status: 'error', message: err.message });
   }

@@ -19,6 +19,20 @@ describe('school authority workspace', () => {
     expect(sidebarSource).toContain('Settings');
   });
 
+  it('provides a typed School Authority archive with restore and confirmed permanent-delete actions', () => {
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
+    const dashboardSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js'), 'utf8');
+    const apiSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'api', 'school.js'), 'utf8');
+
+    expect(mainSource).toContain("{ id: 'archive', label: 'Archive', path: '#/school/archive'");
+    expect(mainSource).toContain("if (['archive', 'archives', 'school-archive'].includes(key)) return 'archive';");
+    expect(dashboardSource).toContain('Archived classes and students');
+    expect(dashboardSource).toContain('data-school-archive-action="restore"');
+    expect(dashboardSource).toContain('data-school-archive-action="permanent-delete"');
+    expect(apiSource).toContain('export async function restoreSchoolEntity');
+    expect(apiSource).toContain('export async function permanentlyDeleteSchoolEntity');
+  });
+
   it('renders the full quick-action set on the dashboard overview', () => {
     const dashboardSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js'), 'utf8');
 
@@ -156,6 +170,27 @@ describe('school authority workspace', () => {
     expect(mainSource).toContain('Array.isArray(teacherData.classes)');
     expect(mainSource).toContain('Array.isArray(teacherData.students)');
     expect(apiSource).toContain("message: error.message || 'Network request failed.'");
+  });
+
+  it('supports teacher student photo upload during create and detail edits later', () => {
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
+    const dashboardSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js'), 'utf8');
+    const teacherHandlerStart = mainSource.indexOf('function initializeTeacherWorkspaceHandlers');
+    const createStart = mainSource.indexOf("if (action === 'create-student')", teacherHandlerStart);
+    const createEnd = mainSource.indexOf("if (action === 'create-report-card')", createStart);
+    const createHandler = mainSource.slice(createStart, createEnd);
+    const editStart = mainSource.indexOf("document.querySelectorAll('[data-teacher-student-edit]')", createEnd);
+    const editEnd = mainSource.indexOf('\nfunction parseHash()', editStart);
+    const editHandler = mainSource.slice(editStart, editEnd);
+
+    expect(dashboardSource).toContain('data-teacher-workspace-action="create-student"');
+    expect(createHandler).toContain("type: 'file', accept: 'image/jpeg,image/png,image/gif,image/webp', profileImage: true");
+    expect(createHandler).toContain('uploadCreatedEntityProfilePhoto(formData.profilePhoto');
+    expect(editHandler).toContain("{ name: 'email', label: 'Email', type: 'email'");
+    expect(editHandler).toContain("{ name: 'profilePhoto', label: 'Student photo', type: 'file'");
+    expect(editHandler).toContain("field: 'profilePhotoPath'");
+    expect(editHandler).toContain('parentEmail: values.parentEmail || null');
+    expect(mainSource).toContain("field.profileImage || fileOwner?.field === 'profilePhotoPath'");
   });
 
   it('limits teacher photo URL refreshes and surfaces assignment and lesson load failures', () => {

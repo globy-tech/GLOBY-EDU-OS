@@ -345,6 +345,22 @@ export async function deleteSchoolEntity(token, schoolId, entityType, entityId, 
   return deleteJson(`/api/v1/schools/${encodeURIComponent(schoolId)}/entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`, token, body);
 }
 
+export async function restoreSchoolEntity(token, schoolId, entityType, entityId) {
+  return postJson(
+    `/api/v1/schools/${encodeURIComponent(schoolId)}/entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}/restore`,
+    {},
+    token,
+  );
+}
+
+export async function permanentlyDeleteSchoolEntity(token, schoolId, entityType, entityId, confirmation) {
+  return deleteJson(
+    `/api/v1/schools/${encodeURIComponent(schoolId)}/entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}/permanent`,
+    token,
+    { confirmation },
+  );
+}
+
 export async function requestStudentDeletion(token, schoolId, studentId, reason = '') {
   return postJson(
     `/api/v1/schools/${encodeURIComponent(schoolId)}/entities/students/${encodeURIComponent(studentId)}/deletion-request`,

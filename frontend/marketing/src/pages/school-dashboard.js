@@ -690,6 +690,55 @@ export function SchoolDashboardPage(summary = {}, section = 'overview', sectionD
         </div>
       </div>
     `,
+    archive: `
+      <div class="space-y-6">
+        <div class="rounded-4xl border border-slate-200 bg-white p-6 shadow-sm">
+          <p class="text-sm uppercase tracking-[0.3em] text-slate-500">School Archive</p>
+          <h2 class="mt-2 text-2xl font-semibold text-slate-900">Archived classes and students</h2>
+          <p class="mt-2 text-sm text-slate-600">Restore records when needed. Permanent deletion is irreversible and is blocked when class history or student, staff, or academic records still refer to the class.</p>
+        </div>
+        <div class="rounded-4xl border border-slate-200 bg-slate-50 p-6 shadow-sm">
+          ${(() => {
+            const archivedStudents = students
+              .filter((record) => String(record.status || '').toLowerCase() === 'archived')
+              .map((record) => ({
+                type: 'students',
+                label: record.fullName || record.name || record.studentId || record.email || 'Student',
+                identifier: record.studentId || record.id || record.email || record.username,
+                archivedAt: record.metadata?.archivedAt,
+              }));
+            const archivedClasses = classes
+              .filter((record) => String(record.status || '').toLowerCase() === 'archived')
+              .map((record) => ({
+                type: 'classes',
+                label: record.name || record.className || record.classId || 'Class',
+                identifier: record.classId || record.id,
+                archivedAt: record.archivedAt,
+              }));
+            const records = [...archivedStudents, ...archivedClasses].filter((record) => record.identifier);
+            if (!records.length) {
+              return '<p class="rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-600">There are no archived classes or students.</p>';
+            }
+            return `<div class="max-w-full overflow-x-auto" role="region" aria-label="Archived school records" tabindex="0">
+              <table class="min-w-full divide-y divide-slate-200 text-sm text-slate-700">
+                <thead class="bg-slate-100"><tr><th class="px-4 py-3 text-left">Record</th><th class="px-4 py-3 text-left">Type</th><th class="px-4 py-3 text-left">Archived</th><th class="px-4 py-3 text-left">Actions</th></tr></thead>
+                <tbody class="divide-y divide-slate-200 bg-white">
+                  ${records.map((record) => `<tr>
+                    <td class="px-4 py-4 font-semibold text-slate-900">${escapeHtml(record.label)}<span class="block text-xs font-normal text-slate-500">${escapeHtml(record.identifier)}</span></td>
+                    <td class="px-4 py-4">${record.type === 'classes' ? 'Class' : 'Student'}</td>
+                    <td class="px-4 py-4">${escapeHtml(record.archivedAt ? String(record.archivedAt).slice(0, 10) : '—')}</td>
+                    <td class="px-4 py-4"><div class="flex flex-wrap gap-2">
+                      <button type="button" data-school-archive-action="restore" data-school-archive-type="${record.type}" data-school-archive-id="${escapeHtml(record.identifier)}" class="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">Restore</button>
+                      <button type="button" data-school-archive-action="permanent-delete" data-school-archive-type="${record.type}" data-school-archive-id="${escapeHtml(record.identifier)}" data-school-archive-label="${escapeHtml(record.label)}" class="rounded-full border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">Delete permanently</button>
+                    </div></td>
+                  </tr>`).join('')}
+                </tbody>
+              </table>
+            </div>`;
+          })()}
+        </div>
+      </div>
+    `,
     admissions: `
       <div class="space-y-6">
         ${sectionData.schoolDataLoadError ? `<div class="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800" role="alert">${escapeHtml(sectionData.schoolDataLoadError)}</div>` : ''}

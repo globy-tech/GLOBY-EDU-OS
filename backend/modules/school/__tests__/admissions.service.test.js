@@ -125,6 +125,21 @@ describe('admission application and enrollment workflow', () => {
     expect(loadSchoolData().find((school) => school.schoolId === SCHOOL_ID).enrollments).toHaveLength(1);
   });
 
+  test('resolves an existing academic-year label to its canonical school year ID', async () => {
+    const admission = await admissionsService.createAdmission(SCHOOL_ID, applicationPayload({
+      preferredAcademicYearId: academicYear.label,
+    }), authority);
+    const result = await admissionsService.decideAdmission(SCHOOL_ID, admission.applicationId, {
+      decision: 'approved',
+      classId: classRecord.classId,
+      academicYearId: academicYear.label,
+    }, authority);
+
+    expect(result.admission.academicYearId).toBe(academicYear.id);
+    expect(loadSchoolData().find((school) => school.schoolId === SCHOOL_ID).enrollments)
+      .toEqual([expect.objectContaining({ academicYearId: academicYear.id })]);
+  });
+
   test('rejects duplicate applications and does not enroll rejected applicants', async () => {
     const admission = await admissionsService.createAdmission(SCHOOL_ID, applicationPayload(), authority);
     await expect(admissionsService.createAdmission(SCHOOL_ID, applicationPayload(), authority))
@@ -160,11 +175,27 @@ describe('admission application and enrollment workflow', () => {
   });
 
   test('requires valid placement and links a matching existing student instead of duplicating the roster', async () => {
-    const admission = await admissionsService.createAdmission(SCHOOL_ID, applicationPayload(), authority);
+    const admission = await admissionsService.createAdmission(SCHOOL_ID, applicationPayload({
+      preferredAcademicYearId: '',
+    }), authority);
+    await expect(admissionsService.decideAdmission(SCHOOL_ID, admission.applicationId, {
+      decision: 'approved',
+      classId: classRecord.classId,
+    }, authority)).rejects.toThrow('A class and academic year are required for enrollment.');
     await expect(admissionsService.decideAdmission(SCHOOL_ID, admission.applicationId, {
       decision: 'approved',
       classId: classRecord.classId,
       academicYearId: 'missing-year',
+    }, authority)).rejects.toThrow('Academic year does not belong to this school');
+    const otherAuthority = { ...authority, tenantId: OTHER_SCHOOL_ID, schoolId: OTHER_SCHOOL_ID };
+    const otherYear = await schoolService.createEntity(OTHER_SCHOOL_ID, 'academicYears', {
+      label: '2026/2027',
+      status: 'active',
+    }, otherAuthority);
+    await expect(admissionsService.decideAdmission(SCHOOL_ID, admission.applicationId, {
+      decision: 'approved',
+      classId: classRecord.classId,
+      academicYearId: otherYear.id,
     }, authority)).rejects.toThrow('Academic year does not belong to this school');
     const existing = await schoolService.createEntity(SCHOOL_ID, 'students', {
       studentId: 'STD-EXISTING-1',
