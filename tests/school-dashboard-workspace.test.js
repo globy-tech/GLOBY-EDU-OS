@@ -33,6 +33,17 @@ describe('school authority workspace', () => {
     expect(apiSource).toContain('export async function permanentlyDeleteSchoolEntity');
   });
 
+  it('resolves a missing student photo ID only through the teacher-visible class roster', () => {
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'main.js'), 'utf8');
+    const photoHelper = mainSource.match(/async function uploadCreatedEntityProfilePhoto[\s\S]*?(?=\nasync function uploadAdmissionProfilePhoto)/)?.[0] || '';
+
+    expect(photoHelper).toContain("fetchSchoolEntities(token, schoolId, 'students'");
+    expect(photoHelper).toMatch(/!assignedClassId \|\| String\(student\.classId \|\| ''\)\.trim\(\)\.toLowerCase\(\) === assignedClassId/);
+    expect(photoHelper).toContain('resolvedStudents.size !== 1');
+    expect(photoHelper).toContain('id: identifier');
+    expect(mainSource).toContain("uploadCreatedEntityProfilePhoto(formData.profilePhoto, 'students', createdStudent, token, schoolId, formData.classId)");
+  });
+
   it('renders the full quick-action set on the dashboard overview', () => {
     const dashboardSource = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'marketing', 'src', 'pages', 'school-dashboard.js'), 'utf8');
 

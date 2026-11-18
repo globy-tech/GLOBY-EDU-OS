@@ -2424,13 +2424,52 @@ async function uploadTenantAsset(file, prefix = 'assets', includePath = false, o
   return includePath ? { url: signedUrlData.url, path: uploadData.path } : signedUrlData.url;
 }
 
-async function uploadCreatedEntityProfilePhoto(file, entityType, entity, token, schoolId) {
+async function uploadCreatedEntityProfilePhoto(file, entityType, entity, token, schoolId, expectedClassId = '') {
   if (!file || typeof file.arrayBuffer !== 'function') return;
   const validationError = validateProfileImageUpload(file);
   if (validationError) throw new Error(validationError);
   const isStudent = entityType === 'students';
   const ownerType = isStudent ? 'student' : 'teacher';
-  const identifier = entity?.[isStudent ? 'studentId' : 'teacherId'] || entity?.id || entity?.username || entity?.email;
+  let identifier = entity?.[isStudent ? 'studentId' : 'teacherId'] || entity?.id || entity?.username || entity?.email;
+  if (isStudent && !entity?.studentId) {
+    const aliases = [...new Set([entity?.id, entity?.username, entity?.email]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean))];
+    if (aliases.length === 0) {
+      throw new Error('The new student was created without an identifier, so its photo cannot be safely attached.');
+    }
+
+    const assignedClassId = String(expectedClassId || entity.classId || '').trim().toLowerCase();
+    const resolvedStudents = new Map();
+    for (const alias of aliases) {
+      const result = await fetchSchoolEntities(token, schoolId, 'students', { search: alias, pageSize: 100 });
+      if (!result.ok || result.data?.status !== 'ok') {
+        throw new Error(result.data?.message || 'The student was created, but its photo owner could not be verified.');
+      }
+      const normalizedAlias = alias.toLowerCase();
+      const matches = (Array.isArray(result.data.items) ? result.data.items : []).filter((student) => {
+        const studentAliases = [student.studentId, student.id, student.username, student.email]
+          .map((value) => String(value || '').trim().toLowerCase());
+        return studentAliases.includes(normalizedAlias)
+          && (!assignedClassId || String(student.classId || '').trim().toLowerCase() === assignedClassId);
+      });
+      if (matches.length > 1) {
+        throw new Error('The student was created, but the school could not confirm one authorized student ID for the photo.');
+      }
+      const student = matches[0];
+      if (student) {
+        const studentId = String(student.studentId || '').trim();
+        const recordIdentity = [student.id, studentId, student.username, student.email]
+          .map((value) => String(value || '').trim().toLowerCase())
+          .join('|');
+        if (studentId) resolvedStudents.set(recordIdentity, studentId);
+      }
+    }
+    if (resolvedStudents.size !== 1) {
+      throw new Error('The student was created, but the school could not confirm one authorized student ID for the photo.');
+    }
+    identifier = resolvedStudents.values().next().value;
+  }
   if (!identifier) throw new Error('The new record was created without an identifier, so its photo cannot be safely attached.');
   const uploadedPhoto = await uploadTenantAsset(file, isStudent ? 'student-profile' : 'teacher-profile', true, {
     type: ownerType,
@@ -6476,7 +6515,7 @@ function initializeTeacherWorkspaceHandlers(teacherData = {}) {
         if (!formData) return;
         const createdStudent = createResponse.data.entity || {};
         try {
-          await uploadCreatedEntityProfilePhoto(formData.profilePhoto, 'students', createdStudent, token, schoolId);
+          await uploadCreatedEntityProfilePhoto(formData.profilePhoto, 'students', createdStudent, token, schoolId, formData.classId);
         } catch (error) {
           alert(error.message || 'Student created, but the profile photo could not be saved.');
           return;

@@ -8,7 +8,9 @@ jest.mock('../../../config/prisma.client', () => ({
   },
   user: {
     findFirst: jest.fn(),
+    findUnique: jest.fn(),
     findMany: jest.fn(),
+    create: jest.fn(),
     update: jest.fn(),
   },
   role: { upsert: jest.fn() },
@@ -21,10 +23,21 @@ jest.mock('../../../firebase.core', () => ({
 jest.mock('../../../firebase.data', () => ({
   isFirebaseDataConfigured: jest.fn(() => false),
 }));
+jest.mock('../../../lib/supabaseClient', () => ({
+  uploadSchoolFile: jest.fn(async () => ({ storage: 'r2', eTag: '"test-upload"' })),
+  deleteSchoolFile: jest.fn(async () => true),
+  createSchoolFileSignedUrl: jest.fn(async () => 'https://files.example.test/student-photo'),
+  isR2Configured: jest.fn(() => true),
+  getR2ConfigurationStatus: jest.fn(() => ({ configured: true, missingVariables: [], invalidVariables: [] })),
+  getSchoolFilePublicUrl: jest.fn(() => null),
+}));
 const prisma = require('../../../config/prisma.client');
+const admissionsService = require('../admissions.service');
 const schoolService = require('../school.service');
 const schoolRouter = require('../school.controller');
 const tenantMiddleware = require('../middleware/tenant.middleware');
+const fileRouter = require('../../../routes/files');
+const storage = require('../../../lib/supabaseClient');
 
 const tenantId = 'db-tenant-roster';
 const schoolId = 'school-roster';
@@ -84,6 +97,7 @@ async function getTeacherSchoolThroughRoute(actor) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  jest.spyOn(admissionsService, 'findAdmissionsByPhotoPath').mockResolvedValue([]);
   prisma.__stub = false;
   tenantRecord = {
     id: tenantId,
@@ -127,12 +141,24 @@ beforeEach(() => {
       (entry.id && entry.id === user.id) || (entry.email && entry.email === user.email)
     ))) || null;
   });
+  prisma.user.findUnique.mockImplementation(async ({ where }) => (
+    tenantRecord.users.find((user) => user.email === where.email) || null
+  ));
   prisma.user.findMany.mockImplementation(async ({ where }) => {
     const roleName = where.roles.some.role.name;
     return tenantRecord.users.filter((user) => (
       user.tenantId === where.tenantId
       && user.roles.some((entry) => entry.role.name === roleName)
     ));
+  });
+  prisma.user.create.mockImplementation(async ({ data }) => {
+    const user = {
+      id: 'db-created-student',
+      ...data,
+      roles: [{ role: { name: 'student' } }],
+    };
+    tenantRecord.users.push(user);
+    return user;
   });
   prisma.user.update.mockImplementation(async ({ where, data }) => {
     const user = tenantRecord.users.find((entry) => entry.id === where.id);
@@ -210,6 +236,61 @@ test('Prisma assigned teacher cannot move a student into another unassigned clas
 
   expect(prisma.user.update).not.toHaveBeenCalled();
   expect(student.metadata).toMatchObject({ classId: 'class-a', className: 'Class A' });
+});
+
+test('Prisma teacher can create a student and upload a photo using its assigned class ID', async () => {
+  tenantRecord.classes[0] = {
+    ...tenantRecord.classes[0],
+    name: 'Shared Class',
+    teacherIds: ['T-A'],
+  };
+  tenantRecord.classes[1] = {
+    ...tenantRecord.classes[1],
+    name: 'Shared Class',
+    teacherIds: ['T-B'],
+  };
+  const actor = teacherActor('db-teacher-a');
+  const student = await schoolService.createEntity(schoolId, 'students', {
+    fullName: 'New Prisma Student',
+    email: 'new-prisma-student@school.test',
+    classId: 'class-a',
+    className: 'Shared Class',
+  }, actor);
+  const uploadRoute = fileRouter.stack.find((entry) => (
+    entry.route?.path === '/upload' && entry.route.methods.post
+  ));
+  if (!uploadRoute) throw new Error('File upload route was not registered.');
+  const handler = uploadRoute.route.stack[uploadRoute.route.stack.length - 1].handle;
+  const response = {
+    status: jest.fn().mockReturnThis(),
+    json: jest.fn().mockReturnThis(),
+  };
+
+  await handler({
+    body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    get: () => 'image/png',
+    query: {
+      filename: 'student-profile/new-prisma-student.png',
+      ownerType: 'student',
+      ownerId: student.studentId,
+      ownerField: 'profilePhotoPath',
+    },
+    tenant: { schoolId },
+    user: actor,
+  }, response);
+
+  expect(response.status).toHaveBeenCalledWith(201);
+  expect(response.json).toHaveBeenCalledWith(expect.objectContaining({
+    status: 'ok',
+    path: 'student-profile/new-prisma-student.png',
+  }));
+  expect(storage.uploadSchoolFile).toHaveBeenCalledWith(
+    `${tenantId}/student-profile/new-prisma-student.png`,
+    expect.any(Buffer),
+    expect.objectContaining({ upsert: false }),
+  );
+  expect(tenantRecord.users.find((user) => user.studentId === student.studentId).metadata)
+    .toMatchObject({ classId: 'class-a', profilePhotoPath: 'student-profile/new-prisma-student.png' });
 });
 
 test('Prisma tenant middleware rejects another school before a class roster request', async () => {

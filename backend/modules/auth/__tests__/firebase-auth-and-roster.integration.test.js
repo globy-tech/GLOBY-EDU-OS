@@ -426,6 +426,61 @@ test('Firebase-authenticated student photo upload checks ownership and persists 
   }
 });
 
+test('Firebase teacher can create a student and upload its photo using the returned student ID', async () => {
+  const port = server.address().port;
+  const teacherLogin = await login(port, accounts[0]);
+  expect(teacherLogin.response.status).toBe(200);
+  storage.uploadSchoolFile.mockClear();
+
+  const previousNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  try {
+    const createResponse = await fetch(`http://127.0.0.1:${port}/api/v1/schools/${SCHOOL_ID}/entities/students`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${teacherLogin.body.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        fullName: 'New Teacher Student',
+        email: 'new-teacher-student@example.test',
+        classId: 'class-a',
+        className: 'Class A',
+      }),
+    });
+    const createBody = await createResponse.json();
+    expect(createResponse.status).toBe(201);
+    expect(createBody.entity.studentId).toBeTruthy();
+
+    const uploadResponse = await fetch(
+      `http://127.0.0.1:${port}/api/v1/files/upload?filename=student-profile/new-teacher-student.png&ownerType=student&ownerId=${encodeURIComponent(createBody.entity.studentId)}&ownerField=profilePhotoPath`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${teacherLogin.body.accessToken}`,
+          'Content-Type': 'image/png',
+        },
+        body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      },
+    );
+    expect(uploadResponse.status).toBe(201);
+    expect(await uploadResponse.json()).toEqual(expect.objectContaining({
+      status: 'ok',
+      path: 'student-profile/new-teacher-student.png',
+    }));
+    expect(storage.uploadSchoolFile).toHaveBeenCalledWith(
+      `${SCHOOL_ID}/student-profile/new-teacher-student.png`,
+      expect.any(Buffer),
+      expect.objectContaining({ upsert: false }),
+    );
+    expect(collectionRecords('students').get(`${SCHOOL_ID}:${createBody.entity.studentId}`).profilePhotoPath)
+      .toBe('student-profile/new-teacher-student.png');
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+  }
+});
+
 test('teacher login with another valid School ID returns a generic authentication error', async () => {
   const { response, body } = await login(server.address().port, accounts[0], OTHER_SCHOOL_ID);
 
