@@ -7,13 +7,14 @@ const path = require('path');
 const fs = require('fs');
 const dotenv = require('dotenv');
 const { createCorsOriginValidator } = require('./config/cors.config');
+const firebaseAdmin = require('./firebase.admin');
 
 // Load backend configuration consistently for both workspace-root and backend launches.
 const isolatedQaMode = String(process.env.GLOBY_QA_MODE || '').trim().toLowerCase() === 'true';
 if (!isolatedQaMode) dotenv.config({ path: path.join(__dirname, '.env') });
 
 require('./config/qa-config').assertIsolatedQaConfiguration(process.env, __dirname);
-require('./firebase.admin').assertFirebaseConfiguration();
+firebaseAdmin.assertFirebaseConfiguration();
 
 const apiRoutes = require('./routes/api');
 
@@ -48,7 +49,8 @@ app.use((req, res, next) => {
   const pathname = req.path;
   res.on('finish', () => {
     const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-    console.log(`[${new Date().toISOString()}] ${req.method} ${pathname} ${res.statusCode} ${durationMs.toFixed(1)}ms`);
+    const requestId = req.platformLoginRequestId ? ` requestId=${req.platformLoginRequestId}` : '';
+    console.log(`[${new Date().toISOString()}] ${req.method} ${pathname} ${res.statusCode} ${durationMs.toFixed(1)}ms${requestId}`);
   });
   next();
 });
@@ -127,8 +129,18 @@ app.get('*', (req, res) => {
 const DEFAULT_PORT = Number(process.env.PORT) || 4000;
 const HOST = process.env.HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
 
+function getSafeBuildRevision() {
+  const revision = String(process.env.RENDER_GIT_COMMIT || '').trim();
+  return /^[a-f0-9]{7,40}$/i.test(revision) ? revision.slice(0, 12) : 'unknown';
+}
+
 function startServer() {
   const server = app.listen(DEFAULT_PORT, HOST, () => {
+    console.info(JSON.stringify({
+      event: 'server.startup_diagnostics',
+      buildRevision: getSafeBuildRevision(),
+      firebaseProjectMatchesConfigured: firebaseAdmin.isActiveFirebaseProjectConfigured(),
+    }));
     console.log(`GlobyEdu OS backend is running on http://${HOST}:${DEFAULT_PORT}`);
   });
 

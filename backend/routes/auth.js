@@ -35,6 +35,50 @@ const {
 const { recordAuditEvent } = require('../modules/audit/audit.service');
 const router = express.Router();
 
+const PLATFORM_LOGIN_DIAGNOSTIC_STAGES = new Set([
+  'firestore_lookup',
+  'account_policy',
+  'password_check',
+  'firebase_identity',
+  'claims',
+  'session',
+  'route_post_login',
+]);
+const PLATFORM_LOGIN_DIAGNOSTIC_CATEGORIES = new Set([
+  'firebase_data_unavailable',
+  'firestore_lookup_failed',
+  'account_rejected',
+  'password_mismatch',
+  'password_check_failed',
+  'firebase_user_missing',
+  'firebase_identity_failed',
+  'firebase_uid_mismatch',
+  'claims_verification_failed',
+  'firebase_account_disabled',
+  'custom_claims_invalid',
+  'password_sync_pending',
+  'session_creation_failed',
+  'route_post_login_failure',
+  'login_failed',
+]);
+
+function logPlatformLoginFailure(req, error) {
+  const diagnostic = error?.platformAdminLoginDiagnostic || {};
+  const stage = PLATFORM_LOGIN_DIAGNOSTIC_STAGES.has(diagnostic.stage)
+    ? diagnostic.stage
+    : 'route_post_login';
+  const category = PLATFORM_LOGIN_DIAGNOSTIC_CATEGORIES.has(diagnostic.category)
+    ? diagnostic.category
+    : 'route_post_login_failure';
+
+  console.warn(JSON.stringify({
+    event: 'auth.platform_login_failed',
+    requestId: req.platformLoginRequestId,
+    stage,
+    category,
+  }));
+}
+
 function setRefreshCookie(res, refreshToken) {
   if (!refreshToken) return;
   const production = isProductionRuntime();
@@ -627,6 +671,7 @@ if (useFallbackAuth) {
   });
 
   router.post('/platform-login', async (req, res) => {
+    req.platformLoginRequestId = crypto.randomUUID();
     const { username, password } = req.body || {};
     if (firebaseData.isFirebaseDataConfigured()) {
       const loginAttemptKey = getLoginAttemptKey({ username, platformAdminMode: true });
@@ -644,7 +689,7 @@ if (useFallbackAuth) {
           action: 'auth.login_succeeded',
           resourceType: 'user',
           resourceId: session.user.id,
-          metadata: { loginType: 'platform', dataStore: 'firebase' },
+          metadata: { loginType: 'platform', dataStore: 'firebase', requestId: req.platformLoginRequestId },
         });
         return res.json({
           status: 'ok',
@@ -656,13 +701,14 @@ if (useFallbackAuth) {
           platformAdmin: true,
         });
       } catch (error) {
+        logPlatformLoginFailure(req, error);
         recordLoginFailure(loginAttemptKey);
         await recordAuditEvent({
           req,
           action: 'auth.login_failed',
           resourceType: 'user',
           success: false,
-          metadata: { loginType: 'platform', dataStore: 'firebase' },
+          metadata: { loginType: 'platform', dataStore: 'firebase', requestId: req.platformLoginRequestId },
         });
         return res.status(401).json({ status: 'error', message: 'Unable to sign in. Please check your details.' });
       }

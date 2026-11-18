@@ -37,6 +37,7 @@ describe('firebase admin ADC configuration', () => {
     delete process.env.FIREBASE_PRIVATE_KEY;
     delete process.env.RENDER_SERVICE_ID;
     delete process.env.GLOBY_QA_MODE;
+    require('firebase-admin/app').getApps.mockReturnValue([]);
     jest.clearAllMocks();
   });
 
@@ -64,6 +65,17 @@ describe('firebase admin ADC configuration', () => {
         credential: { type: 'application-default' },
       })
     );
+  });
+
+  test('reports only whether the active Firebase project matches its configured project', () => {
+    const firebaseAdmin = require('../firebase.admin');
+    const adminLib = require('firebase-admin/app');
+
+    adminLib.getApps.mockReturnValue([{ options: { projectId: 'demo-project' } }]);
+    expect(firebaseAdmin.isActiveFirebaseProjectConfigured()).toBe(true);
+
+    adminLib.getApps.mockReturnValue([{ options: { projectId: 'other-project' } }]);
+    expect(firebaseAdmin.isActiveFirebaseProjectConfigured()).toBe(false);
   });
 
   test('uses the configured service-account credential when its fields are present', () => {

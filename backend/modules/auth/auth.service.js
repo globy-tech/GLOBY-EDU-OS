@@ -338,38 +338,90 @@ async function login(tenantId, identifier, password, options = {}) {
   return createSessionForUser(user);
 }
 
+function createPlatformAdminLoginFailure(stage, category, message = 'Platform administrator login failed.') {
+  const error = new Error(message);
+  Object.defineProperty(error, 'platformAdminLoginDiagnostic', {
+    value: Object.freeze({ stage, category }),
+    enumerable: false,
+  });
+  return error;
+}
+
+function getPlatformAdminLoginFailureCategory(stage, error) {
+  if (stage === 'firebase_identity' && error?.code === 'auth/user-not-found') return 'firebase_user_missing';
+  if (stage === 'session' && error?.message === 'Password update is still being synchronized.') return 'password_sync_pending';
+
+  return {
+    firestore_lookup: 'firestore_lookup_failed',
+    account_policy: 'account_rejected',
+    password_check: 'password_check_failed',
+    firebase_identity: 'firebase_identity_failed',
+    claims: 'claims_verification_failed',
+    session: 'session_creation_failed',
+  }[stage] || 'login_failed';
+}
+
 async function loginPlatformAdmin(identifier, password) {
-  if (!firebaseData.isFirebaseDataConfigured()) throw new Error('Firebase platform login is not configured.');
-  const email = String(identifier || '').trim().toLowerCase();
-  const user = await findUserByEmail(email);
-  if (!user || user.status !== 'active' || user.isVerified !== true || user.platformAdmin !== true ||
-      !normalizeRoles(user).includes('super_admin') || user.tenantId || user.schoolId ||
-      !(await bcrypt.compare(String(password || ''), user.passwordHash || ''))) {
-    throw new Error('Invalid credentials');
-  }
+  let stage = 'firestore_lookup';
+  try {
+    if (!firebaseData.isFirebaseDataConfigured()) {
+      throw createPlatformAdminLoginFailure('firestore_lookup', 'firebase_data_unavailable');
+    }
 
-  const firebaseUser = await firebaseAdmin.getUserByEmail(email);
-  const existingFirebaseUid = String(user.firebaseUid || '').trim();
-  if (existingFirebaseUid && existingFirebaseUid !== String(firebaseUser.uid || '').trim()) {
-    throw new Error('Platform administrator identity does not match.');
-  }
+    const email = String(identifier || '').trim().toLowerCase();
+    const user = await findUserByEmail(email);
 
-  if (existingFirebaseUid) {
-    await syncFirebaseClaims(user, existingFirebaseUid, { allowPlatformAdmin: true });
-  }
+    stage = 'account_policy';
+    if (!user || user.status !== 'active' || user.isVerified !== true || user.platformAdmin !== true ||
+        !normalizeRoles(user).includes('super_admin') || user.tenantId || user.schoolId) {
+      throw createPlatformAdminLoginFailure('account_policy', 'account_rejected', 'Invalid credentials');
+    }
 
-  const refreshedUser = existingFirebaseUid && typeof firebaseAdmin.getUser === 'function'
-    ? await firebaseAdmin.getUser(existingFirebaseUid)
-    : firebaseUser;
-  const claims = refreshedUser.customClaims || {};
-  const claimRoles = Array.isArray(claims.roles) ? claims.roles : [];
-  if (refreshedUser.disabled || claims.role !== 'super_admin' || !claimRoles.includes('super_admin') || claims.platformAdmin !== true) {
-    throw new Error('Platform administrator claims are not valid.');
-  }
+    stage = 'password_check';
+    if (!(await bcrypt.compare(String(password || ''), user.passwordHash || ''))) {
+      throw createPlatformAdminLoginFailure('password_check', 'password_mismatch', 'Invalid credentials');
+    }
 
-  user.roles = ['super_admin'];
-  user.platformAdmin = true;
-  return createSessionForUser(user);
+    stage = 'firebase_identity';
+    const firebaseUser = await firebaseAdmin.getUserByEmail(email);
+    const existingFirebaseUid = String(user.firebaseUid || '').trim();
+    if (existingFirebaseUid && existingFirebaseUid !== String(firebaseUser.uid || '').trim()) {
+      throw createPlatformAdminLoginFailure(
+        'firebase_identity',
+        'firebase_uid_mismatch',
+        'Platform administrator identity does not match.',
+      );
+    }
+
+    stage = 'claims';
+    if (existingFirebaseUid) {
+      await syncFirebaseClaims(user, existingFirebaseUid, { allowPlatformAdmin: true });
+    }
+
+    const refreshedUser = existingFirebaseUid && typeof firebaseAdmin.getUser === 'function'
+      ? await firebaseAdmin.getUser(existingFirebaseUid)
+      : firebaseUser;
+    const claims = refreshedUser.customClaims || {};
+    const claimRoles = Array.isArray(claims.roles) ? claims.roles : [];
+    if (refreshedUser.disabled) {
+      throw createPlatformAdminLoginFailure('claims', 'firebase_account_disabled', 'Platform administrator claims are not valid.');
+    }
+    if (claims.role !== 'super_admin' || !claimRoles.includes('super_admin') || claims.platformAdmin !== true) {
+      throw createPlatformAdminLoginFailure('claims', 'custom_claims_invalid', 'Platform administrator claims are not valid.');
+    }
+
+    user.roles = ['super_admin'];
+    user.platformAdmin = true;
+    stage = 'session';
+    return await createSessionForUser(user);
+  } catch (error) {
+    if (error?.platformAdminLoginDiagnostic) throw error;
+
+    throw createPlatformAdminLoginFailure(
+      stage,
+      getPlatformAdminLoginFailureCategory(stage, error),
+    );
+  }
 }
 
 async function loginWithFirebaseIdToken(idToken, tenantId, options = {}) {

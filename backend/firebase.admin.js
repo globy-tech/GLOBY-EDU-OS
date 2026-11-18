@@ -9,6 +9,13 @@ function getProjectId() {
   return String(process.env.FIREBASE_PROJECT_ID || process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || '').trim();
 }
 
+function isActiveFirebaseProjectConfigured() {
+  const configuredProjectId = getProjectId() || (process.env.NODE_ENV !== 'production' ? DEFAULT_PROJECT_ID : '');
+  if (!configuredProjectId) return false;
+  const activeProjectId = String(getApps()[0]?.options?.projectId || configuredProjectId).trim();
+  return activeProjectId === configuredProjectId;
+}
+
 function getFirebaseConfigurationStatus() {
   const projectId = getProjectId();
   const clientEmail = String(process.env.FIREBASE_CLIENT_EMAIL || '').trim();
@@ -159,6 +166,7 @@ async function generatePasswordResetLink(email, actionCodeSettings) {
 
 module.exports = {
   isFirebaseConfigured,
+  isActiveFirebaseProjectConfigured,
   getFirebaseConfigurationStatus,
   assertFirebaseConfiguration,
   initializeFirebaseAdmin,
