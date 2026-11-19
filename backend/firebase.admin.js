@@ -9,11 +9,32 @@ function getProjectId() {
   return String(process.env.FIREBASE_PROJECT_ID || process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || '').trim();
 }
 
+function getConfiguredProjectId() {
+  return getProjectId() || (process.env.NODE_ENV !== 'production' ? DEFAULT_PROJECT_ID : '');
+}
+
 function isActiveFirebaseProjectConfigured() {
-  const configuredProjectId = getProjectId() || (process.env.NODE_ENV !== 'production' ? DEFAULT_PROJECT_ID : '');
+  const configuredProjectId = getConfiguredProjectId();
   if (!configuredProjectId) return false;
   const activeProjectId = String(getApps()[0]?.options?.projectId || configuredProjectId).trim();
   return activeProjectId === configuredProjectId;
+}
+
+function assertFirebaseAdminProject(app) {
+  const configuredProjectId = getConfiguredProjectId();
+  const activeProjectId = String(app?.options?.projectId || '').trim();
+
+  if (!configuredProjectId) {
+    throw new Error('Firebase project ID is not configured.');
+  }
+  if (!activeProjectId) {
+    throw new Error('Firebase Admin app project ID is missing.');
+  }
+  if (activeProjectId !== configuredProjectId) {
+    throw new Error('Firebase Admin app project does not match configured Firebase project.');
+  }
+
+  return app;
 }
 
 function getFirebaseConfigurationStatus() {
@@ -94,14 +115,15 @@ function getFirebaseCredential() {
 function initializeFirebaseAdmin() {
   assertFirebaseAdminEnabled();
   const apps = getApps();
-  if (apps.length > 0) return apps[0];
+  if (apps.length > 0) return assertFirebaseAdminProject(apps[0]);
 
   const credential = getFirebaseCredential();
-  const projectId = getProjectId() || (process.env.NODE_ENV !== 'production' ? DEFAULT_PROJECT_ID : '');
-  return initializeApp({
+  const projectId = getConfiguredProjectId();
+  const app = initializeApp({
     ...(projectId ? { projectId } : {}),
     ...(credential ? { credential } : {}),
   });
+  return assertFirebaseAdminProject(app);
 }
 
 function getFirebaseAdmin() {

@@ -168,18 +168,32 @@ async function createSessionForUser(user) {
   return { accessToken, refreshToken, user };
 }
 
-async function findUserByEmail(email) {
+async function findUserByEmail(email, options = {}) {
+  const includeMatchCount = options?.includeMatchCount === true;
   if (firebaseData.isFirebaseDataConfigured()) {
     const normalized = String(email || '').trim().toLowerCase();
-    if (!normalized) return null;
-    const snapshot = await firebaseData.getFirestore().collection('users').where('email', '==', normalized).limit(1).get();
-    if (snapshot.empty) return null;
+    if (!normalized) {
+      return includeMatchCount ? { user: null, matchingEmailDocuments: 0 } : null;
+    }
+    const snapshot = await firebaseData.getFirestore()
+      .collection('users')
+      .where('email', '==', normalized)
+      .limit(includeMatchCount ? 2 : 1)
+      .get();
     const doc = snapshot.docs[0];
-    return { id: doc.id, ...doc.data() };
+    const user = doc ? { id: doc.id, ...doc.data() } : null;
+    return includeMatchCount
+      ? { user, matchingEmailDocuments: Math.min(snapshot.docs.length, 2) }
+      : user;
   }
 
-  if (!prisma || prisma.__stub) return null;
-  return prisma.user.findUnique({ where: { email } });
+  if (!prisma || prisma.__stub) {
+    return includeMatchCount ? { user: null, matchingEmailDocuments: 0 } : null;
+  }
+  const user = await prisma.user.findUnique({ where: { email } });
+  return includeMatchCount
+    ? { user, matchingEmailDocuments: user ? 1 : 0 }
+    : user;
 }
 
 async function findTenantBySchoolId(tenantId) {
@@ -338,10 +352,19 @@ async function login(tenantId, identifier, password, options = {}) {
   return createSessionForUser(user);
 }
 
-function createPlatformAdminLoginFailure(stage, category, message = 'Platform administrator login failed.') {
+function createPlatformAdminLoginFailure(
+  stage,
+  category,
+  message = 'Platform administrator login failed.',
+  accountPolicy,
+) {
   const error = new Error(message);
+  const diagnostic = { stage, category };
+  if (stage === 'account_policy' && accountPolicy) {
+    diagnostic.accountPolicy = Object.freeze({ ...accountPolicy });
+  }
   Object.defineProperty(error, 'platformAdminLoginDiagnostic', {
-    value: Object.freeze({ stage, category }),
+    value: Object.freeze(diagnostic),
     enumerable: false,
   });
   return error;
@@ -369,12 +392,29 @@ async function loginPlatformAdmin(identifier, password) {
     }
 
     const email = String(identifier || '').trim().toLowerCase();
-    const user = await findUserByEmail(email);
-
+    const lookup = await findUserByEmail(email, { includeMatchCount: true });
+    const user = lookup.user;
     stage = 'account_policy';
-    if (!user || user.status !== 'active' || user.isVerified !== true || user.platformAdmin !== true ||
-        !normalizeRoles(user).includes('super_admin') || user.tenantId || user.schoolId) {
-      throw createPlatformAdminLoginFailure('account_policy', 'account_rejected', 'Invalid credentials');
+    const accountPolicy = {
+      userFound: Boolean(user),
+      matchingEmailDocuments: lookup.matchingEmailDocuments,
+      statusActive: user?.status === 'active',
+      isVerified: user?.isVerified === true,
+      platformAdmin: user?.platformAdmin === true,
+      hasSuperAdminRole: normalizeRoles(user || {}).includes('super_admin'),
+      tenantIdEmpty: !user?.tenantId,
+      schoolIdEmpty: !user?.schoolId,
+    };
+
+    if (!accountPolicy.userFound || !accountPolicy.statusActive || !accountPolicy.isVerified ||
+        !accountPolicy.platformAdmin || !accountPolicy.hasSuperAdminRole ||
+        !accountPolicy.tenantIdEmpty || !accountPolicy.schoolIdEmpty) {
+      throw createPlatformAdminLoginFailure(
+        'account_policy',
+        'account_rejected',
+        'Invalid credentials',
+        accountPolicy,
+      );
     }
 
     stage = 'password_check';

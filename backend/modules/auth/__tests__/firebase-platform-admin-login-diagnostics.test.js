@@ -36,13 +36,19 @@ function createFirestore() {
       return {
         where() {
           return {
-            limit() {
+            limit(maximumMatches) {
+              mockState.lookupLimit = maximumMatches;
               return {
                 get: async () => {
                   if (mockState.lookupFailure) throw mockState.lookupFailure;
-                  return mockState.user
-                    ? { empty: false, docs: [{ id: 'synthetic-platform-admin', data: () => ({ ...mockState.user }) }] }
-                    : { empty: true, docs: [] };
+                  const matchingCount = Math.min(mockState.matchingEmailDocuments, maximumMatches);
+                  const docs = mockState.user
+                    ? Array.from({ length: matchingCount }, (_, index) => ({
+                      id: `synthetic-platform-admin-${index}`,
+                      data: () => ({ ...mockState.user }),
+                    }))
+                    : [];
+                  return { empty: docs.length === 0, docs };
                 },
               };
             },
@@ -82,6 +88,8 @@ function resetState() {
     customClaims: { role: 'super_admin', roles: ['super_admin'], platformAdmin: true },
   };
   mockState.passwordMatches = true;
+  mockState.matchingEmailDocuments = 1;
+  mockState.lookupLimit = null;
   mockState.firestoreFailure = null;
   mockState.lookupFailure = null;
   mockState.firebaseLookupFailure = null;
@@ -116,7 +124,87 @@ describe('Firebase platform Super Admin login diagnostics', () => {
   test('labels account policy rejections', async () => {
     mockState.user.isVerified = false;
 
-    await expectLoginDiagnostic('account_policy', 'account_rejected');
+    let error;
+    try {
+      await authService.loginPlatformAdmin('synthetic-admin@example.test', 'synthetic-password');
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toMatchObject({
+      platformAdminLoginDiagnostic: {
+        stage: 'account_policy',
+        category: 'account_rejected',
+        accountPolicy: {
+          userFound: true,
+          matchingEmailDocuments: 1,
+          statusActive: true,
+          isVerified: false,
+          platformAdmin: true,
+          hasSuperAdminRole: true,
+          tenantIdEmpty: true,
+          schoolIdEmpty: true,
+        },
+      },
+    });
+    expect(mockState.lookupLimit).toBe(2);
+  });
+
+  test('records safe policy booleans and caps matching email documents at two', async () => {
+    mockState.user.isVerified = false;
+    mockState.user.roles = ['teacher'];
+    mockState.user.schoolId = 'synthetic-school';
+    mockState.matchingEmailDocuments = 4;
+
+    let error;
+    try {
+      await authService.loginPlatformAdmin('synthetic-admin@example.test', 'synthetic-password');
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error.platformAdminLoginDiagnostic).toEqual({
+      stage: 'account_policy',
+      category: 'account_rejected',
+      accountPolicy: {
+        userFound: true,
+        matchingEmailDocuments: 2,
+        statusActive: true,
+        isVerified: false,
+        platformAdmin: true,
+        hasSuperAdminRole: false,
+        tenantIdEmpty: true,
+        schoolIdEmpty: false,
+      },
+    });
+    expect(mockState.lookupLimit).toBe(2);
+    expect(JSON.stringify(error.platformAdminLoginDiagnostic)).not.toContain('synthetic-admin@example.test');
+    expect(JSON.stringify(error.platformAdminLoginDiagnostic)).not.toContain('synthetic-firebase-uid');
+    expect(JSON.stringify(error.platformAdminLoginDiagnostic)).not.toContain('synthetic-hash');
+  });
+
+  test('records a missing user and zero matching email documents', async () => {
+    mockState.user = null;
+    mockState.matchingEmailDocuments = 0;
+
+    let error;
+    try {
+      await authService.loginPlatformAdmin('synthetic-admin@example.test', 'synthetic-password');
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error.platformAdminLoginDiagnostic.accountPolicy).toEqual({
+      userFound: false,
+      matchingEmailDocuments: 0,
+      statusActive: false,
+      isVerified: false,
+      platformAdmin: false,
+      hasSuperAdminRole: false,
+      tenantIdEmpty: true,
+      schoolIdEmpty: true,
+    });
+    expect(mockState.lookupLimit).toBe(2);
   });
 
   test('labels a missing Firebase account', async () => {

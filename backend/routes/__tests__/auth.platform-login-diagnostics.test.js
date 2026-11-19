@@ -57,9 +57,9 @@ function createResponse(cookie = jest.fn()) {
   return response;
 }
 
-function attachDiagnostic(error, stage, category) {
+function attachDiagnostic(error, stage, category, accountPolicy) {
   Object.defineProperty(error, 'platformAdminLoginDiagnostic', {
-    value: { stage, category },
+    value: { stage, category, ...(accountPolicy ? { accountPolicy } : {}) },
   });
   return error;
 }
@@ -106,6 +106,53 @@ describe('platform Super Admin login diagnostics route', () => {
       sensitiveMarkers.forEach((marker) => expect(loggedText).not.toContain(marker));
       expect(loggedText).not.toContain('Error:');
       expect(loggedText).not.toContain('at ');
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  test('logs only allowlisted account-policy booleans, capped count, stage, and request ID', async () => {
+    const accountPolicy = {
+      userFound: true,
+      matchingEmailDocuments: 9,
+      statusActive: false,
+      isVerified: true,
+      platformAdmin: true,
+      hasSuperAdminRole: false,
+      tenantIdEmpty: true,
+      schoolIdEmpty: false,
+      email: sensitiveMarkers[0],
+      uid: sensitiveMarkers[6],
+      password: sensitiveMarkers[1],
+      passwordHash: sensitiveMarkers[2],
+      token: sensitiveMarkers[4],
+    };
+    const rawError = new Error(sensitiveMarkers.join(' '));
+    mockAuthService.loginPlatformAdmin.mockRejectedValueOnce(
+      attachDiagnostic(rawError, 'account_policy', 'account_rejected', accountPolicy),
+    );
+    const log = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const req = createRequest();
+    const res = createResponse();
+
+    try {
+      await platformLoginHandler(req, res);
+
+      expect(JSON.parse(log.mock.calls[0][0])).toEqual({
+        event: 'auth.platform_login_failed',
+        requestId: req.platformLoginRequestId,
+        stage: 'account_policy',
+        userFound: true,
+        matchingEmailDocuments: 2,
+        statusActive: false,
+        isVerified: true,
+        platformAdmin: true,
+        hasSuperAdminRole: false,
+        tenantIdEmpty: true,
+        schoolIdEmpty: false,
+      });
+      const loggedText = log.mock.calls.map(([entry]) => entry).join('\n');
+      sensitiveMarkers.forEach((marker) => expect(loggedText).not.toContain(marker));
     } finally {
       log.mockRestore();
     }

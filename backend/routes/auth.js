@@ -71,12 +71,34 @@ function logPlatformLoginFailure(req, error) {
     ? diagnostic.category
     : 'route_post_login_failure';
 
-  console.warn(JSON.stringify({
+  const logEntry = {
     event: 'auth.platform_login_failed',
     requestId: req.platformLoginRequestId,
     stage,
-    category,
-  }));
+  };
+
+  if (stage === 'account_policy') {
+    const accountPolicy = diagnostic.accountPolicy;
+    if (accountPolicy && typeof accountPolicy === 'object') {
+      const matchingEmailDocuments = accountPolicy.matchingEmailDocuments;
+      Object.assign(logEntry, {
+        userFound: accountPolicy.userFound === true,
+        matchingEmailDocuments: Number.isInteger(matchingEmailDocuments)
+          ? Math.max(0, Math.min(2, matchingEmailDocuments))
+          : 0,
+        statusActive: accountPolicy.statusActive === true,
+        isVerified: accountPolicy.isVerified === true,
+        platformAdmin: accountPolicy.platformAdmin === true,
+        hasSuperAdminRole: accountPolicy.hasSuperAdminRole === true,
+        tenantIdEmpty: accountPolicy.tenantIdEmpty === true,
+        schoolIdEmpty: accountPolicy.schoolIdEmpty === true,
+      });
+    }
+  } else {
+    logEntry.category = category;
+  }
+
+  console.warn(JSON.stringify(logEntry));
 }
 
 function setRefreshCookie(res, refreshToken) {
