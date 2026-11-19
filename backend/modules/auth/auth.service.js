@@ -196,6 +196,17 @@ async function findUserByEmail(email, options = {}) {
     : user;
 }
 
+async function findUsersByEmail(email) {
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized) return [];
+
+  const snapshot = await firebaseData.getFirestore()
+    .collection('users')
+    .where('email', '==', normalized)
+    .get();
+  return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+}
+
 async function findTenantBySchoolId(tenantId) {
   if (firebaseData.isFirebaseDataConfigured()) {
     return firebaseCore.getTenant(tenantId);
@@ -392,12 +403,37 @@ async function loginPlatformAdmin(identifier, password) {
     }
 
     const email = String(identifier || '').trim().toLowerCase();
-    const lookup = await findUserByEmail(email, { includeMatchCount: true });
-    const user = lookup.user;
+    const users = await findUsersByEmail(email);
+    let firebaseUser = null;
+    let verifiedFirebaseUid = '';
+    if (email) {
+      stage = 'firebase_identity';
+      firebaseUser = await firebaseAdmin.getUserByEmail(email);
+      verifiedFirebaseUid = String(firebaseUser?.uid || '').trim();
+      if (!verifiedFirebaseUid) {
+        throw createPlatformAdminLoginFailure(
+          'firebase_identity',
+          'firebase_uid_mismatch',
+          'Platform administrator identity does not match.',
+        );
+      }
+    }
+
+    const uidMatches = users.filter((candidate) =>
+      String(candidate.firebaseUid || '').trim() === verifiedFirebaseUid);
+    if (users.length > 0 && uidMatches.length !== 1) {
+      throw createPlatformAdminLoginFailure(
+        'firebase_identity',
+        'firebase_uid_mismatch',
+        'Platform administrator identity does not match.',
+      );
+    }
+
+    const user = uidMatches[0] || null;
     stage = 'account_policy';
     const accountPolicy = {
       userFound: Boolean(user),
-      matchingEmailDocuments: lookup.matchingEmailDocuments,
+      matchingEmailDocuments: Math.min(users.length, 2),
       statusActive: user?.status === 'active',
       isVerified: user?.isVerified === true,
       platformAdmin: user?.platformAdmin === true,
@@ -423,9 +459,8 @@ async function loginPlatformAdmin(identifier, password) {
     }
 
     stage = 'firebase_identity';
-    const firebaseUser = await firebaseAdmin.getUserByEmail(email);
     const existingFirebaseUid = String(user.firebaseUid || '').trim();
-    if (existingFirebaseUid && existingFirebaseUid !== String(firebaseUser.uid || '').trim()) {
+    if (existingFirebaseUid !== verifiedFirebaseUid) {
       throw createPlatformAdminLoginFailure(
         'firebase_identity',
         'firebase_uid_mismatch',

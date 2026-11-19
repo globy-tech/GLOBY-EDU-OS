@@ -35,23 +35,25 @@ function createFirestore() {
     collection(name) {
       return {
         where() {
+          const getSnapshot = async () => {
+            if (mockState.lookupFailure) throw mockState.lookupFailure;
+            const docs = mockState.user
+              ? Array.from({ length: mockState.matchingEmailDocuments }, (_, index) => {
+                const user = mockState.users?.[index] || mockState.user;
+                return {
+                  id: `synthetic-platform-admin-${index}`,
+                  data: () => ({ ...user }),
+                };
+              })
+              : [];
+            return { empty: docs.length === 0, docs };
+          };
           return {
             limit(maximumMatches) {
               mockState.lookupLimit = maximumMatches;
-              return {
-                get: async () => {
-                  if (mockState.lookupFailure) throw mockState.lookupFailure;
-                  const matchingCount = Math.min(mockState.matchingEmailDocuments, maximumMatches);
-                  const docs = mockState.user
-                    ? Array.from({ length: matchingCount }, (_, index) => ({
-                      id: `synthetic-platform-admin-${index}`,
-                      data: () => ({ ...mockState.user }),
-                    }))
-                    : [];
-                  return { empty: docs.length === 0, docs };
-                },
-              };
+              return { get: getSnapshot };
             },
+            get: getSnapshot,
           };
         },
         doc(id) {
@@ -90,6 +92,7 @@ function resetState() {
   mockState.passwordMatches = true;
   mockState.matchingEmailDocuments = 1;
   mockState.lookupLimit = null;
+  mockState.users = [];
   mockState.firestoreFailure = null;
   mockState.lookupFailure = null;
   mockState.firebaseLookupFailure = null;
@@ -147,7 +150,7 @@ describe('Firebase platform Super Admin login diagnostics', () => {
         },
       },
     });
-    expect(mockState.lookupLimit).toBe(2);
+    expect(mockState.lookupLimit).toBeNull();
   });
 
   test('records safe policy booleans and caps matching email documents at two', async () => {
@@ -155,6 +158,13 @@ describe('Firebase platform Super Admin login diagnostics', () => {
     mockState.user.roles = ['teacher'];
     mockState.user.schoolId = 'synthetic-school';
     mockState.matchingEmailDocuments = 4;
+    mockState.users = [
+      { ...mockState.user, firebaseUid: 'synthetic-firebase-uid' },
+      ...Array.from({ length: 3 }, (_, index) => ({
+        ...mockState.user,
+        firebaseUid: `different-synthetic-uid-${index}`,
+      })),
+    ];
 
     let error;
     try {
@@ -177,7 +187,7 @@ describe('Firebase platform Super Admin login diagnostics', () => {
         schoolIdEmpty: false,
       },
     });
-    expect(mockState.lookupLimit).toBe(2);
+    expect(mockState.lookupLimit).toBeNull();
     expect(JSON.stringify(error.platformAdminLoginDiagnostic)).not.toContain('synthetic-admin@example.test');
     expect(JSON.stringify(error.platformAdminLoginDiagnostic)).not.toContain('synthetic-firebase-uid');
     expect(JSON.stringify(error.platformAdminLoginDiagnostic)).not.toContain('synthetic-hash');
@@ -204,7 +214,7 @@ describe('Firebase platform Super Admin login diagnostics', () => {
       tenantIdEmpty: true,
       schoolIdEmpty: true,
     });
-    expect(mockState.lookupLimit).toBe(2);
+    expect(mockState.lookupLimit).toBeNull();
   });
 
   test('labels a missing Firebase account', async () => {
